@@ -60,7 +60,7 @@ gamma=.99、lambda=.95；Critic LR1e-4，原版5 epochs×4 minibatches，MSE拟�
 
 - CPU完整回归80 passed/31.55秒，新6项回归覆盖原式H8 loss与梯度、统计继承/冻结隔离、探索动作一致、可选Critic/GAE、soft termination。
 - 配置矩阵、八组共享奖励/预算、AST、git diff --check通过。未运行新的方向研究或pilot。
-- 实际服务器根目录、源码、PID及首个有效Adam更新将在启动核验后追加，不把WM预热称为Adapter更新。
+- 实际服务器根目录、源码、PID及首个有效Adam更新见下方交付快照，不把WM预热称为Adapter更新。
 - 首次正式启动八组均完成1次Adam后，发现全局TF32破坏SO(3)小差分和QP精化：GPU0保存的2048提案24个证书失败，改回严格FP32重投影全部通过，最大角加速度超量从1.4161降至0.0001588，原容差0.0025未改变。修正正式入口全局TF32并从本组完整checkpoint恢复；未进行WM方向研究或放宽约束。首次失败根目录与checkpoint保留。
 - r1恢复后的非零投影触发PyTorch `torch.func.jacrev` 与非重入检查点的saved_tensor_hooks冲突。现将投影留在检查点外保留原图，Actor与WM/奖励独立检查点；不改变隐式梯度或时域。新增真实SM活跃SO(3)分支回归，含Critic终端的有/无检查点参数梯度一致，7项定向回归4.97秒通过。全部r1完整状态仍保留，后续按本组恢复。
 
@@ -81,3 +81,47 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 \
 /data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python -B -u tools/train_stage2_alternating.py \
   --config 本组配置.yaml --output 新目录 --resume 本组完整checkpoint.pt --visualizer none --deterministic
 ```
+
+## 八卡正式运行交付快照：2026-10-27 22:53:35 北京时间
+
+八个进程、八个tmux会话及GPU compute PID逐一匹配，均已跨过100轮WM-only预热，持续执行真实采集、WM、Adapter及可选Critic更新；当前目录没有failure报告。每卡2048环境，目标各1000次Adapter Adam。以下为实际计数，包含本次实验兼容修复前的1～2次已完成Adam，不包含历史退化Adapter的10563次更新。
+
+|GPU|BPTT|Critic|Seed|PID|Adapter Adam|WM更新|真实训练转移|Torch已分配峰值MiB|当时GPU占用MiB|
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+|0|8|关|42|262724|8|1100|692224|10629|18235|
+|1|8|开|42|263025|8|1100|692224|8393|16181|
+|2|16|关|42|266187|5|1070|677888|10956|16760|
+|3|16|开|42|266228|5|1070|677888|10194|13807|
+|4|32|关|42|266281|5|1070|677888|7362|12927|
+|5|32|开|42|266367|4|1060|671744|7538|14169|
+|6|32|关|43|266619|4|1060|671744|7362|11979|
+|7|32|开|43|266896|4|1060|671744|8342|16765|
+
+GPU瞬时利用率37%～43%。Torch峰值统计不含全部驱动、物理及缓存开销，不能与nvidia-smi瞬时占用混用。`/data0`当时剩余491GB。原`genmo-rolling-20261022_182720`会话保持不变。
+
+当前根目录：`/data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/alternating_20261027_2226_r2`。
+GPU N的独立运行目录为根目录下`gpuN/`，配置为`config_gpuN.yaml`，完整实际命令为`run_gpuN.sh`，日志为`gpuN.log`，tmux为`smalt_20261027_2226_r2_gN`（N=0～7）。`launch_manifest.json`保存所有完整命令；`delivery_runtime.json`保存本表原始状态、进程命令、cwd、GPU及tmux证据。
+
+实际运行GENMO源码快照为`9e59b1e55ab37930ccea0097f0d1402a5100e329`，配套SM为`a0911e4bbbffe96e1d6bc842b29f4b01c2ebe7a6`。运行使用独立detached快照；交付文档后续提交不会热修改运行源码。恢复state中的`source=28d8c00...`是本次实验初始来源，当前运行源码应以`source_genmo`的Git HEAD和启动清单为准。
+
+当前进程的实际启动命令（已经执行，不是待执行计划）：
+
+```bash
+cd /home/user/liwei/bumi-closedloop-worktrees/adapter/GENMO
+/data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python -B tools/launch_stage2_alternating.py \
+  --root /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/alternating_20261027_2226_r2 \
+  --session-prefix smalt_20261027_2226_r2 \
+  --resume-root /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/alternating_20261027_2226_r1
+```
+
+最初八组从零Adapter和同一原预训练WM开始；`alternating_20261027_2226`及`_r1`分别保存上述TF32和检查点兼容故障的完整现场，修复后各自完整恢复，没有借用其他组在线数据或旧退化模型。八组加载后Adapter/WM参数SHA与对应保存值全部一致，三网络/三个优化器、WM/Critic统计、Replay动态字段及Python/NumPy/Torch/CUDA RNG齐全，详见`checkpoint_restore_evidence.json`。Critic关闭组优化器状态为空且没有执行价值优化，开启组每轮执行20次想象λ-return优化。
+
+恢复后物理重新建立episode，旧Replay不跨reset拼接。当前各组`latest_checkpoint.json`明确指向实际已加载的本组完整恢复点，并标记`loaded_full_resume_checkpoint_current_weights_continue_in_memory`；它不声称覆盖随后尚未到50次保存点的内存更新。第50次保存会替换为本目录新完整checkpoint，首次validation评价后才产生best，当前未伪造best。
+
+首次有效Adapter更新的GPU0证据：WM=1010，真实转移647168，参数变化L2=0.007569664，梯度范数0.026902754，128个多歌曲探针Goal RMS变化0.001833993、Actor动作RMS变化0.005618447，探针实际变化比例1。八组首次参数变化均非零，当前恢复后八组均又完成了新的Adam，不能把已有计数的加载当新更新。探索噪声与策略相对零Adapter的动作变化分别记录，避免把0.1探索当学习收益。
+
+原WM统计count=200003584已达到原RunningNorm的max_count=2e8。代码按原版调用真实数据update，因此此次预训练统计保持原版封顶行为；未清空count、改变Actor归一化或擅自调整原SM规则。
+
+最终完整CPU回归81 passed/33.35秒，真实SM权重未skip；活跃SO(3)约束加Critic终端的检查点梯度等价通过。已清理本轮精确测试临时目录，保留正式失败现场与训练证据。本地轻量交付证据：`/home/weili/bumi-closedloop-worktrees/adapter/alternating_20261027_2226_delivery/{initial,recovery1,current}`。
+
+本次没有执行新的WM物理方向诊断或pilot。尚未达到50次更新，因此没有新的固定整歌评价结果，也没有证据宣称真实跟踪改善；后续按50/100/200/400/700/1000自动评价，validation选best，evaluation仅独立报告，效果好坏不作为逐更新门槛。
