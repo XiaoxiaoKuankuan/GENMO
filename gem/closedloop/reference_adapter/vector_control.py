@@ -127,7 +127,15 @@ class VectorControl:
         frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
         p, R, q = self.bank.pose(z['song'][:, None], frames)
         d = torch.cat((z['left'][:, None], z['anchor'][:, None], proposal['residual'], proposal['halo'][:, None]), 1)
-        return reference_kinematics(p, R, q, d, z['heading'])
+        result = reference_kinematics(p, R, q, d, z['heading'])
+        # 前向段导数用于强约束；另记录Actor实际Goal的中心差分速度，不能混称。
+        current, future = proposal['current'], proposal['future']
+        for name in ('qd', 'root_v', 'root_w'):
+            value = torch.cat((getattr(current, name)[:, None], getattr(future, name)), 1)
+            result['goal_'+name] = value
+            derivative = dict(qd='qdd', root_v='root_a', root_w='root_alpha')[name]
+            result['goal_'+derivative] = value.diff(dim=1)/.02
+        return result
 
     def advance(self, z, proposal, state_next):
         frames = z['frame']+1

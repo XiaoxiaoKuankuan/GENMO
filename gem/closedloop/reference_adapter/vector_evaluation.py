@@ -56,9 +56,10 @@ def evaluate_physical(collector, *, zero=False, split='evaluation'):
         slip = float(velocities[contact].mean()) if bool(contact.any()) else 0.
         from .reference_constraints import quantiles
         distributions = {k: quantiles(v[:n, i].norm(dim=-1) if k in
-            ('reference_root_v', 'reference_root_a', 'reference_root_w', 'reference_root_alpha') else v[:n, i])
+            ('reference_root_v', 'reference_root_a', 'reference_root_w', 'reference_root_alpha',
+             'reference_goal_root_v', 'reference_goal_root_a', 'reference_goal_root_w', 'reference_goal_root_alpha') else v[:n, i])
             for k, v in raw_all.items() if k.startswith('reference_') and v.ndim > 2}
-        per_joint = {name: {key: quantiles(raw_all['reference_'+key][:n, i, ..., j]) for key in ('q', 'qd', 'qdd')}
+        per_joint = {name: {key: quantiles(raw_all['reference_'+key][:n, i, ..., j]) for key in ('q', 'qd', 'qdd', 'goal_qd', 'goal_qdd')}
                      for j, name in enumerate(collector.control.bundle.spec.joint_names)}
         # 失败之后的未执行时段只给累计Tracking分母贡献，不伪造执行状态/音乐分数。
         planned_steps = int(bank.ends[song])
@@ -74,6 +75,7 @@ def evaluate_physical(collector, *, zero=False, split='evaluation'):
             planned_steps=planned_steps, fraction_of_song_executed=n/planned_steps,
             full_horizon_tracking=normalized_tracking, reference_distributions=distributions,
             reference_per_joint=per_joint, reference_stat_units='q rad; qd rad/s; qdd rad/s2; root v/a norm m/s,m/s2; root w/alpha norm rad/s,rad/s2',
+            reference_derivative_scheme='plain=forward_segments_including_seam_and_halo; goal_=actual_Actor_central_difference_targets',
             correlation_names=names+['foot_slip'], correlations=corr.cpu().tolist(),
             full_music_complete=not bool(end_failed[i]), physical_failure=bool(end_failed[i]),
             failure_time_s=n*.02 if bool(end_failed[i]) else None,

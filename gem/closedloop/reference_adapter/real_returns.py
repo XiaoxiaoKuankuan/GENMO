@@ -23,14 +23,17 @@ def gae_returns(reward, value, next_value, done, gamma=.99, lam=.95):
 
 
 @torch.no_grad()
-def complete_real_mc(collector, *, split, version, stride=8, repetitions=2, latent_std=0.):
+def complete_real_mc(collector, *, split, version, stride=8, repetitions=2, latent_std=0., start_frames=None):
     bank, control = collector.bank, collector.control
     selected = bank.by_split[split].repeat(repetitions)
     count = len(selected)
     if count > collector.num_envs:
         raise ValueError('MC环境数量不足')
     songs = selected[torch.arange(collector.num_envs, device=bank.device)%count]
-    frames = torch.zeros_like(songs)
+    chosen_frames = torch.zeros_like(selected) if start_frames is None else start_frames.to(selected)
+    if chosen_frames.shape != selected.shape or bool(((chosen_frames < 0) | (chosen_frames >= bank.ends[selected])).any()):
+        raise ValueError('MC复位起点必须逐环境位于真实音乐支持内')
+    frames = chosen_frames[torch.arange(collector.num_envs, device=bank.device)%count]
     # 第一份为固定原始初态，第二份采用真实扰动。不是人为失败标签。
     initial = collector.starting_states(songs, frames, perturb=False)
     if repetitions > 1:
@@ -52,7 +55,7 @@ def complete_real_mc(collector, *, split, version, stride=8, repetitions=2, late
             latent = mean+latent_std*torch.randn_like(mean)
         row = collector.step(auto_reset=True, split=split, perturb=False, latent=latent)
         rewards.append((row['reward'][:count]*active).cpu())
-        valid.append(active.cpu())
+        valid.append(active.cpu().clone())
         failures |= row['failed'][:count] & active
         active &= ~row['done'][:count]
         if len(rewards) % 512 == 0:
@@ -74,8 +77,9 @@ def complete_real_mc(collector, *, split, version, stride=8, repetitions=2, late
     for i, song in enumerate(selected.tolist()):
         metadata.append(dict(task=bank.tasks[song]['id'], song=song, split=split, policy_version=version,
             policy_distribution='latent_gaussian' if latent_std else 'deterministic', latent_std=latent_std,
-            episode_id=int(episodes[i]), start_frame=0, length=int(lengths[i]),
-            failed=bool(failures[i]), full_song=not bool(failures[i]),
+            episode_id=int(episodes[i]), start_frame=int(chosen_frames[i]), length=int(lengths[i]),
+            failed=bool(failures[i]), full_song=not bool(failures[i]) and int(chosen_frames[i]) == 0,
+            complete_reset_segment=True,
             retained_return_from_reset=True, total_reward=float(rewards[:, i].sum()), mc=float(result[0, i])))
     return dataset, metadata
 
@@ -95,5 +99,6 @@ def coverage(dataset, episodes, tasks):
         report['per_song'][tasks[song]['id']] = dict(samples=len(labels), mean=float(labels.mean()),
             std=float(labels.std(unbiased=False)), minimum=float(labels.min()), maximum=float(labels.max()),
             lengths=[e['length'] for e in es], failures=sum(e['failed'] for e in es),
+            start_frames=[e['start_frame'] for e in es],
             complete_full_songs=sum(e['full_song'] for e in es))
     return report

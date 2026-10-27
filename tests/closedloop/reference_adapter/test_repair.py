@@ -208,3 +208,30 @@ def test_parameter_gate_cannot_relax_original_noise_floor_or_use_H1():
         summarize_horizon([good]*8, 8, dict(criteria, direction_noise_floor=1e-7))
     assert not summarize_horizon([dict(good, horizon=1)]*8, 1, criteria)['passed']
     assert not summarize_horizon([good]*7+[dict(good, actual_full_objective_delta=-3e-6)], 8, criteria)['passed']
+
+
+def test_independent_MC_keeps_long_start_and_marks_mid_song_segment():
+    # 合成计数器仅测回报数据合同，不作为物理或Critic质量证据。
+    from types import SimpleNamespace
+    from gem.closedloop.reference_adapter.real_returns import complete_real_mc
+    class CounterCollector:
+        num_envs = 2
+        bank = SimpleNamespace(device='cpu', by_split=dict(train=torch.tensor([0])),
+            ends=torch.tensor([60]), tasks=[dict(id='contract_only')])
+        control = SimpleNamespace(critic_features=lambda z: z['frame'][:, None].float())
+        def starting_states(self, songs, frames, perturb=False):
+            return torch.zeros(len(songs), 55)
+        def reset(self, *, songs, frames, **kwargs):
+            self.state = dict(frame=frames.clone(), episode=torch.arange(len(frames)))
+        def step(self, **kwargs):
+            frame = self.state['frame']+1
+            done = frame >= 60
+            self.state['frame'] = torch.where(done, 0, frame)
+            return dict(reward=torch.ones(2), done=done, failed=torch.zeros(2, dtype=torch.bool))
+    dataset, episodes = complete_real_mc(CounterCollector(), split='train', version=7,
+        repetitions=2, stride=8, start_frames=torch.tensor([0, 20]))
+    assert [e['length'] for e in episodes] == [60, 40]
+    assert [e['full_song'] for e in episodes] == [True, False]
+    assert [e['start_frame'] for e in episodes] == [0, 20]
+    assert all(e['retained_return_from_reset'] for e in episodes)
+    torch.testing.assert_close(dataset['y'][:2], torch.tensor([sum(.99**i for i in range(60)), sum(.99**i for i in range(40))]))

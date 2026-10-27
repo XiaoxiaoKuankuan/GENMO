@@ -63,7 +63,8 @@ def variants():
     rows = [('zero', -1, 'all', 0.)]
     for model in range(2):
         for component, scale in [('all', 1.), ('root', 1.), ('joints', 1.), ('all', .1),
-                                 ('translation', 1.), ('rotation', 1.)]:
+                                 ('translation', 1.), ('rotation', 1.), ('no_root_xy', 1.),
+                                 ('no_root_xy_constrained', 1.)]:
             rows.append((f'model{model}_{component}_{scale:g}', model, component, scale))
     return rows
 
@@ -102,6 +103,8 @@ def collect(args, cfg, engine, tasks, bank):
         if component == 'joints': mask[i, :6] = 0
         if component == 'translation': mask[i, 3:] = 0
         if component == 'rotation': mask[i, :3] = 0; mask[i, 6:] = 0
+        if component in ('no_root_xy', 'no_root_xy_constrained'): mask[i, :2] = 0
+    forced_constraint = torch.tensor([r[2] == 'no_root_xy_constrained' for r in rows], device=bank.device)
     scale = torch.tensor([r[3] for r in rows], device=bank.device)
     model_id = torch.tensor([r[1] for r in rows], device=bank.device)[variant]
     subsets = [(model_id == i).nonzero().flatten() for i in range(2)]
@@ -115,9 +118,11 @@ def collect(args, cfg, engine, tasks, bank):
             residual = residual*mask[variant, None]*scale[variant, None, None]
             raw_residual = residual.clone()
             for model, selected in zip(models, subsets):
-                if model.reference_constraint_beta < 1:
-                    residual[selected] = constrain_plan(residual[selected], z['left'][selected], z['anchor'][selected],
-                                                         model.reference_constraint_beta)
+                beta = model.reference_constraint_beta
+                filtered = selected if beta < 1 else selected[forced_constraint[variant[selected]]]
+                if len(filtered):
+                    residual[filtered] = constrain_plan(residual[filtered], z['left'][filtered], z['anchor'][filtered],
+                                                         beta if beta < 1 else .05)
             current, future, goal, halo = self.reference(z, residual)
             return dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo,
                         action=self.bundle.act(z['history'], goal))
@@ -198,7 +203,8 @@ def collect(args, cfg, engine, tasks, bank):
             distributions = {}
             for key, values in reference_series.items():
                 sample = torch.stack([v[column] for v in values[:n]])
-                if key in ('reference_root_v', 'reference_root_a', 'reference_root_w', 'reference_root_alpha'):
+                if key in ('reference_root_v', 'reference_root_a', 'reference_root_w', 'reference_root_alpha',
+                           'reference_goal_root_v', 'reference_goal_root_a', 'reference_goal_root_w', 'reference_goal_root_alpha'):
                     sample = sample.norm(dim=-1)
                 distributions[key] = quantiles(sample)
             initial_qd = initial[column:column+1, 34:].cpu()
@@ -227,6 +233,7 @@ def collect(args, cfg, engine, tasks, bank):
             write_json(output/(stem+'.json'), metadata)
             reports.append(dict(variant=name, task=task['id'], steps=n, completion=not bool(failed[column]),
                 reference_distributions=distributions,
+                reference_derivative_scheme='plain=forward_segments_including_seam_and_halo; goal_=actual_Actor_central_difference_targets',
                 failure_time_s=n*.02 if bool(failed[column]) else None, mean_tracking=float(raw['track'].mean()),
                 root_position_rmse_m=float(np.sqrt(raw['error_root_pos'].mean())),
                 root_orientation_rmse_rad=float(np.sqrt(raw['error_root_ori'].mean())),

@@ -118,12 +118,18 @@ class VectorBank:
             w = so3_log(rotations[1:]@rotations[:-1].transpose(-1, -2))/.02
             if beta < 1 and float(w.norm(dim=-1).max()*.02)+2*.05*beta >= .5:
                 raise ValueError('名义根旋转不在参考导数上界的证明域内')
+            # frame=0的左姿态被合法钳制为第0点，额外包含这个零速度段的接缝加速度。
+            qdd = torch.cat((torch.zeros_like(qd[:1]), qd)).diff(dim=0)/.02
+            acceleration = torch.cat((torch.zeros_like(v[:1]), v)).diff(dim=0)/.02
+            alpha = torch.cat((torch.zeros_like(w[:1]), w)).diff(dim=0)/.02
+            central_alpha = r.root_w[idx].diff(dim=0)/.02
             nominal = dict(qd_abs_max_per_joint=qd.abs().amax(0).tolist(),
-                qdd_abs_max_per_joint=(qd.diff(dim=0)/.02).abs().amax(0).tolist(),
-                root_speed_max=float(v.norm(dim=-1).max()), root_acceleration_max=float((v.diff(dim=0)/.02).norm(dim=-1).max()),
-                root_angular_speed_max=float(w.norm(dim=-1).max()), root_angular_acceleration_max=float((w.diff(dim=0)/.02).norm(dim=-1).max()))
+                qdd_abs_max_per_joint=qdd.abs().amax(0).tolist(),
+                root_speed_max=float(v.norm(dim=-1).max()), root_acceleration_max=float(acceleration.norm(dim=-1).max()),
+                root_angular_speed_max=float(w.norm(dim=-1).max()),
+                root_angular_acceleration_max=max(float(alpha.norm(dim=-1).max()), float(central_alpha.norm(dim=-1).max())))
             absolute = dict(qd_abs_max_per_joint=(qd.abs().amax(0)+residual_v[6:]).tolist(),
-                qdd_abs_max_per_joint=((qd.diff(dim=0)/.02).abs().amax(0)+residual_a[6:]).tolist(),
+                qdd_abs_max_per_joint=(qdd.abs().amax(0)+residual_a[6:]).tolist(),
                 root_speed_max=nominal['root_speed_max']+float(residual_v[:3].norm()),
                 root_acceleration_max=nominal['root_acceleration_max']+float(residual_a[:3].norm()),
                 root_angular_speed_max=nominal['root_angular_speed_max']+angular_v,
