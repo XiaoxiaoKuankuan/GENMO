@@ -306,6 +306,7 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
     collector.reuse_control_observation = cfg['runtime'].get('reuse_control_observation',False)
     collector.profile_control = cfg['runtime'].get('profile_control',False)
     collector.profile_control_synchronize = cfg['runtime'].get('profile_control_synchronize',False)
+    collector.record_contact_metrics = cfg['evaluation'].get('record_contact_metrics',False)
     reason = "not_started"
     try:
         collector.reset(music, initial)
@@ -370,6 +371,9 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
             "startup_hold_counted_as_dance_gain": False,
             "inference_backend": cfg["runtime"].get("inference_backend","eager"),
             "worker_process":cfg["runtime"].get("worker_process",False),
+            "sm_tracking_mean":{key:sum(row[key] for row in collector.metrics)/len(collector.metrics)
+                for key in collector.metrics[0]} if collector.metrics else {},
+            "real_contact_counts":collector.contact_counts if collector.record_contact_metrics else None,
             "reuse_control_observation":collector.reuse_control_observation,
             "inference_device":cfg["runtime"].get("inference_device",cfg["runtime"]["device"]),
             "control_wall_quantiles_seconds": {f"p{p}":float(torch.tensor(collector.control_wall_seconds).quantile(p/100))
@@ -381,6 +385,14 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
             key:{f'p{p}':float(torch.tensor([t[key] for t in timings]).quantile(p/100)) for p in (50,95,99)}
             for key in ('forecast_seconds','generation_decode_seconds','total_seconds') if timings}
         result['completed_request_count'] = len(timings)
+        if collector.trajectory:
+            measured = torch.cat([record[1] for record in collector.trajectory])[:,13:34]
+            violation = torch.maximum(adapter.runtime.kin.q_lo.cpu()-measured,measured-adapter.runtime.kin.q_hi.cpu())
+            invalid = (violation>1e-4).any(-1)
+            result['measured_hard_limit_diagnostic'] = {'violating_control_steps':int(invalid.sum()),
+                'maximum_violation_rad':max(0.,float(violation.max())), 'tolerance_rad':1e-4,
+                'first_tick':collector.trajectory[int(invalid.nonzero()[0])][0] if bool(invalid.any()) else None}
+            result['complete_song_with_hard_limits'] = result['complete_song'] and not bool(invalid.any())
         result['control_phase_wall_seconds'] = {
             key:{f'p{p}':float(torch.tensor([t[key] for t in collector.control_profiles]).quantile(p/100)) for p in (50,95,99)}
             for key in collector.control_profiles[0]} if collector.control_profiles else {}

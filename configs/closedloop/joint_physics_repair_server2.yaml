@@ -10,7 +10,7 @@ data:
 physics:
   horizon: 32
   start_step: 1000
-  validation_report: /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/certification_interface_H32_profiles/validation.json
+  validation_report: /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/certification_H32_four_source_profiles/validation.json
   lambda_exec: 0.01
   warmup_steps: 2000
 training:

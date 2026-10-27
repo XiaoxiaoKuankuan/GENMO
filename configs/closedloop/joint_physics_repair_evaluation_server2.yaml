@@ -13,3 +13,4 @@ data:
 evaluation:
   split: val
   max_sources: 4
+  record_contact_metrics: true
