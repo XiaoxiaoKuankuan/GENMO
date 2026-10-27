@@ -1,0 +1,15 @@
+# 四来源固定验证集合：只供reconstruction/free_generation/closed_loop评价。
+# 与独立val缓存逐文件相同；data.source_ids在此仅选验证集合，不能用于train入口。
+# 只以首帧初始化连续物理，后续动作仍由完整DDIM20产生，不输入未来GT或实测状态。
+# A/B及不同checkpoint使用同一组来源；实际墙钟与固定交付须另外显式选择。
+base_config: joint_physics_repair_server2.yaml
+data:
+  source_ids:
+    - gLO_sBM_cAll_d13_mLO2_ch02
+    - 0dqp2VUTYEY_02_0_372_dancer_02
+    - '074'
+    - dance_2__一点点
+  sidecar: /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/sidecar_val_4
+evaluation:
+  split: val
+  max_sources: 4
