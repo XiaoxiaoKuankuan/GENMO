@@ -44,6 +44,15 @@ def run_experiment(collector,actor,critic,engine,original,cfg,tasks,output,devic
         'fresh_simulation':False,'reason':'复用逐张量相同初始模型已有8曲完整Newton轨迹；新增episode初态变换在配对初态为恒等'})
     behavior=behavior_config(cfg,actor,engine.adapter);source_info=provenance(cfg)
     task_cursor=0;collector.state=None;failed_episodes=[];evaluation_rows=[]
+    remotes=[];published_version=-1
+    if cfg['execution'].get('physical_worker_gpus'):
+        from .parallel_collection import RemotePhysicalCollector,publish_tensor
+        directory=output/'collectors';directory.mkdir()
+        for i,gpu in enumerate(cfg['execution']['physical_worker_gpus'],1):
+            remote=RemotePhysicalCollector(cfg,config_path,directory/f'worker_{i}',gpu,i)
+            remotes.append(remote)
+        for remote in remotes:remote.wait_ready(engine.adapter.bundle.metadata['sha256'])
+        print(json.dumps({'event':'independent_collectors_ready','pids':[r.process.pid for r in remotes]}),flush=True)
     # 每次完成更新后旧请求不再作为当前Actor的优化样本；实际历史与有效参考照常连续。
     def save(update):
         path=output/'checkpoints'/f'actor_{update:06}.pt'
@@ -62,13 +71,30 @@ def run_experiment(collector,actor,critic,engine,original,cfg,tasks,output,devic
                         'actor_version':collector.actor_version,'terminal':collector.terminal})
                 task=tasks[task_cursor%len(tasks)];task_cursor+=1
                 music,initial=task_inputs(task,collector.adapter,device);collector.reset(music,initial)
+            if remotes:
+                weights=output/'collectors/current_actor.pt'
+                if published_version!=trainer.accepted_actor_updates:
+                    publish_tensor({'schema':'genmo.collection.actor.v1','actor':actor.state_dict(),
+                        'actor_version':trainer.accepted_actor_updates,'frozen_sha256':engine.adapter.bundle.metadata['sha256']},weights)
+                    published_version=trainer.accepted_actor_updates
+                for remote in remotes:
+                    task=None
+                    if remote.needs_task:task=tasks[task_cursor%len(tasks)];task_cursor+=1
+                    remote.submit(weights,trainer.accepted_actor_updates,cfg['training']['collect_decisions'],task)
             collected=collector.collect(cfg['training']['collect_decisions']);intervals.extend(collected)
             available=list(collector.ready_anchors);collector.ready_anchors.clear()
-            # 同一批尽量跨本次真实采集区间；没有伪造高速标签，也不放宽WM支持域。
-            available.sort(key=lambda x:x.state.tick)
-            if len(available)>cfg['training']['actor_microbatch']:
-                indices=torch.linspace(0,len(available)-1,cfg['training']['actor_microbatch']).round().long().tolist()
-                available=[available[i] for i in indices]
+            for remote in remotes:
+                response=remote.receive(engine.adapter,device)
+                if response['actor_version']!=trainer.accepted_actor_updates:raise RuntimeError('独立采集版本不一致')
+                available.extend(response['anchors']);intervals.extend(response['controls'])
+            # 交错不同真实环境和时间位置，先检验每类已有实际样本，不伪造困难动作。
+            by_collector={}
+            for sample in available:by_collector.setdefault(sample.collector_id,[]).append(sample)
+            for values in by_collector.values():values.sort(key=lambda x:x.state.tick)
+            available=[]
+            while any(by_collector.values()):
+                for values in by_collector.values():
+                    if values:available.append(values.pop(len(values)//2))
             for sample in available:
                 if sample.generation.request.actor_version!=trainer.accepted_actor_updates:continue
                 row=describe_sample(sample,engine.adapter)
@@ -78,6 +104,8 @@ def run_experiment(collector,actor,critic,engine,original,cfg,tasks,output,devic
                 except UnsupportedModelState as error:
                     row.update(support='outside',error=str(error),details=getattr(error,'details',None))
                 sampling.append(row)
+                if len(samples)>=cfg['training']['actor_microbatch']:break
+            print(json.dumps({'event':'independent_sampling','actor_version':trainer.accepted_actor_updates,'legal':len(samples),'examined':len(sampling),'task_cursor':task_cursor,'tick':collector.state.tick}),flush=True)
             if len(intervals)>100 and not samples:
                 # 保留失败采集证据并进入下一首；不把静止样本代替失败动作，不更改边界。
                 failed_episodes.append({'task':collector.state.task_id,'end_tick':collector.state.tick,'reason':'100_decisions_no_legal_anchor'})
@@ -107,5 +135,6 @@ def run_experiment(collector,actor,critic,engine,original,cfg,tasks,output,devic
         # 长episode保存全部生成器事件会占用内存，但作为真实诊断证据保留；不清除有效缓存。
         del samples,intervals;gc.collect()
     save(trainer.accepted_actor_updates) if trainer.accepted_actor_updates not in (0,10,25,50) else None
+    for remote in remotes:remote.close()
     write_json(output/'completed.json',{'accepted_updates':trainer.accepted_actor_updates,'attempts':trainer.update_index,
         'evaluations':evaluation_rows,'large_formal_training_started':False,'quality_exit_enabled':False})
