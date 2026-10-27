@@ -29,7 +29,7 @@ physics:
   enabled: true
   prediction_mode: denoised_x0
   backend: isaaclab3_newton_mujoco_warp
-  determinism: full
+  determinism: run_to_run
   horizon: 8
   subbatch: 2
   snr_min: 0.1

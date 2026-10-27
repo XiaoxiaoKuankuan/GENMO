@@ -34,6 +34,8 @@ def read_config(path, overrides=()):
         raise ValueError("固定60帧30Hz、20步DDIM、eta0、CFG2.5")
     if cfg["physics"]["prediction_mode"] != "denoised_x0" or cfg["physics"]["horizon"] not in (8, 16):
         raise ValueError("首版仅同一样本denoised_x0，H8/H16")
+    if cfg["physics"]["backend"] != "isaaclab3_newton_mujoco_warp" or cfg["physics"]["determinism"] not in ("run_to_run", "gpu_to_gpu"):
+        raise ValueError("必须匹配Newton/MuJoCo-Warp及其实际确定性枚举")
     if cfg["stage1"]["model"]["diffusion_steps"] != 1000:
         raise ValueError("完整监督必须保持1000步日程")
     if cfg["execution_loss"]["action_rate_weight"] != 0:
