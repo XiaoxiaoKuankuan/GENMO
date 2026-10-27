@@ -1,18 +1,135 @@
-"""十帧独立提案的因果二阶参考约束，处理已提交锚点、接缝和真实名义halo。
+"""十帧参考的最小距离有限时域投影；不再以低通削弱全部网络提案。
 
-本模块不是网络层：网络仍独立输出10×27个绝对名义残差。执行前用两个一阶
-稳定滤波器的串联限制残差变化率；内部一阶状态由上一已提交的两个锚点精确恢复，
-所以既不修改过去，也不引入额外观测或未来真实状态。每个未来提案都独立参与结果，
-没有端点插值。对界限B、系数beta，残差速度逐分量不超过2B*beta/dt，残差加速度
-不超过4B*beta²/dt²。根旋转在旋转向量球中作凸组合，然后仍以SO(3)复合；报告
-实际SO(3)角速度/角加速度，不能把旋转向量导数冒充角速度。
+输入为270维网络的独立有界提案，以及只读的前一帧/当前已提交残差。对每个通道
+求解严格凸二次规划 min 0.5||d-proposal||²，约束幅值、附加速度、附加加速度，
+包含当前锚点接缝。第11点仍是2*d10-d9，末段速度因此与第10段相等，附加加速度
+为零；名义halo必须来自真实缓存。批处理ADMM定位活跃面，再解十维KKT投影；反向
+使用该活跃面的隐式导数，对提案和历史锚点均保留梯度。没有逐环境Python循环。
 
-第11点仍严格为2*d10-d9，只提供导数：其残差速度等于最后一段，残差加速度为零。
-名义轨迹自身的导数单独计入总参考上界；本模块不声称能修复原名义轨迹的违约。
+根旋转还必须检查复合SO(3)后的真实角速度/角加速度，不能把旋转向量导数冒充它。
+数值不收敛或SO(3)预算不满足时返回明确不可执行证据，调用方不得发送该动作。
+零提案、零已提交历史严格保持零；非零历史下零提案仍须遵守接缝，不承诺数学上
+不可能同时满足的“历史非零但未来无条件全零”。旧beta仅供失败基线对照。
 """
 
 import torch
 from supermimic.rotations import so3_exp, so3_log
+
+
+class _EuclideanProjection(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, proposal, lower, upper, matrix, inverse, iterations):
+        rho = 10.
+        if proposal.is_cuda:
+            from .projection_kernel import solve
+            x, dual = solve(proposal, lower, upper, matrix, inverse, iterations)
+        else:
+            x = proposal
+            ax = x@matrix.T
+            z = ax.clamp(lower, upper)
+            dual = torch.zeros_like(z)
+            for _ in range(iterations):
+                x = (proposal+rho*(z-dual)@matrix)@inverse
+                ax = x@matrix.T
+                z = (ax+dual).clamp(lower, upper)
+                dual = dual+ax-z
+        active = dual.abs() > 2e-5
+        a = matrix*active[..., None]
+        # 使用双精度小矩阵消除冗余活跃约束的秩判定误差；前向控制精度仍由输入决定。
+        gram = a.transpose(-1, -2).double()@a.double()
+        eigen, basis = torch.linalg.eigh(gram)
+        reciprocal = torch.where(eigen > 1e-7, eigen.clamp_min(1e-7).reciprocal(), 0.)
+        pinv = ((basis*reciprocal[..., None, :])@basis.transpose(-1, -2)).to(proposal)
+        boundary = torch.where(dual > 0, upper, lower)
+        rhs = ((proposal@matrix.T-boundary)*active)@matrix
+        polished = proposal-(pinv@rhs[..., None]).squeeze(-1)
+        p_ax = polished@matrix.T
+        violation = torch.maximum(p_ax-upper, lower-p_ax).amax(-1)
+        # 解在活跃面交点上且全约束可行时使用KKT结果，否则保留有证据的ADMM近似解。
+        use_polish = violation <= 2e-5
+        x = torch.where(use_polish[..., None], polished, x)
+        identity = torch.eye(10, device=x.device, dtype=x.dtype)
+        tangent = identity-pinv@(a.transpose(-1, -2)@a)
+        ctx.save_for_backward(tangent, pinv, a, dual > 0)
+        return x
+
+    @staticmethod
+    def backward(ctx, gradient):
+        tangent, pinv, active_matrix, upper_side = ctx.saved_tensors
+        proposal = (tangent@gradient[..., None]).squeeze(-1)
+        boundary = (active_matrix@(pinv@gradient[..., None])).squeeze(-1)
+        return proposal, boundary*(~upper_side), boundary*upper_side, None, None, None
+
+
+class ReferenceProjection(torch.nn.Module):
+    """附加预算为算法候选范围，不是机器人硬件极限；SO(3)须另行实际检查。"""
+    def __init__(self, spec, bounds, *, joint_velocity=1., joint_acceleration=10.,
+                 ankle_velocity=.5, ankle_acceleration=5., height_velocity=.12,
+                 height_acceleration=1.2, rotation_velocity=.3, rotation_acceleration=3.,
+                 iterations=1200, tolerance=1e-6):
+        super().__init__()
+        self.iterations, self.tolerance = iterations, tolerance
+        self.rotation_velocity, self.rotation_acceleration = rotation_velocity, rotation_acceleration
+        # 旋转三个分量分配欧氏球预算；最终角速度始终以SO(3)复合后结果核验。
+        velocity = [.12, .12, height_velocity]+[rotation_velocity/(3**.5)]*3
+        acceleration = [1.2, 1.2, height_acceleration]+[rotation_acceleration/(3**.5)]*3
+        velocity += [ankle_velocity if 'ankle' in j else joint_velocity for j in spec.joint_names]
+        acceleration += [ankle_acceleration if 'ankle' in j else joint_acceleration for j in spec.joint_names]
+        dtype, device = bounds.dtype, bounds.device
+        self.register_buffer('velocity', torch.tensor(velocity, dtype=dtype, device=device))
+        self.register_buffer('acceleration', torch.tensor(acceleration, dtype=dtype, device=device))
+        self.register_buffer('bounds', bounds.detach().clone())
+        eye = torch.eye(10, device=device, dtype=dtype)
+        difference = eye-torch.diag(torch.ones(9, device=device, dtype=dtype), -1)
+        matrix = torch.cat((eye, difference, difference@difference))
+        self.register_buffer('matrix', matrix)
+        self.register_buffer('inverse', torch.linalg.inv(eye+10*matrix.T@matrix))
+
+    def forward(self, proposal, left, anchor):
+        unit = self.velocity*.02
+        y = proposal.transpose(1, 2)/unit[None, :, None]
+        l, c = left/unit, anchor/unit
+        zero = c[..., None]*0
+        v_boundary = torch.cat((c[..., None], zero.expand(-1, -1, 9)), -1)
+        a_boundary = torch.cat(((2*c-l)[..., None], -c[..., None], zero.expand(-1, -1, 8)), -1)
+        boundary = torch.cat((zero.expand(-1, -1, 10), v_boundary, a_boundary), -1)
+        limits = torch.cat(((self.bounds/unit)[:, None].expand(-1, 10),
+            torch.ones_like(self.bounds)[:, None].expand(-1, 10),
+            (self.acceleration*.02/self.velocity)[:, None].expand(-1, 10)), -1)
+        lower, upper = boundary-limits, boundary+limits
+        # 已可行的提案原样通过，零严格为零，未激活约束时输入梯度严格为单位矩阵。
+        feasible = ((y@self.matrix.T >= lower) & (y@self.matrix.T <= upper)).all(-1)
+        indices = (~feasible).flatten().nonzero().flatten()
+        if len(indices) == 0:
+            return proposal
+        flat_y, flat_l, flat_u = y.reshape(-1, 10), lower.reshape(-1, 30), upper.reshape(-1, 30)
+        solved = _EuclideanProjection.apply(flat_y[indices], flat_l[indices], flat_u[indices],
+                                            self.matrix, self.inverse, self.iterations)
+        x = flat_y.index_copy(0, indices, solved).reshape_as(y)
+        projected = (x*unit[None, :, None]).transpose(1, 2)
+        return torch.where(feasible[:, None], proposal, projected)
+
+    def certificate(self, proposal, left, anchor, nominal_rotation):
+        halo = 2*proposal[:, -1:]-proposal[:, -2:-1]
+        d = torch.cat((left[:, None], anchor[:, None], proposal, halo), 1)
+        velocity, acceleration = d.diff(dim=1)/.02, d.diff(dim=1).diff(dim=1)/.02**2
+        excess_v = (velocity.abs()-self.velocity).amax((1, 2))
+        excess_a = (acceleration.abs()-self.acceleration).amax((1, 2))
+        corrected = nominal_rotation@so3_exp(d[..., 3:6])
+        w = so3_log(corrected[:, 1:]@corrected[:, :-1].transpose(-1, -2))/.02
+        nominal_w = so3_log(nominal_rotation[:, 1:]@nominal_rotation[:, :-1].transpose(-1, -2))/.02
+        # 不限制GENMO本身合法速度；限制修正带来的真实世界角速度/角加速度偏离。
+        dw = w-nominal_w
+        excess_w = dw.norm(dim=-1).amax(-1)-self.rotation_velocity
+        excess_alpha = (dw.diff(dim=1)/.02).norm(dim=-1).amax(-1)-self.rotation_acceleration
+        excess_bound = (proposal.abs()-self.bounds).amax((1, 2))
+        # 位移数值容差统一换算到导数，报告原量；不把不收敛解当可执行参考。
+        good = ((excess_v <= self.tolerance/.02) & (excess_a <= self.tolerance/.02**2)
+                & (excess_w <= self.tolerance/.02) & (excess_alpha <= self.tolerance/.02**2)
+                & (excess_bound <= self.tolerance))
+        return dict(feasible=good, velocity_excess=excess_v, acceleration_excess=excess_a,
+            angular_velocity_excess=excess_w, angular_acceleration_excess=excess_alpha,
+            bound_excess=excess_bound)
 
 
 def constrain_plan(proposal, left, anchor, beta):

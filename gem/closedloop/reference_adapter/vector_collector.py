@@ -95,6 +95,10 @@ class VectorCollector:
             torch.cuda.synchronize(self.device)
         t0 = time.perf_counter()
         proposal = self.control.propose(z, zero=zero, residual_offset=residual_offset, action_offset=action_offset, latent=latent)
+        certificate = self.control.constraint_certificate(z, proposal)
+        if certificate is not None and not bool(certificate['feasible'].all()):
+            self.last_constraint_failure = {k: v.detach().cpu() for k, v in certificate.items()}
+            raise RuntimeError('有限时域参考未通过导数/SO(3)可执行性检查；保存现场，禁止发送异常Goal')
         if cuda:
             torch.cuda.synchronize(self.device)
         t1 = time.perf_counter()

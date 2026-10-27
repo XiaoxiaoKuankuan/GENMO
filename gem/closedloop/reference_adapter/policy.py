@@ -37,7 +37,7 @@ class ReferenceAdapter(nn.Module):
         return self.decode(self.net(x).reshape(len(x), 10, 27))
 
     def decode(self, latent):
-        """从270维原始输出构造有界残差；PPO在投影前latent上计算精确概率。"""
+        """从270维原始输出构造有界独立提案，Stage2-A仅由WM+BPTT更新。"""
         d = latent.reshape(-1, 10, 27).tanh() * self.bounds
         if self.disable_root_xy:
             d = torch.cat((d[..., :2]*0, d[..., 2:]), -1)

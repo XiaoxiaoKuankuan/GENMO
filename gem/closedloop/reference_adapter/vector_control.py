@@ -43,6 +43,8 @@ class VectorControl:
         self.detailed_reference = False
         self.soft_imagination_continuation = True
         self.relative_critic_features = False
+        self.projection = None
+        self.precision = None
 
     def initial(self, observed, songs, frames, episodes):
         state, xi = observed['state'], observed['xi']
@@ -115,13 +117,26 @@ class VectorControl:
         if self.adapter.disable_root_xy:
             residual = torch.cat((residual[..., :2]*0, residual[..., 2:]), -1)
         raw_residual = residual
-        if self.constraint_beta < 1:
+        if self.projection is not None:
+            residual = self.projection(residual, z['left'], z['anchor'])
+        elif self.constraint_beta < 1:
             residual = constrain_plan(residual, z['left'], z['anchor'], self.constraint_beta)
         current, future, goal, halo = self.reference(z, residual)
         action = self.bundle.act(z['history'], goal)
         if action_offset is not None:
             action = action+action_offset
-        return dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action)
+        result = dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action)
+        if self.precision is not None:
+            # 对照动作在相同真实/想象状态及同一历史下使用原始Goal；保留其输入梯度。
+            result['zero_action'] = self.bundle.act(z['history'], self.nominal_goal(z)[1])
+        return result
+
+    def constraint_certificate(self, z, proposal):
+        if self.projection is None:
+            return None
+        frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
+        rotation = self.bank.pose(z['song'][:, None], frames)[1]
+        return self.projection.certificate(proposal['residual'], z['left'], z['anchor'], rotation)
 
     def reference_diagnostics(self, z, proposal):
         frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
@@ -159,6 +174,10 @@ class VectorControl:
         velocity_cost = velocity_cost+(proposal['future'].qd-nominal_future.qd).square().mean((1, 2))
         weighted.update(root_non_saturating=-.02*self.root_cost_weight*root_cost,
                         reference_velocity=-.02*self.velocity_cost_weight*velocity_cost)
+        if self.precision is not None:
+            precise_raw, precise_weighted = self.precision(self, z, proposal, state_next, nominal, raw)
+            raw.update(precise_raw)
+            weighted.update(precise_weighted)
         raw = dict(raw, sm=r_sm, music=r_music, **costs, **music_info,
             residual_saturation=(d.abs() >= .98).float().mean((1, 2)),
             halo_max_abs=proposal['halo'].abs().amax(-1), target_qd_max_abs=proposal['future'].qd.abs().amax((1, 2)))

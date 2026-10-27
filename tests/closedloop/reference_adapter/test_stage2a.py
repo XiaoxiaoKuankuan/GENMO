@@ -1,0 +1,92 @@
+"""Stage2-A投影、精度和冻结网络的可复现数值测试；不冒充真实物理方向证据。
+
+比较独立SciPy凸优化解，验证活跃约束隐式导数、历史接缝梯度、零输入严格恒等及
+可行提案保真。使用仓库实际SM checkpoint测试完整Goal570、冻结Actor和原六项；
+精度项检查执行状态梯度及世界根XY平移不泄漏到Adapter。物理Oracle必须另行执行。
+"""
+
+from types import SimpleNamespace
+import numpy as np
+import torch
+from scipy.optimize import minimize, LinearConstraint
+from gem.closedloop.reference_adapter.reference_constraints import ReferenceProjection, constrain_plan
+from gem.closedloop.reference_adapter.precision import PrecisionObjective
+from test_repair import constrained_system
+
+
+def projector(dtype=torch.double):
+    return ReferenceProjection(SimpleNamespace(joint_names=['joint']*21),
+        torch.tensor([.03]*3+[.05]*3+[.1]*21, dtype=dtype), iterations=1200)
+
+
+def test_projection_is_nearest_feasible_plan_and_preserves_unsaturated_proposals():
+    torch.manual_seed(123)
+    p = projector()
+    y = torch.randn(2, 10, 27, dtype=torch.double)*.03
+    z = torch.zeros(2, 27, dtype=torch.double)
+    x = p(y, z, z)
+    target = y[0, :, 6].numpy()
+    limits = np.array([.1]*10+[.02]*10+[.004]*10)
+    answer = minimize(lambda a: .5*((a-target)**2).sum(), target, jac=lambda a: a-target,
+        constraints=LinearConstraint(p.matrix.numpy(), -limits, limits), method='SLSQP',
+        options=dict(ftol=1e-14, maxiter=1000))
+    assert answer.success
+    np.testing.assert_allclose(x[0, :, 6].numpy(), answer.x, atol=2e-6)
+    feasible = y*.0001
+    torch.testing.assert_close(p(feasible, z, z), feasible, rtol=0, atol=1e-20)
+    zero = torch.zeros_like(y, requires_grad=True)
+    result = p(zero, z, z)
+    assert result.count_nonzero() == 0
+    torch.testing.assert_close(torch.autograd.grad(result.sum(), zero)[0], torch.ones_like(y))
+    # 新投影对可执行小提案不抹掉99.75%的首帧响应。
+    old = constrain_plan(feasible, z, z, .05)
+    torch.testing.assert_close(old[:, 0], feasible[:, 0]*.0025)
+
+
+def test_projection_backward_includes_committed_history():
+    torch.manual_seed(19)
+    p = projector()
+    y = (torch.randn(1, 10, 27, dtype=torch.double)*.025).requires_grad_()
+    # 避开数个活跃面恰好相交的不可微点；该处只有广义导数，中央差分不唯一。
+    left = (torch.randn(1, 27, dtype=torch.double)*.0001).requires_grad_()
+    anchor = (left.detach()+torch.randn(1, 27, dtype=torch.double)*.00005).requires_grad_()
+    assert torch.autograd.gradcheck(p, (y, left, anchor), fast_mode=True, atol=3e-4, rtol=3e-3)
+
+
+def test_projection_receding_seam_and_real_halo():
+    torch.manual_seed(4)
+    p = projector()
+    left = torch.zeros(2, 27, dtype=torch.double)
+    anchor = left.clone()
+    for _ in range(20):
+        raw = (torch.rand(2, 10, 27, dtype=torch.double)*2-1)*p.bounds
+        plan = p(raw, left, anchor)
+        d = torch.cat((left[:, None], anchor[:, None], plan, 2*plan[:, -1:]-plan[:, -2:-1]), 1)
+        v = d.diff(dim=1)/.02
+        a = v.diff(dim=1)/.02
+        assert float((v.abs()-p.velocity).max()) < 2e-4
+        assert float((a.abs()-p.acceleration).max()) < .01
+        torch.testing.assert_close(v[:, -1], v[:, -2], atol=1e-12, rtol=0)
+        left, anchor = anchor, plan[:, 0]
+
+
+def test_new_projection_real_SM_zero_identity_and_execution_gradients(system):
+    engine, control, z = constrained_system(system)
+    control.constraint_beta = 1
+    baseline = control.propose(z)
+    control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds, iterations=200)
+    bounded = control.propose(z)
+    for field in ('goal', 'action', 'residual'):
+        torch.testing.assert_close(baseline[field], bounded[field], atol=0, rtol=0)
+    assert control.constraint_certificate(z, bounded)['feasible'].all()
+    control.precision = PrecisionObjective()
+    proposal = control.propose(z)
+    next_state = z['state'].detach().clone().requires_grad_()
+    _, _, raw, terms, *_ = control.advance(z, proposal, next_state)
+    grad, = torch.autograd.grad(sum(v.sum() for k, v in terms.items() if k.startswith('precision_')), next_state)
+    assert torch.isfinite(grad).all() and grad[:, 13:].norm() > 0
+    old = control.runtime.reward(next_state, proposal['action'], z['action'], control.bank.ref(z['song'], z['frame']+1))[0]
+    torch.testing.assert_close(terms['sm'], old, atol=0, rtol=0)
+    shifted = dict(z, state=z['state'].clone())
+    shifted['state'][:, :2] += 10
+    torch.testing.assert_close(control.packed(control.fields(shifted)), control.packed(control.fields(z)), atol=0, rtol=0)
