@@ -147,7 +147,7 @@ class JointTrainer:
             for i, metadata in enumerate(physics_meta):
                 record = sample_record(pbatch,i,k[i],snr[i])
                 record.update(tags=metadata['tags'],music_identity=metadata['music_identity'], stages=['sampled','static_metadata_passed','audited_noise'],
-                              action_origin='frozen_sm_from_student_denoised_x0')
+                              action_origin='not_executed')
                 try:
                     if nonfinite_physics_batch:
                         raise PhysicsRejected('nonfinite_denoised_x0_or_contact' if not bool(finite_physics[i])
@@ -164,6 +164,7 @@ class JointTrainer:
                     if not torch.isfinite(derivative).all() or not bool(derivative.norm()>0):
                         raise PhysicsRejected('zero_or_nonfinite_execution_gradient')
                     result['x0_gradient_norm'] = float(derivative.norm())
+                    record['action_origin'] = 'frozen_sm_from_student_denoised_x0'
                     accepted.append(result)
                     coverage.append(result['coverage'])
                     record['reason'] = 'execution_gradient_completed'

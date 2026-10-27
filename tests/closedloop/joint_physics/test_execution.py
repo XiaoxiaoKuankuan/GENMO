@@ -42,6 +42,12 @@ def test_real_frozen_weights_execution_gradient_and_fd(actor_factory):
         ref, 8, "tensor_fixture_not_newton", {"old_plan_committed_tick": 0, "last_real_tick": 1188, "split": "train", "start_origin": "tensor_fixture_only"})
     prediction = base.endecoder.normalize(batch["target_qpos30"]).detach().requires_grad_()
     logits = torch.zeros(1, 60, 2)
+    with pytest.raises(PhysicsRejected,match='degenerate_or_nonfinite_rotation') as invalid:
+        execute_window(window, prediction*float('nan'), logits, actor, adapter, cfg['execution_loss'],
+                       prediction_origin='gt_interface_only')
+    assert invalid.value.details['action_origin']=='not_executed'
+    assert invalid.value.details['prediction_origin']=='gt_interface_only'
+    assert invalid.value.details['first_reject_tick']==window.request.tick
     # 原夹具是零膝角张量起点，WM下一步负膝角违反硬限位，必须拒绝，不能算学生成功。
     with pytest.raises(PhysicsRejected, match="executed_hard_joint_limit"):
         execute_window(window, prediction, logits, actor, adapter, cfg["execution_loss"])

@@ -109,8 +109,13 @@ class ValidatedSupport:
 def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support=None, transition=None,
                    prediction_origin="student_denoised_x0"):
     window.validate()
-    reference = candidate_reference(window, predicted_x0, logits, actor.stage1.endecoder.codec,
-                                    actor.stage1.endecoder)
+    try:
+        reference = candidate_reference(window, predicted_x0, logits, actor.stage1.endecoder.codec,
+                                        actor.stage1.endecoder)
+    except PhysicsRejected as error:
+        error.details.update(first_reject_tick=window.request.tick, failure_phase='reference_decode',
+                             prediction_origin=prediction_origin, action_origin='not_executed')
+        raise
     enforce = cfg.get("hard_safety", True)
     def hard_joint(q, reason):
         kin = adapter.runtime.kin
@@ -136,6 +141,7 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
     failure_steps = []
     for step in range(window.horizon):
         rejection_tick, phase = z.tick, "reference_and_action"
+        action_computed = False
         try:
             dependency = reference.dependency_support(z.tick)
             mutable = dependency[dependency >= window.ticket.first_mutable_source_tick]
@@ -147,6 +153,7 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             z = adapter.refresh_current_observation(z)
             _, _, goal = z.reference.read_current_future(z.tick)
             action = adapter.bundle.act(z.sm_history, goal)
+            action_computed = True
             if not torch.isfinite(action).all():
                 raise PhysicsRejected("nonfinite_sm_action")
             if support is not None:
@@ -172,10 +179,13 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
                         raise PhysicsRejected("sm_physical_termination")
         except PhysicsRejected as error:
             error.details.update(first_reject_tick=rejection_tick, control_step=step, failure_phase=phase,
-                                 prediction_origin=prediction_origin, action_origin="frozen_sm_from_"+prediction_origin)
+                                 prediction_origin=prediction_origin,
+                                 action_origin="frozen_sm_from_"+prediction_origin if action_computed else 'not_executed')
             raise
         except ReferenceExhausted as error:
-            raise PhysicsRejected("incomplete_reference_window") from error
+            raise PhysicsRejected("incomplete_reference_window", {'first_reject_tick':rejection_tick,
+                'control_step':step,'failure_phase':phase,'prediction_origin':prediction_origin,
+                'action_origin':'frozen_sm_from_'+prediction_origin if action_computed else 'not_executed'}) from error
         if not torch.isfinite(loss).all() or not torch.isfinite(limit).all():
             raise PhysicsRejected("nonfinite_execution")
         losses.append(loss)
