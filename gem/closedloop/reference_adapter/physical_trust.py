@@ -43,6 +43,12 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
     variant = PairedParameters(control, [before, before, after, reverse], count)
     start = detach_state(select_state(collector.state, slice(0, count)))
     prediction = rollout(variant, dynamics, critic, start, horizon, terminal_value=False)
+    # 与“模型预测候选差分”分开记录完整闭环autograd沿本次参数步的方向导数。
+    with torch.enable_grad(), dynamics.adapter_phase():
+        differentiable = rollout(control, dynamics, critic, detach_state(source), horizon, terminal_value=False)
+        named = tuple(control.adapter.named_parameters())
+        gradient = torch.autograd.grad(differentiable['objective'].sum(), tuple(p for _, p in named))
+        directional = float(sum((g*(after[k]-before[k])).sum() for (k, _), g in zip(named, gradient)))
     total = start['state'].new_zeros(count)
     tracking = total.clone()
     alive = torch.ones(count, device=collector.device, dtype=torch.bool)
@@ -52,7 +58,7 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
     collector.control = variant
     try:
         for t in range(horizon):
-            row = collector.step(replay, auto_reset=False, split='train_safety_and_continuing_training')
+            row = collector.step(replay, auto_reset=True, split='train', perturb=True)
             total += .99**t*row['reward'][:count]*alive
             tracking += .99**t*row['raw']['track'][:count]*alive
             alive &= ~row['done'][:count]
@@ -77,7 +83,9 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
             adapter_before_sha256=parameter_identity(control.adapter), objective_scales=control.precision.scales,
             precision_weight=control.precision.weight, terminal_value=False), cases=cases, gate=gate,
             paired_transitions=count*horizon, concurrent_training_transitions=(collector.num_envs-count)*horizon,
-            selection_split='train_safety_real_start_bank', horizon=horizon)
+            selection_split='train_safety_real_start_bank', horizon=horizon,
+            WM_closed_loop_autograd_parameter_direction=directional,
+            derivative_scope='complete_H8_objective_all_270_parameters_history_and_projection')
     finally:
         collector.control = control
         control.adapter.load_state_dict(after)

@@ -25,6 +25,8 @@ class VectorCollector:
         self.real_by_role = {}
         self.policy_version = 0
         self.timing = {}
+        self.uniform_start = False
+        self.high_error_starts = None
 
     def random(self, shape):
         return torch.rand(shape, device=self.device, generator=self.generator)
@@ -36,6 +38,8 @@ class VectorCollector:
         if random_start:
             end = self.bank.ends[songs]
             uniform = (self.random((count,))*(end-16).clamp_min(1)).long()
+            if self.uniform_start:
+                return songs, uniform
             near_end = (end-50-(self.random((count,))*450).long()).clamp_min(0)
             u = self.random((count,))
             frames = torch.where(u < .4, uniform, torch.where(u < .8, near_end, frames))
@@ -65,16 +69,30 @@ class VectorCollector:
             ids = torch.arange(self.num_envs, device=self.device)
         if not len(ids):
             return
+        hard = None
         if songs is None:
             songs, frames = self.sampling(len(ids), split, random_start=random_start)
+            if split == 'train' and random_start and self.high_error_starts is not None:
+                pool = self.high_error_starts
+                hard = self.random((len(ids),)) < .6
+                selected = torch.randint(len(pool['state']), (len(ids),), device=self.device, generator=self.generator)
+                songs = torch.where(hard, pool['song'][selected], songs)
+                frames = torch.where(hard, pool['frame'][selected], frames)
         if initial is None:
             initial = self.starting_states(songs, frames, perturb=perturb)
+            if hard is not None:
+                initial = torch.where(hard[:, None], pool['state'][selected], initial)
         self.env.xi[ids, 1:22] = ((self.random((len(ids), 21))-.5)*.01 if perturb else 0) if joint_bias is None else joint_bias
         self.env.reset(ids, initial)
         observed = {k: value[ids] for k, value in self.env.observe().items()}
         episodes = torch.arange(self.episode_serial, self.episode_serial+len(ids), device=self.device)
         self.episode_serial += len(ids)
         new = self.control.initial(observed, songs, frames, episodes)
+        if hard is not None:
+            # 来源是已经真实发生的因果历史，复位片段不冒充从歌曲开头的MC。
+            for key in ('action', 'history', 'heading', 'left', 'anchor', 'plan', 'plan_valid', 'music'):
+                new[key][hard] = pool[key][selected[hard]]
+            self.env.a_prev[ids] = new['action']
         if self.state is None:
             if len(ids) != self.num_envs:
                 raise ValueError('首次初始化必须覆盖所有环境')

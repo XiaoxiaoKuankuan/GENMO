@@ -101,6 +101,7 @@ def test_SO3_constraints_use_true_composed_angular_acceleration():
     proposal[..., 3:6] = torch.tensor([.008, -.007, .006])
     left = torch.zeros(1, 27, dtype=torch.double)
     raw = p(proposal, left, left)
+    assert not p.certificate(raw, left, left, nominal)['feasible'].all()
     corrected = p(proposal, left, left, nominal)
     report = p.certificate(corrected, left, left, nominal)
     assert report['feasible'].all(), report
@@ -115,3 +116,32 @@ def test_SO3_constraints_use_true_composed_angular_acceleration():
     finite = ((p(proposal.detach()+eps*direction, left, left, nominal)
               -p(proposal.detach()-eps*direction, left, left, nominal))*probe).sum()/(2*eps)
     torch.testing.assert_close(finite, (grad*direction).sum(), atol=2e-4, rtol=.02)
+
+
+def test_response_labels_do_not_cross_validation_boundary():
+    from gem.closedloop.reference_adapter.reference_response import ReferenceResponseReplay
+    import pytest
+    replay = ReferenceResponseReplay()
+    with pytest.raises(ValueError):
+        replay.add(dict(origin='current_policy_real_reference_response', split='validation'))
+    with pytest.raises(ValueError):
+        replay.add(dict(origin='imagined', split='train'))
+
+
+def test_WM_BPTT_precision_preserves_frozen_parameters(system):
+    from gem.closedloop.reference_adapter.vector_learning import GroupNormalizedCritic, adapter_update
+    engine, control, z = constrained_system(system, count=2)
+    control.constraint_beta = 1
+    control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds)
+    control.precision = PrecisionObjective()
+    critic = GroupNormalizedCritic(2835, control.spec)
+    optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5)
+    frozen = engine.step.bundle.frozen_snapshot()
+    old_wm = {k: v.clone() for k, v in engine.dynamics.state_dict().items()}
+    report, _ = adapter_update(control, engine.dynamics, critic, optimizer, z, 8, terminal_value=False, microbatch=2)
+    assert report['execution_gradient_norm'] > 0
+    assert report['gradient_precision_joint_position'] > 0
+    assert all(p.grad is None for p in engine.dynamics.parameters())
+    for k, v in old_wm.items():
+        torch.testing.assert_close(engine.dynamics.state_dict()[k], v, atol=0, rtol=0)
+    engine.step.bundle.assert_unchanged(frozen)

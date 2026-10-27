@@ -129,6 +129,9 @@ def oracle_experiment(collector, source, horizons=(8, 16, 32, 64)):
     precision = total.clone()
     active = torch.ones(count, device=collector.device, dtype=torch.bool)
     rows, state_series, action_series, contact_series, reference_series = [], [], [], [], []
+    raw_reference_series, goal_series, derivative_series, foot_series, slip_series = [], [], [], [], []
+    foot_names = tuple(control.bundle.spec.tracked_bodies)
+    foot_ids = [foot_names.index(n) for n in ('l_ankle_roll_link', 'r_ankle_roll_link')]
     try:
         for t in range(max(horizons)):
             row = collector.step(auto_reset=False, split='oracle_train', contact_count=count)
@@ -140,6 +143,11 @@ def oracle_experiment(collector, source, horizons=(8, 16, 32, 64)):
             action_series.append(row['proposal']['action'][:count].clone())
             contact_series.append(row['contacts'][0])
             reference_series.append(row['proposal']['residual'][:count].clone())
+            raw_reference_series.append(row['proposal']['raw_residual'][:count].clone())
+            goal_series.append(row['proposal']['goal'][:count].clone())
+            derivative_series.append({k: v[:count].clone() for k, v in control.reference_diagnostics(row['start'], row['proposal']).items()})
+            foot_series.append(row['contacts'][1])
+            slip_series.append(row['raw']['tracked_body_v'][:count, foot_ids, :2].norm(dim=-1))
             if t+1 in horizons:
                 values, tracks, precise = (x.reshape(-1, 16) for x in (total, tracking, precision))
                 for i, song in enumerate(source['song'].tolist()):
@@ -163,6 +171,9 @@ def oracle_experiment(collector, source, horizons=(8, 16, 32, 64)):
         data = dict(origin='real_train_oracle_reference_pairs', start=start,
             states=torch.stack(state_series), actions=torch.stack(action_series),
             references=torch.stack(reference_series), contacts=torch.stack(contact_series),
+            raw_references=torch.stack(raw_reference_series), goals=torch.stack(goal_series),
+            reference_derivatives={k: torch.stack([v[k] for v in derivative_series]) for k in derivative_series[0]},
+            foot_contact=torch.stack(foot_series), foot_speed=torch.stack(slip_series),
             conditions=variant.conditions, rows=rows, adapter_identity=parameter_identity(control.adapter),
             offline_selection_only=True, policy_optimization='WM_BPTT_only')
         return rows, data
@@ -171,9 +182,13 @@ def oracle_experiment(collector, source, horizons=(8, 16, 32, 64)):
 
 
 @torch.no_grad()
-def collect_reference_response(collector, source, *, horizon=32, amplitude=.005, replay=None):
+def collect_reference_response(collector, source, *, horizon=32, amplitude=.005, replay=None, split='train'):
     """当前真实状态/历史四条件重置；只在第一步添加正负参考，后续闭环继续当前策略。"""
     control = collector.control
+    if not bool(torch.isin(source['song'], control.bank.by_split[split]).all()):
+        raise ValueError('参考响应起点与声明的隔离数据划分不符')
+    if replay is not None and split != 'train':
+        raise ValueError('隔离参考响应不能进入训练Replay')
     count, mismatch = install_repeated_start(collector, source, 4)
     groups = len(source['state'])
     start = detach_state(select_state(collector.state, slice(0, count)))
@@ -187,7 +202,7 @@ def collect_reference_response(collector, source, *, horizon=32, amplitude=.005,
     live = torch.ones(count, dtype=torch.bool, device=collector.device)
     previous_contact = None
     for t in range(horizon):
-        row = collector.step(auto_reset=False, split='reference_response_train',
+        row = collector.step(auto_reset=True, split=split, perturb=False,
                              residual_offset=offset if t == 0 else None, contact_count=count)
         current = row['end']['state'][:count].reshape(groups, 4, 55)
         action = row['proposal']['action'][:count].reshape(groups, 4, 21)
@@ -210,7 +225,7 @@ def collect_reference_response(collector, source, *, horizon=32, amplitude=.005,
                        row['continuation'], row['done'], row['failed'], collector.policy_version)
     states, actions = torch.stack(states, 1), torch.stack(actions, 1)
     valid, switch = torch.stack(reliable, 1), torch.stack(switches, 1)
-    return dict(origin='current_policy_real_reference_response', split='train',
+    return dict(origin='current_policy_real_reference_response', split=split,
         state=start['state'][::4], xi=start['xi'][::4], song=source['song'], frame=source['frame'],
         plus_action=actions[:, :, 2], minus_action=actions[:, :, 3],
         plus_next=states[:, :, 2], minus_next=states[:, :, 3], reliable=valid, contact_switch=switch,
