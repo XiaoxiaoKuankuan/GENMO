@@ -33,6 +33,7 @@ def main():
     phys=load(root,'physical_direction_summary.json');dist=load(root,'sampling_unique_summary.json')
     cond=load(root,'conditional_drift/summary.json');ori=load(root,'body_orientation_comparison.json')
     timecover=load(root,'music_time_coverage.json',{})
+    new_audit=load(root,'new_trajectory_audit/summary.json',{})|load(root,'new50_trajectory_audit/summary.json',{})
     evals=[]
     base=obj['0']['B_episode']
     evals.append({'update':0,'loss':base,'completed':8,'episodes':8,'origin':'逐张量核对Stage1后复用原完整8曲物理基线'})
@@ -77,7 +78,7 @@ def main():
     state={'generated_utc':datetime.now(timezone.utc).isoformat(),'independent_evaluations':evals,
         'original_run_untouched':True,'large_training_expanded':False,
         'quality_improvement_established':False,'music_time_coverage':timecover,'accepted_candidate_model_loss':local_checks,
-        'paired_input_audit':paired}
+        'paired_input_audit':paired,'new_full_trajectory_objectives':new_audit}
     (root/'decisive_report.json').write_text(json.dumps(state,ensure_ascii=False,indent=2))
     sections=[]
     def add(title,body):sections.append('<section><h2>'+title+'</h2>'+body+'</section>')
@@ -120,7 +121,7 @@ def main():
     <p>建议同请求增加多个经过真实方向验证的消费时间窗口，已消费参考detach；按真实版本/时间追踪覆盖。不要为了扩大时间覆盖直接把H改32，更不能把被覆盖源点当实际执行。</p>''')
     add('7. 教师动作身份和在线反馈','''<p>冻结参数不等于固定生成条件。40724真实训练请求仅11441（28.1%）与对应教师存在相同request_tick，只有23个commit_tick相同。初始48个请求中23个request_tick相同、0个commit_tick相同。噪声种子规则42+(request_tick//60)×1009，所以不同调度会产生不同动作身份；同tick仍可能有不同物理历史/前缀。</p>
     <p>这说明同请求局部教师和独立固定在线音乐教师可能不是同一条动作，不是缓存身份碰撞，也不意味着固定延迟配对评价无效。应先对齐动作身份和外生调度，再判断local/global冲突。</p>'''+table(['版本','固定条件完整新参数关节RMS','仅新FutureEncoder','仅新Stage1参数','真实在线条件额外差异RMS'],[[v]+[f"{cond[v]['fixed_conditions'][m]['joint_rms_rad']['mean']:.6f}" for m in ['full','future_only','stage1_only']]+[f"{cond[v]['online_feedback_joint_rms']['mean']:.6f}"] for v in ['100','300','700','new10']])+'''
-    <p>每版本55个原Stage1真实请求、同音乐/历史/前缀/预测/噪声。原生成重现最大绝对差1.97e−6。主要直接变化来自Stage1网络；真实在线条件变化带来更大的偏移。非线性相互作用另存，不能把这些RMS相加或解释成精确贡献百分比。new10属于本轮多环境主实验，已出现同样反馈问题。</p>''')
+    <p>每版本55个原Stage1真实请求、同音乐/历史/前缀/预测/噪声。原生成重现最大绝对差1.97e−6。主要直接变化来自学生沿用的Stage1主干，冻结原Stage1教师没有更新；真实在线条件变化带来更大的偏移。非线性相互作用另存，不能把这些RMS相加或解释成精确贡献百分比。new10属于本轮多环境主实验，已出现同样反馈问题。</p>''')
     add('8. 训练分布：不是全部低速，而是大幅腿部困难动作被筛掉',table(['阶段','去重真实请求数'],[[k,dist[k]['count']] for k in ['A_requests','B_formed','B_legal','C_outside','D_drawn','E_updated']])+'''
     <p>14首训练音乐、8首固定评价音乐，音乐ID无重叠，种子42。有效更新1400个真实请求，每次2个；68.14%高速、8.50%低速、21.86%单支撑、48.71%包含接触切换，不能称“训练全是静止”。但高幅度只有7/1400（0.5%），形成H-anchor池高幅度8.35%；被检查的高幅度请求98.9%超域，高速请求82.37%超域。合法样本腿速度均值0.5898rad/s，拒绝样本1.1370rad/s。</p>
     <p>全部形成39953，已做域分类29402，其中7118合法、22284超域；其余10551未进入分类，不应当作合法或拒绝。D为1637独立请求，重复抽取记录1678。评价基线高速71.2%、低速2.33%、高幅1.75%。歌曲等权，不能把最长FineDance提供的大量anchor数量当作评分权重。</p>
@@ -130,6 +131,8 @@ def main():
     add('9. 本轮实际修改与独立0/10/25/50结果',table(['新实验有效更新','八曲等权音乐Loss','完整歌曲','来源'],[[e['update'],'未完成' if e['loss'] is None else f"{e['loss']:.8f}",'待核验' if e['completed'] is None else f"{e['completed']}/{e['episodes']}",e['origin']] for e in evals])+'''
     <p>实际接受候选的当前固定微批模型Loss变化：</p>'''+table(['分量','已评价版本以内的接受更新','模型Loss上涨次数','平均变化'],[[k,v['updates'],v['up'],f"{v['mean_delta']:.8g}"] for k,v in local_checks.items()])+'''
     <p>输入、音乐、初态、种子、请求时刻、实际交付事件和完整时长的逐曲对照保存在paired_input_audit.json；这不是只检查配置里写了fixed_delay。即使训练微批损失下降，完整真实曲线仍可恶化。</p>
+    <p>新实验实际完整轨迹同口径重算：</p>'''+table(['新更新','每anchor重对齐H16均值','episode整曲Loss','世界yaw RMS/rad'],[[v,f"{d['A_anchor_H16_mean']:.6f}",f"{d['B_episode_once_loss']:.6f}",f"{d['C_world_yaw_rms_rad']:.6f}"] for v,d in new_audit.items()])+'''
+    <p>新10→25的局部真实H16由0.02241降为0.01818，但世界yaw由0.20313涨为0.39983rad，整曲Loss进一步上升。这是实际轨迹支持的“局部部分恢复、累计转向更差”；两版局部指标仍劣于Stage1的0.01067。</p>
     <p>从原Stage1逐张量初始化，新的AdamW，冻结Stage1教师/SM Actor/WM及统计不变。新增episode_objective.py和独立SE2状态字段；collector在reset建立初态目标，imagination保留局部H16并同时计算episode累计目标。teacher_training归一化执行积分，保留BC并限制软辅助梯度预算，冲突软梯度投影；硬限位不截断。</p>
     <p>独立配置：episode权重1，4个真实anchor/4个环境；BC/local/global/track辅助梯度预算相对组合主目标为0.25/0.5/0.25/0.25。候选模型与AdamW/RNG完全回滚；组合主任务容差改为rtol=0、atol=1e−7，其余输出与支持域不放宽。Critic仍0，Action Rate仍0。</p>
     <p>0为精确权重核对后复用完整原八曲基线。0→10在episode_multianchor；10→50从完整10检查点恢复Actor/AdamW/RNG/监督与任务游标，真实求解器明确重新开始episode，不伪装连续物理恢复。25/50评价异步独立进程，使用冻结检查点、相同音乐/初态/噪声种子/固定延迟事件。单环境辅助实验另有10次完整8曲0.07159399，按预定计算预算结束，负结果保留。</p>
@@ -145,6 +148,7 @@ def main():
     <li>过程失败：临时预算监控shell引号错误已留日志并修正，错误命令未发信号；恢复入口返回值在启动前检查修正。真实超域拒绝不改阈值，未按质量负结果删除证据或停止原正式任务。</li>
     </ul>''')
     evidence=['objective_summary.json','offline_v3/trajectory_objectives.json','offline_v3/accepted_dance_worsening.json','offline_v3/candidate_history.jsonl','physical_direction_summary.json','physical_candidate_details.json','trust_drift_summary.json','gradient_conflict_summary.json','sampling_unique_summary.json','music_time_coverage.json','training_teacher_timing_comparison.json','reference_lifetimes/summary.json','conditional_drift/summary.json','body_orientation_comparison.json','paired_input_audit.json','decisive_report.json']
+    if new_audit:evidence.append('new_trajectory_audit/trajectory_objectives.json')
     add('证据文件','<ul>'+''.join('<li><a href="'+p+'">'+p+'</a></li>' for p in evidence)+'</ul>')
     import matplotlib
     matplotlib.use('Agg')
