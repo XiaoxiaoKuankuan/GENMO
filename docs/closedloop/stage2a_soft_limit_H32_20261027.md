@@ -37,3 +37,5 @@ H32明确反例是FineDance189、prefix50：
 模型身份：Adapter `3dae7332dd9adbcb416aae29500e3a332ede77bb1109754d9bb1cb969f8cfed6`；WM `2ca47d32706aeae0050509b15d010b93660410b6dc0e1f7450bd460d74bdb0b0`。权重来自 `pilot_02/accepted_000001_1793091545760359804.pt`；这是旧目标学习所得的一次小更新，审计期间没有重新训练。
 
 服务器证据根目录：`/data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01`。开启/关闭分别为 `h32_soft_on/independent_parameter_direction.json` 和 `h32_soft_off/independent_parameter_direction.json`，完整命令与日志是根目录的 `stage2a_h32_soft_on.sh/.log`、`stage2a_h32_soft_off.sh/.log`。两个进程均退出0表示审计完成，报告内H32 passed=false表示方法门槛未通过；不能混为训练合格。
+
+随后使用双精度SO(3)投影源码`5b85de9`再次独立执行，结果保存为`h32_soft_off_final/independent_parameter_direction.json`。H8仍8/8可辨识、0反向；H16/H32仍各有1个高信噪比反向，且均为FineDance189/prefix50。H32该起点真实变化仍为-0.0007684230804443359，预测+0.0007312297821044922。全部8起点总真实收益虽为+0.012269258499145508，不能抵消这个确定反例；重复轨迹与状态误差阈值通过也不能替代导数方向验收。

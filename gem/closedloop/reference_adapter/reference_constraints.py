@@ -182,6 +182,15 @@ class ReferenceProjection(torch.nn.Module):
             flat_y, flat_l, flat_u = y.reshape(-1, 10), lower.reshape(-1, 30), upper.reshape(-1, 30)
             solved = _EuclideanProjection.apply(flat_y[indices], flat_l[indices], flat_u[indices],
                                                 self.matrix, self.inverse, self.iterations)
+            # 融合ADMM用于正常控制；极少量近活跃面通道尚未收敛时，精确求解同一
+            # 10变量QP，不把残差当可执行结果，也不改变速度/加速度预算。
+            ax = solved@self.matrix.T
+            unresolved = (torch.maximum(ax-flat_u[indices], flat_l[indices]-ax).amax(-1) > 2e-6).nonzero().flatten()
+            if len(unresolved):
+                ids = indices[unresolved]
+                refined = _CoupledProjection.apply(flat_y[ids], flat_l[ids], flat_u[ids],
+                    self.matrix.expand(len(ids), -1, -1), self.coupled_iterations)
+                solved = solved.index_copy(0, unresolved, refined)
             x = flat_y.index_copy(0, indices, solved).reshape_as(y)
             projected = (x*unit[None, :, None]).transpose(1, 2)
             result = torch.where(feasible[:, None], proposal, projected)

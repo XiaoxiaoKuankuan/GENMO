@@ -84,7 +84,8 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
     identity = dict(wm_version=dynamics.model_version, wm_sha256=parameter_identity(dynamics),
                     adapter_before_sha256=adapter_before, adapter_candidate_sha256=adapter_after,
                     critic_sha256=parameter_identity(critic), terminal_value=False,
-                    objective=dict(sm='original_six_plus_original_action_and_limit_costs', **control.weights,
+                    objective=dict(sm=('original_six_plus_original_action_and_limit_costs'
+                        if control.soft_joint_limit_cost else 'original_six_plus_original_action_rate'), **control.weights,
                         root_non_saturating=control.root_cost_weight, reference_velocity=control.velocity_cost_weight),
                     constraint_beta=control.constraint_beta, disable_root_xy=control.adapter.disable_root_xy)
     identity['soft_joint_limit_cost'] = control.soft_joint_limit_cost
