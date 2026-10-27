@@ -71,7 +71,7 @@ def main():
         horizon=cfg['bptt_steps'], critic_enabled=settings['critic_enabled'], method=settings['method'],
         source=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), formal=True)
     json_write(output/'manifest.json', dict(config=cfg, command=[sys.executable, *sys.argv], state=state.copy(),
-        initialization='zero_Adapter_original_pretrained_WM_no_old_policy', communication='none',
+        initialization='full_resume_same_experiment' if args.resume else 'zero_Adapter_original_pretrained_WM_no_old_policy', communication='none',
         acceptance='finite_Adam_step_not_a_physical_improvement_certificate',
         full_checkpoint_retention='latest_two_and_validation_best_all_numbered_weights_kept'))
     (output/'pid').write_text(str(os.getpid())+'\n')
@@ -161,7 +161,9 @@ def main():
     try:
         publish('loading_frozen_assets')
         seed_all(train['seed']); torch.set_num_threads(1)
-        torch.backends.cuda.matmul.allow_tf32 = True
+        # SM原式没有本项目的SO(3)投影。全局TF32会让旋转小差分的加速度失真，
+        # 并破坏QP精化；原FP32数学/投影阈值不变，不能以增大容差掩盖误差。
+        torch.backends.cuda.matmul.allow_tf32 = False
         engine = build_engine(cfg, 'cuda:0')
         enable_wm_normalization(engine.dynamics)
         bank = VectorBank(read_tasks(cfg['tasks']), engine, 'cuda:0')
@@ -208,6 +210,11 @@ def main():
                 state.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg))
                 extra = ck['extra_state']
                 state.update(pid=os.getpid(), gpu=os.environ['CUDA_VISIBLE_DEVICES'], resumed_from=args.resume)
+                state.pop('error', None)
+                json_write(output/'resume_info.json', dict(source_checkpoint=args.resume,
+                    adapter_sha256=parameter_identity(control.adapter), wm_sha256=parameter_identity(engine.dynamics),
+                    adapter_updates=state['accepted_updates'], wm_updates=engine.dynamics.model_version,
+                    replay_transitions=len(replay), physics_resume='new_real_episode_no_cross_reset_windows', tf32=False))
                 del ck
             else:
                 publish('initial_real_collection')

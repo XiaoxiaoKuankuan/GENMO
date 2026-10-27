@@ -19,6 +19,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', required=True)
     p.add_argument('--session-prefix', required=True)
+    p.add_argument('--resume-root', help='逐GPU读取同组latest_checkpoint，不共享模型或Replay；输出仍须新目录')
     p.add_argument('--python', default='/data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python')
     p.add_argument('--isaaclab', default='/data0/user/liwei/GENMO_assets/adapter_20261026/IsaacLab')
     p.add_argument('--inductor-cache', default='/data0/user/liwei/GENMO_assets/adapter_20261026/inductor_cache')
@@ -57,6 +58,12 @@ def main():
             f'TORCHINDUCTOR_CACHE_DIR={args.inductor_cache}', f'ISAACLAB_PATH={args.isaaclab}',
             args.python, '-B', '-u', str(runtime/'tools/train_stage2_alternating.py'),
             '--config', str(path), '--output', str(root/f'gpu{gpu}'), '--visualizer', 'none', '--deterministic']
+        if args.resume_root:
+            pointer = json.loads((Path(args.resume_root)/f'gpu{gpu}/latest_checkpoint.json').read_text())
+            resume = Path(pointer['path'])
+            if not resume.is_file():
+                raise FileNotFoundError(f'GPU{gpu}自己的完整checkpoint不存在：{resume}')
+            command += ['--resume', str(resume)]
         runner = root/f'run_gpu{gpu}.sh'
         runner.write_text('#!/usr/bin/env bash\n# 本组独立正式训练；不自动重启，不停止其他任务。\nset -u\n'+
             'cd '+shlex.quote(str(runtime))+' || exit 3\n'+shlex.join(command)+' > '+shlex.quote(str(root/f'gpu{gpu}.log'))+' 2>&1\n'+
