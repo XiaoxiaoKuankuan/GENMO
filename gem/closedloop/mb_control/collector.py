@@ -93,6 +93,7 @@ class PhysicalCollector:
         # 不修改SM观测定义；不可变参考在决策边界裁剪，避免每20ms重复校验/拷贝。
         self.reuse_control_observation = False
         self.profile_control = False
+        self.profile_control_synchronize = False
         self.control_profiles = []
         self.actor_version = 0
         self.collector_id, self.episode_index = 0, -1
@@ -216,6 +217,8 @@ class PhysicalCollector:
                     def mark(name):
                         nonlocal phase_started
                         if self.profile_control:
+                            if self.profile_control_synchronize and z.state.is_cuda:
+                                torch.cuda.current_stream(z.state.device).synchronize()
                             now = time.perf_counter()
                             profile[name], phase_started = now-phase_started, now
                     reference_changed = False

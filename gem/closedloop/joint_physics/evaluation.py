@@ -305,6 +305,7 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
     collector = PhysicalCollector(env, actor, adapter, scheduler, TrackingMonitor(adapter), record_trajectory=True)
     collector.reuse_control_observation = cfg['runtime'].get('reuse_control_observation',False)
     collector.profile_control = cfg['runtime'].get('profile_control',False)
+    collector.profile_control_synchronize = cfg['runtime'].get('profile_control_synchronize',False)
     reason = "not_started"
     try:
         collector.reset(music, initial)
@@ -383,7 +384,8 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
         result['control_phase_wall_seconds'] = {
             key:{f'p{p}':float(torch.tensor([t[key] for t in collector.control_profiles]).quantile(p/100)) for p in (50,95,99)}
             for key in collector.control_profiles[0]} if collector.control_profiles else {}
-        result['control_profile_scope'] = 'host wall time, including synchronization where the original path already waits'
+        result['control_profile_scope'] = ('synchronized stage profiling, additional diagnostic synchronization enabled'
+            if collector.profile_control_synchronize else 'host wall time, including synchronization where the original path already waits')
         return result, collector.trajectory
     finally:
         collector.worker.close()
