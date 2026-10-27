@@ -45,9 +45,39 @@ def main():
                 'per_song':[{k:r[k] for k in ['task','complete','physical_seconds','music_seconds','reason']}|
                     {'loss':r['physical_metrics_mean']['dance_loss']} for r in result['physical_results']]})
         else:evals.append({'update':version,'loss':None,'completed':None,'episodes':8,'origin':'完整评价尚未落盘，不填预测值'})
+    manifest=load(root,'episode_multianchor/manifest.json')['config']
+    baseline_folder=Path(manifest['diagnostic']['source_run'])/'evaluations/fixed_delay_replay/initial_genmo_baseline'
+    baseline_rows={r['task']:r for r in json.loads((baseline_folder/'physical_summary.json').read_text())['physical_results']}
+    paired=[]
+    for e in evals[1:]:
+        if e['loss'] is None:continue
+        for row in load(root,e['origin'])['physical_results']:
+            before=baseline_rows[row['task']]
+            events=lambda r:{x['request_tick']:tuple(x.get(k) for k in ['actual_ready_tick','commit_tick','rejection_tick','accepted']) for x in r['events']}
+            a,b=events(before),events(row)
+            paired.append({'update':e['update'],'task':row['task'],
+                'input_music_initial_identity_equal':before['input_identity']==row['input_identity'],
+                'seed_noise_rule_equal':all(before[k]==row[k] for k in ['seed','noise_seed','noise_rule']),
+                'same_request_ticks':set(a)==set(b),'delivery_events_equal':a==b,
+                'same_complete_physical_duration':before['complete'] and row['complete'] and before['physical_seconds']==row['physical_seconds'],
+                'timing_mode':row['timing_mode']})
+    (root/'paired_input_audit.json').write_text(json.dumps(paired,ensure_ascii=False,indent=2))
+    accepted=[];last_evaluated=max(e['update'] for e in evals if e['loss'] is not None)
+    for folder,minimum in [('episode_multianchor',0),('episode_continuation',10)]:
+        for line in (root/folder/'training.jsonl').open():
+            row=json.loads(line)
+            if minimum<row['accepted_actor_updates']<=last_evaluated and row['accepted_execution_feedback_update']:
+                accepted.append(row)
+    update_deltas=defaultdict(list)
+    for row in accepted:
+        metrics=row['output_trust_region']['attempts'][-1]['metrics']
+        for term in ['dance','episode']:
+            update_deltas[term].append(metrics['losses_after'][term]-metrics['losses_before'][term])
+    local_checks={k:{'updates':len(v),'up':sum(x>0 for x in v),'mean_delta':statistics.mean(v)} for k,v in update_deltas.items()}
     state={'generated_utc':datetime.now(timezone.utc).isoformat(),'independent_evaluations':evals,
         'original_run_untouched':True,'large_training_expanded':False,
-        'quality_improvement_established':False,'music_time_coverage':timecover}
+        'quality_improvement_established':False,'music_time_coverage':timecover,'accepted_candidate_model_loss':local_checks,
+        'paired_input_audit':paired}
     (root/'decisive_report.json').write_text(json.dumps(state,ensure_ascii=False,indent=2))
     sections=[]
     def add(title,body):sections.append('<section><h2>'+title+'</h2>'+body+'</section>')
@@ -98,6 +128,8 @@ def main():
     <p>真实音乐时段覆盖：</p>'''+('<pre>'+html.escape(json.dumps(timecover.get('all',{}),ensure_ascii=False,indent=2))+'</pre>')+'''
     <p>建议在既有可信支持域内增加多音乐、多时段、腿部/接触样本，不放宽未经验证的状态界限。14曲单种子是否构成主要过拟合原因仍需扩充独立验证，不能靠分布统计直接断言因果。</p>''')
     add('9. 本轮实际修改与独立0/10/25/50结果',table(['新实验有效更新','八曲等权音乐Loss','完整歌曲','来源'],[[e['update'],'未完成' if e['loss'] is None else f"{e['loss']:.8f}",'待核验' if e['completed'] is None else f"{e['completed']}/{e['episodes']}",e['origin']] for e in evals])+'''
+    <p>实际接受候选的当前固定微批模型Loss变化：</p>'''+table(['分量','已评价版本以内的接受更新','模型Loss上涨次数','平均变化'],[[k,v['updates'],v['up'],f"{v['mean_delta']:.8g}"] for k,v in local_checks.items()])+'''
+    <p>输入、音乐、初态、种子、请求时刻、实际交付事件和完整时长的逐曲对照保存在paired_input_audit.json；这不是只检查配置里写了fixed_delay。即使训练微批损失下降，完整真实曲线仍可恶化。</p>
     <p>从原Stage1逐张量初始化，新的AdamW，冻结Stage1教师/SM Actor/WM及统计不变。新增episode_objective.py和独立SE2状态字段；collector在reset建立初态目标，imagination保留局部H16并同时计算episode累计目标。teacher_training归一化执行积分，保留BC并限制软辅助梯度预算，冲突软梯度投影；硬限位不截断。</p>
     <p>独立配置：episode权重1，4个真实anchor/4个环境；BC/local/global/track辅助梯度预算相对组合主目标为0.25/0.5/0.25/0.25。候选模型与AdamW/RNG完全回滚；组合主任务容差改为rtol=0、atol=1e−7，其余输出与支持域不放宽。Critic仍0，Action Rate仍0。</p>
     <p>0为精确权重核对后复用完整原八曲基线。0→10在episode_multianchor；10→50从完整10检查点恢复Actor/AdamW/RNG/监督与任务游标，真实求解器明确重新开始episode，不伪装连续物理恢复。25/50评价异步独立进程，使用冻结检查点、相同音乐/初态/噪声种子/固定延迟事件。单环境辅助实验另有10次完整8曲0.07159399，按预定计算预算结束，负结果保留。</p>
@@ -112,7 +144,7 @@ def main():
     <li>新episode Critic MC与双目标条件尚未实现和独立验证，V保持0，不能导入旧奖励Critic冒充兼容。身体相对姿态修正仅做离线诊断，未在本曲线中途改奖励。</li>
     <li>过程失败：临时预算监控shell引号错误已留日志并修正，错误命令未发信号；恢复入口返回值在启动前检查修正。真实超域拒绝不改阈值，未按质量负结果删除证据或停止原正式任务。</li>
     </ul>''')
-    evidence=['objective_summary.json','offline_v3/trajectory_objectives.json','offline_v3/accepted_dance_worsening.json','offline_v3/candidate_history.jsonl','physical_direction_summary.json','physical_candidate_details.json','trust_drift_summary.json','gradient_conflict_summary.json','sampling_unique_summary.json','music_time_coverage.json','training_teacher_timing_comparison.json','reference_lifetimes/summary.json','conditional_drift/summary.json','body_orientation_comparison.json','decisive_report.json']
+    evidence=['objective_summary.json','offline_v3/trajectory_objectives.json','offline_v3/accepted_dance_worsening.json','offline_v3/candidate_history.jsonl','physical_direction_summary.json','physical_candidate_details.json','trust_drift_summary.json','gradient_conflict_summary.json','sampling_unique_summary.json','music_time_coverage.json','training_teacher_timing_comparison.json','reference_lifetimes/summary.json','conditional_drift/summary.json','body_orientation_comparison.json','paired_input_audit.json','decisive_report.json']
     add('证据文件','<ul>'+''.join('<li><a href="'+p+'">'+p+'</a></li>' for p in evidence)+'</ul>')
     import matplotlib
     matplotlib.use('Agg')
