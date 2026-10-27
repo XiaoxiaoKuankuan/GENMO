@@ -1,7 +1,8 @@
 # 从零音乐扩散与可微物理执行约束
 
-本方法独立于旧Stage2：静态构造随机GENMO，原60帧监督与同一样本去噪x0的执行损失
-共用一个优化器、一个run。没有GENMO权重初始化、生成教师、Critic或终点价值。
+本方法独立于旧Stage2：静态构造随机GENMO，原60帧监督与独立物理请求子批共用一个网络、
+一个AdamW、一个run。物理子批也必须对同源数据加噪、重新执行GENMO去噪，并以该学生x0
+计算执行损失；不会拿GT替换学生。没有GENMO权重初始化、生成教师、Critic或终点价值。
 
 2026-10-27实际基线：`4a005d14d7e523d43959c21d3a6364de79653462`；
 只读SM bridge：`d9164b0e15934806ff8d750ff70911949c7f5171`。
@@ -20,16 +21,20 @@
 
 ```mermaid
 flowchart LR
-  D[原音乐动作配对 Xgt] --> N[完整1000步加噪]
+  D[完整原训练集 data_batch] --> N[均匀1000步加噪与音乐dropout]
   N --> A[随机初始化原GENMO Transformer]
   C[音乐与历史50×48及逐坐标前缀] --> A
   S[离线实测sidecar与当时已提交旧计划] --> F[一次性冻结SM/WM因果前瞻缓存]
   F --> E[FutureEncoder]
   E --> A
-  A --> X[同一样本去噪x0]
+  A --> X[监督去噪x0]
   X --> L[原Stage1监督损失]
   D --> L
-  X --> P[原codec与ReferenceBuffer]
+  S --> R[独立物理source/time/noise游标]
+  R --> B[合法真实窗口及认证噪声的physics_batch]
+  B --> A
+  A --> Y[物理子批重新前向得到学生x0]
+  Y --> P[原codec与ReferenceBuffer]
   P --> W[逐步重算SM动作与WM状态]
   W --> Q[固定坐标系执行损失]
   D --> Q
@@ -66,6 +71,9 @@ flowchart LR
 | `reference.py` | 请求快照、旧计划可见性、首次影响真实起点与候选参考 |
 | `execution.py / losses.py` | 冻结执行链、支持域拒绝、物理尺度与有效窗口归一化 |
 | `curriculum.py / trainer.py` | 完整监督噪声、物理子批、唯一AdamW、同步DDP与计数 |
+| `requests.py / diagnostics.py` | 静态合法请求索引、音乐与类型轮换、互斥拒绝终态 |
+| `certification.py` | 按H及完整运动/接触组合的真实Newton方向认证 |
+| `inference.py / process_worker.py` | 评价专用推理优化、独立进程及完整墙钟计时 |
 | `checkpoint.py` | 新schema完整恢复、每rank全部采样/RNG状态和不覆盖发布 |
 | `evaluation.py / entry.py` | 三类独立评价、新目标Newton方向和前瞻验证、CLI |
 
@@ -114,19 +122,36 @@ python tools/prepare_joint_physics_data.py --config <cfg> --split train \
 
 ## 执行损失与有效性
 
-首版仅`physics.prediction_mode=denoised_x0`；物理子批使用同一次监督去噪结果，没有训练
-完整DDIM反传链。每一步重新构造SM观测、历史与previous_action并运行SM得到新动作，
+首版仅`physics.prediction_mode=denoised_x0`。data_batch保持原全库、均匀k=0..999和音乐
+dropout；physics_batch从离线静态合法请求独立抽样、使用独立噪声RNG与明确可用音乐，
+重新执行带梯度GENMO去噪前向。物理前向暂时eval以隔离网络dropout随机流，结束恢复训练
+模式，不关闭输入或参数导数。两路只联合更新同一个AdamW，没有完整DDIM训练反传链。
+每一步重新构造SM观测、历史与previous_action并运行SM得到新动作，
 再用同一个WM推进状态。起点与目标detach，候选参考、动作和预测状态保留梯度。
 
 目标为同源数据动作。根位姿保持固定世界坐标；身体位姿转到根坐标以避免重复计算yaw。
 每个物理误差按配置中明确的米、弧度和速度尺度计算稳健损失；窗口按有效折扣质量求均值，
-改变H不会隐式放大相对BC权重。实际执行限位只记录诊断，不再形成新软限位Loss；
+改变H不会隐式放大相对BC权重。实际执行软限位只记录诊断，不形成新软限位Loss；
 `L_exec_safety=0`、`lambda_safety=0`、Action Rate=0。原监督参考限位保持不变。
+参考/执行的硬机械越界、非有限、原SM真实终止直接拒绝整个物理窗口，不累计终止后的Loss；
+SM动作域检查在WM前执行，预测状态域在WM后检查，拒绝时常规数据监督照常更新。
 
 物理课程只筛选执行子批，监督仍均匀覆盖1000步。SNR由实际`alphas_cumprod`计算。
 音乐被drop的样本保留完整监督，但不给它施加某一首特定舞蹈的执行目标。缺缓存、保护区
 冲突、时间/速度支持不足、退化旋转、WM/动作超域、无新参考影响和不完整窗口分别记录。
 不把坏预测替换为GT，不放宽支持域让学生通过。
+
+静态索引在FK之前排除缺缓存、零前缀、真实起点不足和右速度halo不足；按来源轮换并在
+源内按类型/时间抽取。source ID只是审计来源，训练允许来源仍由原train清单决定。
+H32/H64证书独立，绑定资产、执行目标、数值支持及Newton证据；训练须精确匹配完整
+运动＋接触组合，不能让高幅运动的失败否决另一个已认证的站立组合，也不能借站立证书
+放行转身。完整学生预测链还要核对运动类型。接触证据来自真实缓存和Newton扰动，WM
+并不提供实测接触，不能把网络contact logits算成真实接触认证。
+
+课程启用需同时满足step下限及最近真实学生探针有效率/音乐/类型覆盖。默认至少16样本、
+最近64请求中25%有效、3来源且3音乐文件及3类标签；探针每25步进行。阈值在运行前固定，
+合格后才开始小权重warmup。记录physics_attempts、physics_valid_samples、
+physics_effective_updates和physics_update_fraction；课程前的探针合格不计有效物理更新。
 
 只用候选首次影响之前的真实状态作局部起点。报告分别保存preview-only步数、中心消费
 步数、结构支持源点和覆盖率。H32/H64分别为0.64/1.28秒控制，H8/H16历史对照仍可配置。
@@ -146,16 +171,18 @@ DDP每个rank执行相同forward/backward；执行子批梯度乘`world_size/glo
 使DDP平均后等于全局有效样本均值。无有效样本rank使用图内零项，全零也不跳过backward。
 单卡诊断间隔分解data/exec对Future和主干的梯度；DDP可用独立审计入口作细分诊断。
 
-新schema：`genmo.joint_diffusion_physics.v1.checkpoint.v1`。保存Actor、唯一AdamW、scheduler、
+新schema：`genmo.joint_diffusion_physics.v1.checkpoint.v2.independent_physics`。保存Actor、唯一AdamW、scheduler、
 global_step、课程、每rank数据游标/PCG64、独立噪声与窗口随机流、Python/NumPy/CPU/CUDA RNG、
-资产与划分身份、验证合同及监督/物理计数。只接受本schema完整恢复；旧Stage2不能weights-only
+物理source/time/noise独立游标、就绪课程窗口、资产与划分身份、验证合同及监督/物理计数。
+只接受本schema完整恢复；旧共用噪声v1只允许评价，旧Stage2不能weights-only
 冒充继续训练。文件原子发布且不覆盖，恢复也写入新的输出目录。
 
 ## 实际命令
 
 在新工作树运行；使用已安装torch、GENMO依赖及SM Newton桥接的环境。服务器1可令
 `JOINT_PYTHON=/data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python`。
-正式配置用`joint_physics_from_scratch.yaml`；有界实测用`joint_physics_server1_acceptance.yaml`。
+本次Server-2有界A/B配置用`joint_physics_repair_server2.yaml`，其全库监督和10来源sidecar
+相同；A仅关闭physics.enabled。旧Server-1验收配置保留历史用途。
 所有`--set`只覆盖本次运行，不改共享数据/配置文件。
 
 ```bash
@@ -208,3 +235,61 @@ JOINT_GPUS=1 bash scripts/train_joint_physics.sh <same_cfg> --resume <complete_j
 
 验收测试、GT接口方向、学生有效更新和方法收益必须分别报告。有限短测的损失下降或
 有限非零梯度不代表自由生成改善、全曲完成或实机稳定。
+
+## 当前独立抽样验收与部署诊断入口
+
+Server-2主机环境：`/data0/user/liwei/envs/genmo_sm_runtime/bin/python`，工作树为
+`/home/user/liwei/bumi-closedloop-worktrees/joint-physics/GENMO`。下列输出均须使用新目录。
+训练恢复最好使用该run保存的config.json，确保采样器、物理证书和预算合同一致。
+
+```bash
+# 清点原train全库与H16/H32/H64合法离线窗口；val/test须提供各自sidecar。
+python tools/audit_joint_physics_data.py --config configs/closedloop/joint_physics_repair_server2.yaml \
+  --split train --output <new_inventory>
+
+# 增量预处理；已验证的分片不再重新运行Newton。
+python tools/prepare_joint_physics_data.py --config <cfg> --split train \
+  --set 'prepare.exclude_sidecars=[<existing_train_sidecar>]' \
+  --set prepare.max_sources_per_dataset=2 --output <new_increment>
+python tools/prepare_joint_physics_data.py --config <cfg> --split train \
+  --set prepare.resume=true --output <same_interrupted_increment>
+
+# A/B从同seed分别随机初始化，完整原训练集、相同数据噪声和监督预算。
+CUDA_VISIBLE_DEVICES=0 python tools/train_joint_physics.py \
+  --config configs/closedloop/joint_physics_repair_server2.yaml --mode train --max-steps 5000 \
+  --set physics.enabled=false --output <new_A>
+CUDA_VISIBLE_DEVICES=1 python tools/train_joint_physics.py \
+  --config configs/closedloop/joint_physics_repair_server2.yaml --mode train --max-steps 5000 \
+  --output <new_B>
+
+# 单卡正式启动；不要把这条命令误当作已启动长期训练。
+JOINT_PYTHON=/data0/user/liwei/envs/genmo_sm_runtime/bin/python JOINT_GPUS=1 \
+  CUDA_VISIBLE_DEVICES=0 bash scripts/train_joint_physics.sh <cfg> --max-steps <absolute_step> --output <new_run>
+# 多卡入口由同一训练器归约全局物理有效数量；每rank子批与监督batch以配置为准。
+JOINT_PYTHON=/data0/user/liwei/envs/genmo_sm_runtime/bin/python JOINT_GPUS=2 \
+  CUDA_VISIBLE_DEVICES=0,1 bash scripts/train_joint_physics.sh <cfg> --max-steps <absolute_step> --output <new_run>
+python tools/train_joint_physics.py --config <run>/config.json --mode train \
+  --resume <run>/joint_00005000.pt --max-steps <absolute_step> --output <new_continuation>
+
+python tools/verify_joint_physics_resume.py --checkpoint <joint.pt> --output <new_resume_check>
+python tools/diagnose_joint_physics_readiness.py --config <cfg> --checkpoint <joint.pt> \
+  --samples 32 --output <new_diagnosis>
+
+# 离线固定交付：生成完成后按显式事件推进物理，不验证实时性。
+python tools/evaluate_joint_physics.py --config <cfg> --checkpoint <joint.pt> --mode closed_loop \
+  --set evaluation.timing_mode=fixed_delay_replay --set evaluation.latency_ticks=60 \
+  --set evaluation.latency_margin_ticks=12 --set evaluation.fixed_delivery_ticks=60 --output <new_fixed>
+# 实际墙钟：显式独立进程；此处两张GPU分别用于Newton和推理，必须报告硬件成本。
+CUDA_VISIBLE_DEVICES=0,1 python tools/evaluate_joint_physics.py --config <cfg> \
+  --checkpoint <joint.pt> --mode closed_loop --set runtime.worker_process=true \
+  --set runtime.inference_device=cuda:1 --set runtime.reuse_control_observation=true --output <new_wall>
+
+python tools/benchmark_joint_physics_inference.py --config <cfg> --checkpoint <joint.pt> --output <new_timing>
+python tools/summarize_joint_physics_experiment.py --root <experiment_root> --output <new_curves>
+```
+
+推理默认保持FP32、完整DDIM20/eta0/CFG2.5，已有CFG合批和条件缓存不重复算作新增功能。
+`runtime.inference_backend=cuda_graph`只捕获原Transformer单步，不用于训练反向。
+`runtime.graph_tracking_monitor=true`只捕获原SM监控FK，启动前核对数值；不能据此声称
+Newton求解器已变快。所有预热在正式episode之前记录，有限启动保持仍只支持1.74s控制。
+同GPU、双GPU、固定交付、实际墙钟的结果必须分开，接管成功不代表50Hz控制无超期。
