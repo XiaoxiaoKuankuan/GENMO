@@ -10,7 +10,8 @@ data:
 physics:
   horizon: 32
   start_step: 1000
-  validation_report: /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/certification_H32_four_source_profiles/validation.json
+  # 含真实WM动作输入补测；仅允许已通过的完整组合，落脚/高速等失败组合仍保留并拒绝。
+  validation_report: /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/certification_H32_disjoint_model_actions/validation.json
   lambda_exec: 0.01
   warmup_steps: 2000
 training:

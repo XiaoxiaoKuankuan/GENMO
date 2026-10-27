@@ -275,6 +275,9 @@ python tools/train_joint_physics.py --config <run>/config.json --mode train \
   --resume <run>/joint_00005000.pt --max-steps <absolute_step> --output <new_continuation>
 
 python tools/verify_joint_physics_resume.py --checkpoint <joint.pt> --output <new_resume_check>
+# 联合流程对齐物理探针，保证恢复后的比较步骤实际读取独立物理请求和噪声。
+python tools/verify_joint_physics_resume.py --checkpoint <joint.pt> \
+  --align-physics-probe --output <new_physics_cursor_resume_check>
 python tools/diagnose_joint_physics_readiness.py --config <cfg> --checkpoint <joint.pt> \
   --samples 32 --output <new_diagnosis>
 
