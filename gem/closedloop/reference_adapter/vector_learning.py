@@ -95,17 +95,32 @@ def tangent_loss(dynamics, pairs):
                                        tangent_prediction_rms=float((predicted.detach()/action_size[:, None]).square().mean().sqrt()))
 
 
-def fit_wm(dynamics, optimizer, windows, pairs, weight, *, reference_pairs=None, reference_weight=0.):
+def fit_wm(dynamics, optimizer, windows, pairs, weight, *, reference_pairs=None, reference_weight=0.,
+           reference_kin=None, response_settings=None, long_windows=None, long_weights=None,
+           checkpoint_steps=False):
     if dynamics._graph_active:
         raise RuntimeError('想象图存活时禁止修改WM')
     optimizer.zero_grad(set_to_none=True)
-    supervised, report = dynamics.supervised_loss(windows)
+    supervised, report = dynamics.supervised_loss(windows, checkpoint_steps=checkpoint_steps)
     local, details = tangent_loss(dynamics, pairs) if pairs is not None else (supervised*0, {})
     loss = supervised+weight*local
     response = supervised*0
+    if long_windows is not None:
+        long_weights = {16: .25, 32: .25} if long_weights is None else long_weights
+        long_reports = {}
+        for horizon, coefficient in long_weights.items():
+            horizon = int(horizon)
+            if long_windows['action'].shape[1] < horizon:
+                raise ValueError('长时WM监督缺少真实连续标签')
+            part = {k: (v[:, :horizon] if isinstance(v, torch.Tensor) else v) for k, v in long_windows.items()}
+            term, metrics = dynamics.supervised_loss(part, checkpoint_steps=checkpoint_steps)
+            loss = loss+coefficient*term
+            long_reports[str(horizon)] = {k: float(v) for k, v in metrics.items()} | dict(weight=coefficient)
+        details['long_state_supervision'] = long_reports
     if reference_pairs is not None:
         from .reference_response import consistency_loss
-        response, extra = consistency_loss(dynamics, reference_pairs, windows['action'].shape[1])
+        response, extra = consistency_loss(dynamics, reference_pairs, reference_pairs['plus_action'].shape[1],
+            kin=reference_kin, checkpoint_steps=checkpoint_steps, **(response_settings or {}))
         details.update(extra)
         loss = loss+reference_weight*response
     loss.backward()
@@ -118,7 +133,14 @@ def fit_wm(dynamics, optimizer, windows, pairs, weight, *, reference_pairs=None,
         wm_gradient_norm=float(norm), wm_updates=dynamics.model_version)
 
 
-def rollout(control, dynamics, critic, start, horizon, *, terminal_value, gamma=.99, intervention=None):
+def rollout(control, dynamics, critic, start, horizon, *, terminal_value, gamma=.99, intervention=None,
+            checkpoint_steps=False):
+    from torch.utils.checkpoint import checkpoint
+    def advance_step(current, offset):
+        proposal = control.propose(current, **(offset or {}))
+        predicted = dynamics.step(current['state'], proposal['action'], current['xi'])
+        end, reward, raw, terms, cont, _, _ = control.advance(current, proposal, predicted)
+        return end, reward, raw['track'], terms, cont, proposal['action'], predicted
     z = start
     alive = z['state'].new_ones(len(z['state']))
     score = alive*0
@@ -128,17 +150,20 @@ def rollout(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
     for t in range(horizon):
         x = control.critic_features(z) if terminal_value else z['state'].new_empty(len(z['state']), 0)
         value = critic(x) if terminal_value else alive*0
-        proposal = control.propose(z, **(intervention if t == 0 and intervention else {}))
-        state = dynamics.step(z['state'], proposal['action'], z['xi'])
-        end, reward, raw, terms, cont, done, _ = control.advance(z, proposal, state)
+        offset = intervention if t == 0 else None
+        if checkpoint_steps and torch.is_grad_enabled():
+            end, reward, track, terms, cont, action, state = checkpoint(advance_step, z, offset,
+                use_reentrant=False, preserve_rng_state=True)
+        else:
+            end, reward, track, terms, cont, action, state = advance_step(z, offset)
         valid = (z['frame'] < control.bank.ends[z['song']]).to(alive)
         alive = alive*valid
         score = score+gamma**t*alive*reward
-        execution_score = execution_score+gamma**t*alive*(raw['track']+terms['music'])
+        execution_score = execution_score+gamma**t*alive*(track+terms['music'])
         for k, v in terms.items():
             weighted[k] = weighted.get(k, score*0)+gamma**t*alive*v
         features.append(x); values.append(value); rewards.append(reward); continuations.append(cont*valid)
-        actions.append(proposal['action']); states.append(state)
+        actions.append(action); states.append(state)
         alive = alive*cont
         z = end
     x = control.critic_features(z) if terminal_value else z['state'].new_empty(len(z['state']), 0)
@@ -180,7 +205,8 @@ def validate_critic(critic, dataset, constant, thresholds, train_count, tasks):
     return report
 
 
-def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, terminal_value, microbatch=32, probes=None):
+def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, terminal_value, microbatch=32, probes=None,
+                   checkpoint_steps=False):
     parameters = tuple(control.adapter.parameters())
     before = [p.detach().clone() for p in parameters]
     adam = copy.deepcopy(optimizer.state_dict())
@@ -194,7 +220,8 @@ def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
         with dynamics.adapter_phase(), frozen_parameters(critic):
             for offset in range(0, count, microbatch):
                 z = detach_state(select_state(starts, slice(offset, offset+microbatch)))
-                trajectory = rollout(control, dynamics, critic, z, horizon, terminal_value=terminal_value)
+                trajectory = rollout(control, dynamics, critic, z, horizon, terminal_value=terminal_value,
+                                     checkpoint_steps=checkpoint_steps)
                 loss = -trajectory['objective'].sum()/count
                 if offset == 0:
                     complete = torch.autograd.grad(trajectory['objective'].mean(), parameters, retain_graph=True, allow_unused=True)

@@ -92,7 +92,9 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
     identity['reference_soft_limit_weight'] = control.weights['reference_limit']
     identity['physical_criteria'] = dict(criteria)
     if control.precision is not None:
+        from .precision import NAMES, RATIOS
         identity['precision'] = dict(scales=control.precision.scales, weight=control.precision.weight,
+            active_terms=dict(zip(NAMES, RATIOS)),
             action_weight=control.precision.action_weight, velocity_weight=control.precision.velocity_weight,
             acceleration_weight=control.precision.acceleration_weight)
     if control.projection is not None:
@@ -131,7 +133,7 @@ def parameter_update_audit(collector, control, dynamics, critic, before, *, term
             params = dict(control.adapter.named_parameters())
             for horizon in horizons:
                 with dynamics.adapter_phase(), frozen_parameters(critic):
-                    result = rollout(control, dynamics, critic, source, horizon, terminal_value=False)
+                    result = rollout(control, dynamics, critic, source, horizon, terminal_value=False, checkpoint_steps=horizon >= 16)
                     gradients = torch.autograd.grad(result['objective'].sum(), tuple(params.values()))
                     derivative[horizon] = float(sum((g*(after[k]-before[k])).sum()
                         for (k, _), g in zip(params.items(), gradients)))

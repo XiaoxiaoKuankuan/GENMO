@@ -179,12 +179,14 @@ def test_response_replay_mixes_long_audit_and_H8_candidate_without_fake_padding(
         replay.add(dict(origin='current_policy_real_reference_response', split='train', rejected={},
             state=torch.zeros(2, 55), plus_action=value, minus_action=-value,
             reliable=torch.ones(2, length, dtype=torch.bool)))
-    assert replay.data['plus_action'].shape == (4, 8, 21)
+    assert replay.buckets[32]['plus_action'].shape == (2, 32, 21)
+    assert replay.buckets[8]['plus_action'].shape == (2, 8, 21)
     assert replay.total_pairs == 4
     assert replay.sample(32)['reliable'].shape == (32, 8)
     clone = ReferenceResponseReplay()
     clone.load_state_dict(replay.state_dict(), 'cpu')
-    torch.testing.assert_close(clone.data['plus_action'], replay.data['plus_action'], atol=0, rtol=0)
+    for horizon, bucket in replay.buckets.items():
+        torch.testing.assert_close(clone.buckets[horizon]['plus_action'], bucket['plus_action'], atol=0, rtol=0)
 
 
 def test_real_committed_SO3_seam_regression():

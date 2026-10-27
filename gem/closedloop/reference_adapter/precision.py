@@ -1,8 +1,9 @@
 """Stage2-A原始GENMO精度目标及固定训练标尺，不改动SuperMimic六项奖励。
 
-真实或想象执行状态与只读名义参考比较：身体姿态SO(3)、关节位置/速度、身体角速度、
-逐控制步局部根位移。身体姿态使用原始世界姿态，不沿实际机器人重新锚定yaw。
-标尺只从训练歌曲零Adapter真实误差拟合一次，五项内部比例固定；Huber避免指数
+真实或想象执行状态与只读名义参考比较：身体姿态SO(3)、关节位置/速度及逐步局部
+根位移；身体角速度只保留误差诊断，不再增加重复的Huber奖励。身体姿态使用原始
+世界姿态，不沿实际机器人重新锚定yaw。标尺只从训练歌曲零Adapter误差拟合一次；
+删除重复项后其余比例保持原值，不自动放大其它损失。Huber避免指数
 饱和。动作偏离与参考导数成本独立相加，不再添加原SM已有的action-rate惩罚。
 世界根位置误差保留作监控，根XY通道关闭时默认不以它驱动优化。所有新项只乘一次dt。
 """
@@ -10,9 +11,10 @@
 import torch
 from supermimic.rotations import so3_log, so3_exp
 
-NAMES = ('body_orientation', 'joint_position', 'joint_velocity', 'body_angular_velocity', 'root_local_displacement')
-RATIOS = (.30, .25, .20, .15, .10)
-FLOORS = (.02, .01, .1, .1, .001)
+ERROR_NAMES = ('body_orientation', 'joint_position', 'joint_velocity', 'body_angular_velocity', 'root_local_displacement')
+NAMES = ('body_orientation', 'joint_position', 'joint_velocity', 'root_local_displacement')
+RATIOS = (.30, .25, .20, .10)
+FLOORS = (.02, .01, .1, .001)
 
 
 def errors(control, z, state, nominal, sm):
@@ -23,7 +25,7 @@ def errors(control, z, state, nominal, sm):
     previous = control.bank.ref(z['song'], z['frame']).root_p
     dp = (state[:, :3]-z['state'][:, :3])-(nominal.root_p-previous)
     local = (z['heading'].transpose(-1, -2)@dp[..., None]).squeeze(-1)
-    return dict(zip(NAMES, (body, q, qd, bw, local)))
+    return dict(zip(ERROR_NAMES, (body, q, qd, bw, local)))
 
 
 def calibrate(error_rows):
@@ -34,7 +36,7 @@ def calibrate(error_rows):
 
 class PrecisionObjective:
     def __init__(self, scales=None, *, weight=1., action_weight=.01, velocity_weight=.002, acceleration_weight=.0002):
-        self.scales = dict(zip(NAMES, FLOORS)) if scales is None else dict(scales)
+        self.scales = dict(zip(NAMES, FLOORS)) if scales is None else {name: scales[name] for name in NAMES}
         self.weight = weight
         self.action_weight, self.velocity_weight, self.acceleration_weight = action_weight, velocity_weight, acceleration_weight
         if set(self.scales) != set(NAMES) or any(v <= 0 for v in self.scales.values()):
@@ -42,7 +44,8 @@ class PrecisionObjective:
 
     def __call__(self, control, z, proposal, state, nominal, sm):
         values = errors(control, z, state, nominal, sm)
-        raw, weighted = {}, {}
+        raw = {'absolute_body_angular_velocity': values['body_angular_velocity'].abs().mean(-1)}
+        weighted = {}
         for name, ratio in zip(NAMES, RATIOS):
             error = values[name]/self.scales[name]
             cost = torch.nn.functional.huber_loss(error, torch.zeros_like(error), reduction='none').mean(-1)
@@ -69,7 +72,7 @@ class PrecisionObjective:
         return raw, weighted
 
 
-def calibrate_gradient_weights(control, dynamics, starts, *, microbatch=32):
+def calibrate_gradient_weights(control, dynamics, starts, *, microbatch=32, horizon=32):
     """用训练歌曲真实零策略起点预先固定两档权重，不以评价结果调参或更新任何网络。"""
     from .vector_control import select_state, detach_state
     from .vector_learning import GroupNormalizedCritic, rollout
@@ -86,7 +89,7 @@ def calibrate_gradient_weights(control, dynamics, starts, *, microbatch=32):
     with dynamics.adapter_phase(), frozen_parameters(critic):
         for offset in range(0, total, microbatch):
             z = detach_state(select_state(starts, slice(offset, offset+microbatch)))
-            result = rollout(control, dynamics, critic, z, 8, terminal_value=False)
+            result = rollout(control, dynamics, critic, z, horizon, terminal_value=False, checkpoint_steps=True)
             terms = dict(sm=result['weighted']['sm'], precision=sum(v for k, v in result['weighted'].items() if k.startswith('precision_')))
             for index, name in enumerate(names):
                 term = terms[name].sum()/total
@@ -99,7 +102,7 @@ def calibrate_gradient_weights(control, dynamics, starts, *, microbatch=32):
     if min(norms.values()) <= 1e-9:
         raise ValueError('训练集执行梯度不足，无法标定精度权重')
     base = control.precision.weight*norms['sm']/norms['precision']
-    return dict(samples=total, songs=int(starts['song'].unique().numel()), horizon=8, gradient_norms=norms,
+    return dict(samples=total, songs=int(starts['song'].unique().numel()), horizon=horizon, gradient_norms=norms,
         values=values, low_weight=.5*base, high_weight=base, target_gradient_ratios=[.5, 1.],
         wm_sha256=parameter_identity(dynamics), wm_version=dynamics.model_version,
         adapter_sha256=parameter_identity(control.adapter), scales=control.precision.scales,

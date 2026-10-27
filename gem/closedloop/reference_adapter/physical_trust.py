@@ -45,7 +45,8 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
     prediction = rollout(variant, dynamics, critic, start, horizon, terminal_value=False)
     # 与“模型预测候选差分”分开记录完整闭环autograd沿本次参数步的方向导数。
     with torch.enable_grad(), dynamics.adapter_phase():
-        differentiable = rollout(control, dynamics, critic, detach_state(source), horizon, terminal_value=False)
+        differentiable = rollout(control, dynamics, critic, detach_state(source), horizon,
+                                 terminal_value=False, checkpoint_steps=horizon >= 16)
         named = tuple(control.adapter.named_parameters())
         gradient = torch.autograd.grad(differentiable['objective'].sum(), tuple(p for _, p in named))
         directional = float(sum((g*(after[k]-before[k])).sum() for (k, _), g in zip(named, gradient)))
@@ -112,7 +113,7 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
             paired_transitions=count*horizon, concurrent_training_transitions=(collector.num_envs-count)*horizon,
             selection_split='train_safety_real_start_bank', horizon=horizon,
             WM_closed_loop_autograd_parameter_direction=directional,
-            derivative_scope='complete_H8_objective_all_270_parameters_history_and_projection')
+            derivative_scope=f'complete_H{horizon}_objective_all_270_parameters_history_and_projection')
     finally:
         collector.control = control
         control.adapter.load_state_dict(after)

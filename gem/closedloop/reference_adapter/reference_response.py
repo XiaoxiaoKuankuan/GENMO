@@ -1,112 +1,179 @@
-"""当前Adapter经投影和冻结Actor可实现方向的真实参考响应监督。
+"""当前Adapter经投影和冻结Actor产生的完整真实参考响应监督。
 
-Replay保存同一真实起点的正负参考产生的动作序列、执行状态、物理条件和可靠mask，
-不保存完整歌曲，不用想象状态冒充标签。可靠mask排除初态不匹配、重复不稳定、
-接触切换、终止以及动作差过小的方向。WM同时预测两条真实动作驱动轨迹，以原起点
-局部坐标比较根位移、SO(3)姿态、关节位置/速度响应；这只更新独立WM，不更新Actor。
-H16/H32方向报告与单步导数、闭环参数更新验收分开，任何旧模型报告不能自动放行。
+按实际H8/H16/H32/H64长度分桶保存正负响应，短窗口不补齐，长窗口不截成8步。
+监督标签只有训练集真实状态、实际动作和物理条件；接触切换、重复性不足、终止及
+动作变化过小的步骤均有可靠mask。位置/姿态/关节速度、根角速度及现有SM FK的
+身体角速度分别归一化和加权，不添加WM预测头，也不增加Adapter奖励或输入。
+H64可以保存、审计；是否参与监督由训练入口显式选择，默认仅验证。所有报告绑定
+确切WM身份。验证和审计歌曲禁止进入本Replay，统计为零不能冒充长时方向通过。
 """
 
 import torch
 from supermimic.mdp import unflatten_state
 from supermimic.rotations import so3_log
 
-
-def local_difference(origin, plus, minus):
-    p0, R0, *_ = unflatten_state(origin)
-    p1, R1, _, _, q1, qd1 = unflatten_state(plus)
-    p2, R2, _, _, q2, qd2 = unflatten_state(minus)
-    dp = (R0.transpose(-1, -2)@(p1-p2)[..., None]).squeeze(-1)
-    dr = so3_log(R0.transpose(-1, -2)@R1)-so3_log(R0.transpose(-1, -2)@R2)
-    return torch.cat((dp, dr, q1-q2, qd1-qd2), -1)
+GROUP_SCALES = dict(root_position=.05, root_orientation=.1, joint_position=.1,
+                    joint_velocity=2., root_angular_velocity=.5, body_angular_velocity=1.)
+GROUP_WEIGHTS = dict(root_position=.15, root_orientation=.15, joint_position=.35,
+                     joint_velocity=.35, root_angular_velocity=.1, body_angular_velocity=.1)
+TEMPORAL = {'plus_action', 'minus_action', 'plus_next', 'minus_next', 'reliable',
+            'contact_switch', 'repeated_states'}
 
 
-def response_scale(state):
-    return state.new_tensor([.05]*3+[.1]*3+[.1]*21+[2.]*21)
+def body_velocity(kin, state):
+    if kin is None:
+        raise ValueError('身体角速度响应必须使用现有SuperMimic FK，不能添加替代预测头')
+    return kin.forward(*unflatten_state(state))[3]
+
+
+def response_groups(origin, plus, minus, kin):
+    _, R0, *_ = unflatten_state(origin)
+    p1, R1, _, w1, q1, qd1 = unflatten_state(plus)
+    p2, R2, _, w2, q2, qd2 = unflatten_state(minus)
+    local = R0.transpose(-1, -2)
+    bw = body_velocity(kin, plus)-body_velocity(kin, minus)
+    return dict(root_position=(local@(p1-p2)[..., None]).squeeze(-1),
+        root_orientation=so3_log(local@R1)-so3_log(local@R2), joint_position=q1-q2,
+        joint_velocity=qd1-qd2, root_angular_velocity=(local@(w1-w2)[..., None]).squeeze(-1),
+        body_angular_velocity=(local[:, None]@bw[..., None]).squeeze(-1).flatten(1))
 
 
 class ReferenceResponseReplay:
     def __init__(self, capacity=8192):
-        self.capacity, self.data = capacity, {}
-        self.total_pairs = 0
-        self.rejected = {}
+        self.capacity, self.buckets = capacity, {}
+        self.total_pairs, self.rejected = 0, {}
 
     def add(self, data):
         if data.get('origin') != 'current_policy_real_reference_response' or data.get('split') != 'train':
             raise ValueError('参考响应监督只允许当前策略训练歌曲真实配对')
+        length = data['plus_action'].shape[1]
+        if not 1 <= length <= 64 or data['reliable'].shape != data['plus_action'].shape[:2]:
+            raise ValueError('响应必须保留真实的1至64步窗口与对应可靠mask')
+        count = len(data['state'])
         for key, value in data['rejected'].items():
             self.rejected[key] = self.rejected.get(key, 0)+int(value)
-        self.total_pairs += len(data['state'])
-        temporal = {'plus_action', 'minus_action', 'plus_next', 'minus_next', 'reliable', 'contact_switch', 'repeated_states'}
-        for key, value in data.items():
-            if isinstance(value, torch.Tensor):
-                # 训练只监督8步窗口；H16/H32报告使用完整原始配对，不拿补齐数据冒充真实标签。
-                if key in temporal:
-                    value = value[:, :8]
-                value = value.detach()
-                self.data[key] = torch.cat((self.data[key], value))[-self.capacity:] if key in self.data else value[-self.capacity:]
+        values = {k: v.detach() for k, v in data.items() if isinstance(v, torch.Tensor)}
+        for key in TEMPORAL & values.keys():
+            if values[key].shape[1] != length:
+                raise ValueError('同一真实响应的时间维度不一致，禁止补齐标签')
+        values['_sequence'] = torch.arange(self.total_pairs, self.total_pairs+count, device=data['state'].device)
+        self.total_pairs += count
+        bucket = self.buckets.get(length)
+        if bucket is not None and set(bucket) != set(values):
+            raise ValueError('同长度响应字段不一致')
+        self.buckets[length] = ({k: torch.cat((bucket[k], v)) for k, v in values.items()}
+                                if bucket is not None else values)
+        sequences = torch.cat([b['_sequence'] for b in self.buckets.values()])
+        if len(sequences) > self.capacity:
+            lower = sequences.sort().values[-self.capacity]
+            for h, b in list(self.buckets.items()):
+                keep = b['_sequence'] >= lower
+                if bool(keep.any()):
+                    self.buckets[h] = {k: v[keep] for k, v in b.items()}
+                else:
+                    del self.buckets[h]
 
     def sample(self, count, *, horizon=8):
-        if not self.data:
+        eligible = [(h, b, b['reliable'][:, :horizon].any(-1).nonzero().flatten())
+                    for h, b in self.buckets.items() if h >= horizon]
+        eligible = [(h, b, ids) for h, b, ids in eligible if len(ids)]
+        if not eligible:
             return None
-        eligible = self.data['reliable'][:, :horizon].any(-1).nonzero().flatten()
-        if not len(eligible):
-            return None
-        ids = eligible[torch.randint(len(eligible), (count,), device=eligible.device)]
-        return {k: v[ids] for k, v in self.data.items()}
+        sizes = [len(ids) for _, _, ids in eligible]
+        device = eligible[0][1]['state'].device
+        choices = torch.randint(sum(sizes), (count,), device=device)
+        result, start = {}, 0
+        for (_, b, ids), size in zip(eligible, sizes):
+            selected = choices[(choices >= start) & (choices < start+size)]-start
+            start += size
+            if not len(selected):
+                continue
+            for key, value in b.items():
+                if key == '_sequence':
+                    continue
+                selected_value = value[ids[selected]]
+                if key in TEMPORAL:
+                    selected_value = selected_value[:, :horizon]
+                result.setdefault(key, []).append(selected_value)
+        return {k: torch.cat(v) for k, v in result.items()}
+
+    def coverage(self):
+        songs = [b['song'] for b in self.buckets.values() if 'song' in b]
+        return dict(songs=int(torch.cat(songs).unique().numel()) if songs else 0,
+            windows={str(h): dict(pairs=len(b['state']), reliable_endpoint=int(b['reliable'][:, -1].sum()),
+                                 valid_steps=int(b['reliable'].sum())) for h, b in self.buckets.items()})
 
     def state_dict(self):
-        return dict(data=self.data, total_pairs=self.total_pairs, rejected=self.rejected, capacity=self.capacity)
+        return dict(format='true_length_buckets_v2', buckets=self.buckets, total_pairs=self.total_pairs,
+                    rejected=self.rejected, capacity=self.capacity)
 
     def load_state_dict(self, state, device):
+        if state.get('format') != 'true_length_buckets_v2':
+            raise ValueError('旧8步截断Replay不能冒充完整长响应恢复；旧模型可仅作显式对照')
         self.capacity, self.total_pairs, self.rejected = state['capacity'], state['total_pairs'], state['rejected']
-        temporal = {'plus_action', 'minus_action', 'plus_next', 'minus_next', 'reliable', 'contact_switch', 'repeated_states'}
-        self.data = {k: (v[:, :8] if k in temporal else v).to(device) for k, v in state['data'].items()}
+        self.buckets = {int(h): {k: v.to(device) for k, v in b.items()} for h, b in state['buckets'].items()}
 
 
-def consistency_loss(dynamics, pairs, horizon=8):
-    origin = pairs['state']
-    plus, minus = origin, origin
-    errors = []
-    scale = response_scale(origin)
+def consistency_loss(dynamics, pairs, horizon=8, *, kin, scales=None, weights=None, checkpoint_steps=False):
+    from torch.utils.checkpoint import checkpoint
+    scales, weights = dict(GROUP_SCALES if scales is None else scales), dict(GROUP_WEIGHTS if weights is None else weights)
+    if set(scales) != set(GROUP_SCALES) or set(weights) != set(GROUP_WEIGHTS) or min(scales.values()) <= 0:
+        raise ValueError('各响应字段必须使用完整、独立且为正的归一化尺度')
+    if pairs['plus_action'].shape[1] < horizon:
+        raise ValueError('缺少真实长响应，禁止补齐或循环使用8步标签')
+    origin = pairs['state']; plus, minus = origin, origin
+    errors = {k: [] for k in weights}
     for t in range(horizon):
-        plus = dynamics.step(plus, pairs['plus_action'][:, t], pairs['xi'])
-        minus = dynamics.step(minus, pairs['minus_action'][:, t], pairs['xi'])
-        actual = local_difference(origin, pairs['plus_next'][:, t], pairs['minus_next'][:, t])/scale
-        predicted = local_difference(origin, plus, minus)/scale
-        # 以真实动作差归一化；无动作响应的方向由采集器拒绝，不能用极小分母制造伪梯度。
+        if checkpoint_steps:
+            plus = checkpoint(dynamics.step, plus, pairs['plus_action'][:, t], pairs['xi'], use_reentrant=False)
+            minus = checkpoint(dynamics.step, minus, pairs['minus_action'][:, t], pairs['xi'], use_reentrant=False)
+        else:
+            plus = dynamics.step(plus, pairs['plus_action'][:, t], pairs['xi'])
+            minus = dynamics.step(minus, pairs['minus_action'][:, t], pairs['xi'])
+        with torch.no_grad():
+            actual = response_groups(origin, pairs['plus_next'][:, t], pairs['minus_next'][:, t], kin)
+        predicted = response_groups(origin, plus, minus, kin)
         action_size = (pairs['plus_action'][:, :t+1]-pairs['minus_action'][:, :t+1]).square().mean((1, 2)).sqrt()
-        error = ((predicted-actual)/action_size.clamp_min(1e-4)[:, None]).square().mean(-1)
-        errors.append(error)
+        for key in errors:
+            error = (predicted[key]-actual[key])/scales[key]/action_size.clamp_min(1e-4)[:, None]
+            errors[key].append(error.square().mean(-1))
     mask = pairs['reliable'][:, :horizon]
-    loss = (torch.stack(errors, 1)*mask).sum()/mask.sum().clamp_min(1)
-    return loss, dict(reference_response_valid_steps=int(mask.sum()), reference_response_pairs=len(origin))
+    losses = {k: (torch.stack(v, 1)*mask).sum()/mask.sum().clamp_min(1) for k, v in errors.items()}
+    loss = sum(weights[k]*v for k, v in losses.items())
+    return loss, dict(reference_response_valid_steps=int(mask.sum()), reference_response_pairs=len(origin),
+        reference_response_horizon=horizon, reference_response_reliable_endpoint=int(mask[:, -1].sum()),
+        response_group_losses={k: float(v.detach()) for k, v in losses.items()},
+        response_group_scales=scales, response_group_weights=weights)
 
 
 @torch.no_grad()
-def validate_response(dynamics, pairs, horizons=(1, 4, 8, 16, 32)):
+def validate_response(dynamics, pairs, horizons=(1, 4, 8, 16, 32, 64), *, kin, scales=None):
     from .audit import _state_error
     from .update_diagnostics import parameter_identity
-    origin = pairs['state']
-    plus, minus = origin, origin
-    result = dict(wm_version=dynamics.model_version, wm_sha256=parameter_identity(dynamics), horizons={})
-    scale = response_scale(origin)
+    scales = GROUP_SCALES if scales is None else scales
+    available = pairs['plus_action'].shape[1]
+    horizons = tuple(h for h in horizons if h <= available)
+    origin = pairs['state']; plus, minus = origin, origin
+    result = dict(wm_version=dynamics.model_version, wm_sha256=parameter_identity(dynamics),
+                  actual_window=available, horizons={}, scales=dict(scales))
     for t in range(max(horizons)):
         plus = dynamics.step(plus, pairs['plus_action'][:, t], pairs['xi'])
         minus = dynamics.step(minus, pairs['minus_action'][:, t], pairs['xi'])
         if t+1 not in horizons:
             continue
-        actual = local_difference(origin, pairs['plus_next'][:, t], pairs['minus_next'][:, t])/scale
-        predicted = local_difference(origin, plus, minus)/scale
-        dot = (actual*predicted).sum(-1)
-        norm = actual.norm(dim=-1)*predicted.norm(dim=-1)
-        cosine = dot/norm.clamp_min(1e-12)
-        relative = (actual-predicted).norm(dim=-1)/actual.norm(dim=-1).clamp_min(1e-6)
+        actual = response_groups(origin, pairs['plus_next'][:, t], pairs['minus_next'][:, t], kin)
+        predicted = response_groups(origin, plus, minus, kin)
         valid = pairs['reliable'][:, :t+1].all(-1)
+        fields = {}
+        for key in actual:
+            target, model = actual[key]/scales[key], predicted[key]/scales[key]
+            cosine = (target*model).sum(-1)/(target.norm(dim=-1)*model.norm(dim=-1)).clamp_min(1e-12)
+            relative = (target-model).norm(dim=-1)/target.norm(dim=-1).clamp_min(1e-6)
+            fields[key] = dict(cosine=cosine.cpu().tolist(), relative_error=relative.cpu().tolist(),
+                physical_response_rmse=float((actual[key]-predicted[key]).square().mean().sqrt()),
+                high_snr_reverse_count=int(((cosine < 0) & valid & (target.norm(dim=-1) > 1e-4)).sum()))
         result['horizons'][str(t+1)] = dict(reliable_pairs=int(valid.sum()), total_pairs=len(valid),
-            cosine=cosine.cpu().tolist(), relative_error=relative.cpu().tolist(), reliable=valid.cpu().tolist(),
-            plus_state_error=_state_error(plus, pairs['plus_next'][:, t]),
+            fields=fields, reliable=valid.cpu().tolist(), plus_state_error=_state_error(plus, pairs['plus_next'][:, t]),
             minus_state_error=_state_error(minus, pairs['minus_next'][:, t]),
-            high_snr_reverse_count=int(((cosine < 0) & valid & (actual.norm(dim=-1) > 1e-4)).sum()),
             contact_switch=pairs['contact_switch'][:, :t+1].any(-1).cpu().tolist())
     return result

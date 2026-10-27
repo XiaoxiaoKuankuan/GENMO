@@ -1,5 +1,5 @@
-# 独立单GPU Stage2-A：WM+BPTT，真实信任域验收才计数，禁止DDP/共享在线Replay。
-# 固定训练集标定权重；启动需要对应Oracle结果，文件存在不代表本组已通过物理验证。
+# Stage2-A独立WM+BPTT：H32真实方向验收后才接受更新，H64先独立验证。
+# 原SM六项不变；删除额外body_w Huber，软关节限位和根XY关闭，音乐1e-4。
 algorithm: genmo_supermimic_reference_adapter10
 physics_backend: isaaclab3_newton_mujoco_warp
 supermimic:
@@ -21,7 +21,7 @@ hidden_dims:
 - 256
 output_dim: 270
 control_hz: 50
-bptt_steps: 8
+bptt_steps: 32
 observation_noise: false
 music:
   sigma_s: 0.04
@@ -75,14 +75,14 @@ training:
 physical_criteria: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/acceptance_20261026/assets/criteria.json
 vector:
   num_envs: 2048
-  initial_bptt_steps: 8
+  initial_bptt_steps: 32
   target_accepted_updates: 200
   checkpoint_every: 100
   evaluation_every: 25
   sampling_seed: 43
   compile_fk: true
   warmup_vector_steps: 128
-  validation_vector_steps: 64
+  validation_vector_steps: 96
   validation_capacity: 8192
   tangent_every_iterations: 1
   repair_audit_wm_interval: 100
@@ -122,3 +122,30 @@ stage2a:
     gradient_calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/gradient_soft_off02/train_gradient_calibration.json
     shared_assets_manifest: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/assets_64_sha256.json
     independent_online_data: true
+  objective_version: q_qd_body_R_local_root_no_extra_body_w_v2
+  long_horizon:
+    response_train_horizons:
+    - 8
+    - 16
+    - 32
+    response_batch: 128
+    state_batch: 128
+    state_weights:
+      16: 0.25
+      32: 0.25
+    repair_update_budget: 150
+    response:
+      scales:
+        root_position: 0.05
+        root_orientation: 0.1
+        joint_position: 0.1
+        joint_velocity: 2.0
+        root_angular_velocity: 0.5
+        body_angular_velocity: 1.0
+      weights:
+        root_position: 0.15
+        root_orientation: 0.15
+        joint_position: 0.35
+        joint_velocity: 0.35
+        root_angular_velocity: 0.1
+        body_angular_velocity: 0.1

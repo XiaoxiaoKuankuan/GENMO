@@ -81,7 +81,22 @@ class VectorReplay:
         env = torch.randint(self.num_envs, (count,), device=self.device)
         return row, env
 
-    def starts(self, batch):
+    def starts(self, batch, *, horizon=None, ends=None):
+        if horizon is not None:
+            if ends is None:
+                raise ValueError('长BPTT起点必须核对实际名义支持')
+            rows, envs, remaining = [], [], batch
+            for _ in range(20):
+                row, env = self._random(max(remaining*2, 64))
+                valid = self.data['z_frame'][row, env]+horizon < ends[self.data['z_song'][row, env]]
+                ids = valid.nonzero().flatten()[:remaining]
+                rows.append(row[ids]); envs.append(env[ids]); remaining -= len(ids)
+                if remaining == 0:
+                    break
+            if remaining:
+                raise ValueError(f'缺少实际支持H{horizon}的真实起点，不能默认退回H8')
+            row, env = torch.cat(rows), torch.cat(envs)
+            return {k: self.data['z_'+k][row, env] for k in self.dynamic_keys}
         row, env = self._random(batch)
         return {k: self.data['z_'+k][row, env] for k in self.dynamic_keys}
 

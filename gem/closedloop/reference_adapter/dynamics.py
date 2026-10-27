@@ -55,21 +55,25 @@ class DynamicsModel(nn.Module):
         finally:
             self._graph_active = False
 
-    def supervised_loss(self, windows):
+    def supervised_loss(self, windows, *, checkpoint_steps=False):
+        from torch.utils.checkpoint import checkpoint
         if windows.get("origin") != "real":
             raise ValueError("WM禁止使用想象状态作为真实标签")
         s, a, xi, target, mask = (windows[k] for k in ("state", "action", "xi", "next_state", "mask"))
         if mask.shape != a.shape[:2] or not bool(mask[:, 0].all()):
             raise ValueError("WM窗口起点必须有效")
-        state = unflatten_state(s[:, 0])
+        state = s[:, 0]
         std = torch.maximum(self.model.out_norm.std(), self.error_floor)
         errors, one_step = [], []
         for t in range(a.shape[1]):
-            state = self.model.step(state, a[:, t], normalize_xi(xi[:, t]))
-            errors.append((self.model.state_error(state, unflatten_state(target[:, t])) / std).square().mean(-1))
-            predicted = self.model.net(self.model.in_norm(self.model.inputs(unflatten_state(s[:, t]), a[:, t], normalize_xi(xi[:, t]))))
-            expected = self.model.out_norm(self.model.targets(unflatten_state(s[:, t]), unflatten_state(target[:, t])))
-            one_step.append((predicted-expected).square().mean(-1))
+            state = (checkpoint(self.step, state, a[:, t], xi[:, t], use_reentrant=False)
+                     if checkpoint_steps else self.step(state, a[:, t], xi[:, t]))
+            errors.append((self.model.state_error(unflatten_state(state), unflatten_state(target[:, t])) / std).square().mean(-1))
+            # 单步targets只报告，避免为不参与损失的诊断额外保存整个长窗口的图。
+            with torch.no_grad():
+                predicted = self.model.net(self.model.in_norm(self.model.inputs(unflatten_state(s[:, t]), a[:, t], normalize_xi(xi[:, t]))))
+                expected = self.model.out_norm(self.model.targets(unflatten_state(s[:, t]), unflatten_state(target[:, t])))
+                one_step.append((predicted-expected).square().mean(-1))
         error = torch.stack(errors, 1)
         one = torch.stack(one_step, 1)
         # 沿用SM的多步state_error主损失；单步targets误差另列，不改变归一化。
@@ -90,14 +94,20 @@ class DynamicsModel(nn.Module):
         return report | {"wm_grad_norm": float(norm), "model_version": self.model_version}
 
     @torch.no_grad()
-    def validate_real(self, windows):
-        """同一批独立真实连续16步，报告单步/8/16步可解释物理量误差。"""
+    def validate_real(self, windows, *, horizons=(1, 4, 8, 16, 32, 64), kin=None):
+        """按实际连续窗口报告H1至H64，不外推缺少的真实标签。"""
         from .audit import _state_error
         if windows.get("origin") != "real" or windows["action"].shape[1] < 16:
-            raise ValueError("WM门槛需要完整真实16步窗口")
+            raise ValueError("WM门槛需要至少完整真实16步窗口")
+        horizons = tuple(h for h in horizons if h <= windows['action'].shape[1])
         state, reports = windows["state"][:, 0], {}
-        for i in range(16):
+        for i in range(max(horizons)):
             state = self.step(state, windows["action"][:, i], windows["xi"][:, i])
-            if i+1 in (1, 4, 8, 16):
+            if i+1 in horizons:
                 reports[str(i+1)] = _state_error(state, windows["next_state"][:, i])
+                reports[str(i+1)]['root_angular_velocity_rad_s'] = float((state[:, 10:13]-windows['next_state'][:, i, 10:13]).square().mean().sqrt())
+                if kin is not None:
+                    a = kin.forward(*unflatten_state(state))[3]
+                    b = kin.forward(*unflatten_state(windows['next_state'][:, i]))[3]
+                    reports[str(i+1)]['body_angular_velocity_rad_s'] = float((a-b).square().mean().sqrt())
         return reports

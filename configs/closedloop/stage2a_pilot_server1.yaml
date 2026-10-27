@@ -1,4 +1,5 @@
-# 使用现有20首中的8首训练任务验证新方法；最多1次有效更新，不称正式64首/八组实验。
+# Stage2-A独立WM+BPTT：H32真实方向验收后才接受更新，H64先独立验证。
+# 原SM六项不变；删除额外body_w Huber，软关节限位和根XY关闭，音乐1e-4。
 algorithm: genmo_supermimic_reference_adapter10
 physics_backend: isaaclab3_newton_mujoco_warp
 supermimic:
@@ -20,7 +21,7 @@ hidden_dims:
 - 256
 output_dim: 270
 control_hz: 50
-bptt_steps: 8
+bptt_steps: 32
 observation_noise: false
 music:
   sigma_s: 0.04
@@ -74,14 +75,14 @@ training:
 physical_criteria: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/acceptance_20261026/assets/criteria.json
 vector:
   num_envs: 64
-  initial_bptt_steps: 8
+  initial_bptt_steps: 32
   target_accepted_updates: 1
   checkpoint_every: 100
   evaluation_every: 100
   sampling_seed: 20261027
   compile_fk: true
   warmup_vector_steps: 128
-  validation_vector_steps: 64
+  validation_vector_steps: 96
   validation_capacity: 8192
   tangent_every_iterations: 1
   repair_audit_wm_interval: 100
@@ -106,3 +107,30 @@ stage2a:
   reference_response_weight: 0.1
   wm_repair_steps: 50
   max_consecutive_rejections: 3
+  objective_version: q_qd_body_R_local_root_no_extra_body_w_v2
+  long_horizon:
+    response_train_horizons:
+    - 8
+    - 16
+    - 32
+    response_batch: 128
+    state_batch: 128
+    state_weights:
+      16: 0.25
+      32: 0.25
+    repair_update_budget: 150
+    response:
+      scales:
+        root_position: 0.05
+        root_orientation: 0.1
+        joint_position: 0.1
+        joint_velocity: 2.0
+        root_angular_velocity: 0.5
+        body_angular_velocity: 1.0
+      weights:
+        root_position: 0.15
+        root_orientation: 0.15
+        joint_position: 0.35
+        joint_velocity: 0.35
+        root_angular_velocity: 0.1
+        body_angular_velocity: 0.1

@@ -13,7 +13,7 @@ from supermimic.mdp import unflatten_state
 from supermimic.rotations import so3_log
 from .vector_control import VectorControl, select_state, detach_state
 from .vector_audit import contact_tensors
-from .precision import errors, calibrate, NAMES
+from .precision import errors, calibrate, ERROR_NAMES
 from .update_diagnostics import parameter_identity
 
 
@@ -27,7 +27,7 @@ def difficulty_scan(collector, steps=96):
     frames = (fractions*(bank.ends[songs]-steps-64).clamp_min(0)).long()
     collector.reset(songs=songs, frames=frames, perturb=False)
     candidates, scores = [], []
-    error_rows = {k: [] for k in NAMES}
+    error_rows = {k: [] for k in ERROR_NAMES}
     for step in range(steps):
         row = collector.step(zero=True, split='train', perturb=False)
         nominal = bank.ref(row['end']['song'], row['end']['frame'])
@@ -38,8 +38,11 @@ def difficulty_scan(collector, steps=96):
             valid = ~row['done'] & (row['end']['frame']+80 < bank.ends[row['end']['song']])
             if bool(valid.any()):
                 candidates.append(detach_state(select_state(row['end'], valid)))
-                scores.append(err['joint_position'].abs().mean(-1)[valid]
-                              +.2*err['body_orientation'].mean(-1)[valid])
+                # 仅训练集真实执行误差用于挑选难例，不添加任何Adapter输入。
+                scores.append((err['joint_position'].abs().mean(-1)/.1
+                    +.2*err['body_orientation'].mean(-1)/.15
+                    +.5*err['joint_velocity'].abs().mean(-1)/.7
+                    +.5*err['body_angular_velocity'].mean(-1)/1.1)[valid])
     pool = {k: torch.cat([z[k] for z in candidates]) for k in candidates[0]}
     score = torch.cat(scores)
     selected = []
@@ -52,7 +55,9 @@ def difficulty_scan(collector, steps=96):
         selected_frames=[dict(song=int(s), frame=int(f), error=float(e)) for s, f, e in
                          zip(pool['song'][selected], pool['frame'][selected], score[selected])],
         semantics='real_reset_segments_from_legal_times_not_complete_songs',
-        sampling='zero_policy_real_high_error_train_only')
+        sampling='zero_policy_real_q_orientation_qd_body_w_error_train_only',
+        score_scales=dict(q=.1, orientation=.15, qd=.7, body_w=1.1),
+        score_weights=dict(q=1., orientation=.2, qd=.5, body_w=.5))
 
 
 @torch.no_grad()
@@ -182,13 +187,15 @@ def oracle_experiment(collector, source, horizons=(8, 16, 32, 64)):
 
 
 @torch.no_grad()
-def collect_reference_response(collector, source, *, horizon=32, amplitude=.005, replay=None, split='train'):
+def collect_reference_response(collector, source, *, horizon=64, amplitude=.005, replay=None, split='train'):
     """当前真实状态/历史四条件重置；只在第一步添加正负参考，后续闭环继续当前策略。"""
     control = collector.control
     if not bool(torch.isin(source['song'], control.bank.by_split[split]).all()):
         raise ValueError('参考响应起点与声明的隔离数据划分不符')
     if replay is not None and split != 'train':
         raise ValueError('隔离参考响应不能进入训练Replay')
+    if not bool((source['frame']+horizon < control.bank.ends[source['song']]).all()):
+        raise ValueError('参考响应窗口越过歌曲终点；不能补齐或外推真实状态')
     count, mismatch = install_repeated_start(collector, source, 4)
     groups = len(source['state'])
     start = detach_state(select_state(collector.state, slice(0, count)))

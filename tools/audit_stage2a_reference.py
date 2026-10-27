@@ -20,8 +20,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
     parser.add_argument('--output', required=True)
-    parser.add_argument('--mode', choices=('numerical', 'pressure', 'oracle', 'evaluate', 'direction', 'calibrate'), required=True)
+    parser.add_argument('--mode', choices=('numerical', 'pressure', 'oracle', 'evaluate', 'direction', 'calibrate', 'trace'), required=True)
     parser.add_argument('--checkpoint', help='已接受或被拒候选的真实模型文件；评价/审计均不产生策略更新')
+    parser.add_argument('--wm-checkpoint', help='显式替换独立WM用于同一Adapter候选复验；不恢复旧Replay/优化器')
+    parser.add_argument('--horizons', type=int, nargs='+', default=[8, 16, 32, 64])
     parser.add_argument('--starts', help='已保存的训练集真实零策略高误差起点，仅用于梯度尺度标定')
     parser.add_argument('--num-envs', type=int, default=128)
     parser.add_argument('--steps', type=int, default=96)
@@ -74,7 +76,11 @@ def main():
         engine.dynamics.model_version = checkpoint.get('wm_version', checkpoint.get('state', {}).get('wm_updates', 0))
         saved_scales = checkpoint.get('extra_state', {}).get('precision_scales')
         if saved_scales and args.mode != 'calibrate':
-            control.precision.scales = saved_scales
+            control.precision.scales = {k: saved_scales[k] for k in control.precision.scales}
+    if args.wm_checkpoint:
+        wm = torch.load(args.wm_checkpoint, map_location='cpu', weights_only=False, mmap=True)
+        engine.dynamics.load_state_dict(wm['dynamics'])
+        engine.dynamics.model_version = wm.get('wm_version', wm.get('state', {}).get('wm_updates', 0))
     json_write(output/'manifest.json', dict(pid=os.getpid(), gpu=os.environ.get('CUDA_VISIBLE_DEVICES'),
         command=[sys.executable, *sys.argv], config=cfg, mode=args.mode, num_envs=args.num_envs,
         accepted_updates=0, scope='Stage2-A_validation_only', physical_resume='explicit_reset_of_real_state_with_repeat_test'))
@@ -122,6 +128,15 @@ def main():
                 report['checkpoint'] = args.checkpoint
                 report['accepted_updates'] = checkpoint.get('state', {}).get('accepted_updates') if checkpoint else 0
                 json_write(output/('model_full_song_evaluation.json' if checkpoint else 'zero_full_song_evaluation.json'), report)
+            elif args.mode == 'trace':
+                if checkpoint is None:
+                    raise ValueError('三路径H64审计需要明确完整参数候选')
+                from gem.closedloop.reference_adapter.long_horizon import independent_long_trace
+                criteria = json.loads(Path(cfg['physical_criteria']).read_text()) | cfg['training']['wm_quality']
+                report, data = independent_long_trace(collector, before, criteria)
+                report.update(checkpoint=args.checkpoint, wm_checkpoint=args.wm_checkpoint)
+                json_write(output/'three_path_H1_H64.json', report)
+                atomic_save(data, output/'three_path_physical_tensors.pt')
             elif args.mode == 'direction':
                 if checkpoint is None:
                     raise ValueError('独立闭环H8/H16/H32审计需要明确候选checkpoint')
@@ -130,9 +145,10 @@ def main():
                 critic = GroupNormalizedCritic(2835, control.spec).cuda()
                 criteria = json.loads(Path(cfg['physical_criteria']).read_text()) | cfg['training']['wm_quality']
                 result = parameter_update_audit(collector, control, engine.dynamics, critic, before,
-                    horizons=(8, 16, 32), criteria=criteria)
+                    horizons=tuple(args.horizons), criteria=criteria)
                 result['comparison'] = 'checkpoint_candidate_against_exact_zero_adapter_independent_audit_songs'
                 result['checkpoint'] = args.checkpoint
+                result['wm_checkpoint'] = args.wm_checkpoint
                 json_write(output/'independent_parameter_direction.json', result)
             else:
                 pool, calibration = difficulty_scan(collector, args.steps)
