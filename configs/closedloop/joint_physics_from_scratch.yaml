@@ -1,0 +1,50 @@
+# 从零联合训练B；静态原Transformer、原划分、60帧数据和独立checkpoint。
+# SM/WM和stats只读复用；物理短窗通过新方法验证报告后启用，监督始终覆盖1000步。
+schema: genmo.joint_diffusion_physics.v1
+initialization: {mode: random, pretrained_genmo: null, resume_checkpoint: null}
+sampling: {motion_frames: 60, motion_fps: 30, ddim_steps: 20, eta: 0.0, cfg_scale: 2.5}
+stage1:
+  model: {latent_dim: 1024, num_layers: 16, num_heads: 8, mlp_ratio: 4.0, dropout: 0.1, use_cond_exists_as_input: true, music_mask_prob: 0.1, history_hidden_dim: 128, proprio_scales: [1.0, 1.0, 1.0, 1.0], noise_schedule: cosine, diffusion_steps: 1000}
+  endecoder:
+    stats_path: ${oc.env:JOINT_STATS,/home/weili/bumi-closedloop-worktrees/stage1_server2_scratch600k_20260930/assets/qpos30_train_stats.json}
+    kinematics_path: configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+    clip_std_min: 0.01
+    allow_placeholder_stats: false
+    fps: 30
+  loss:
+    weights_from: configs/pipeline/music_only_bumi_qpos30_contact_v5.yaml
+    weights: {}
+    options: {ground_semantics: mixed_floor_zero_fk_contact_v2, contract_version: physical_qpos30_contact_v5, auxiliary_warmup_steps: 10000, joint_limit_margin_rad: 0.05, joint_limit_topk_fraction: 0.01, robust_joint_limit_start_step: 0, robust_joint_limit_warmup_steps: 10000, advanced_physics_start_step: 0, advanced_physics_warmup_steps: 10000, advanced_physics_topk_fraction: 0.05, root_tilt_upright_allowance_rad: 0.35, root_tilt_target_margin_rad: 0.05}
+data:
+  config: configs/closedloop/stage1_dataset_server1_fourset_90505_v1.yaml
+  root: ${oc.env:JOINT_DATA_ROOT,/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1}
+  sidecar: ${oc.env:JOINT_SIDECAR,null}
+  source_ids: null
+  sample_contract: {history_steps: 50, prefix_min_frames: 12, prefix_max_frames: 24, prefix_zero_probability: 0.15, prefix_random_seed: 42}
+supermimic:
+  repo: ${oc.env:JOINT_SM_REPO,/home/weili/bumi-closedloop-worktrees/supermimic/SuperMimic}
+  checkpoint: ${oc.env:JOINT_SM_CHECKPOINT,/home/weili/supermimic_vibed/logs/bumi3_seven_filtered_v1/ckpt_024000.pt}
+  robot_asset_dir: ${oc.env:JOINT_SM_ASSETS,/home/weili/supermimic_vibed/data/bumi3_4340/robot}
+physics:
+  enabled: true
+  prediction_mode: denoised_x0
+  backend: isaaclab3_newton_mujoco_warp
+  determinism: full
+  horizon: 8
+  subbatch: 2
+  snr_min: 0.1
+  snr_max: 100.0
+  validation_report: null
+  lambda_exec: 0.1
+  lambda_safety: 0.01
+  start_step: 1000
+  warmup_steps: 10000
+execution_loss:
+  discount: 1.0
+  action_rate_weight: 0.0
+  scales: {root_position: 0.3, root_orientation: 0.4, joint_position: 0.25, joint_velocity: 3.0, body_position: 0.15, body_orientation: 0.3, body_velocity: 1.0}
+  weights: {root_position: 1.0, root_orientation: 1.0, joint_position: 1.0, joint_velocity: 0.2, body_position: 1.0, body_orientation: 0.5, body_velocity: 0.1}
+training: {seed: 42, batch_size: 16, learning_rate: 0.00001, weight_decay: 0.01, grad_clip: 1.0, precision: fp32, max_steps: 600000, lr_warmup_steps: 500, min_lr_ratio: 0.1, checkpoint_every: 1000, diagnostics_every: 100, smoke_max_steps: 200}
+prepare: {shard_episodes: 4, old_plan_frames: 120, old_plan_period_ticks: 300, max_sources: null, max_control_steps: null}
+evaluation: {split: val, max_sources: 4, seed: 12345, reconstruction_timesteps: [50, 250, 500, 750, 999], max_control_steps: null, request_interval_ticks: 300, latency_ticks: 60}
+runtime: {device: cuda:0, cpu_threads: 4, output: null}

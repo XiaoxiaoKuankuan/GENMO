@@ -1,0 +1,84 @@
+"""从零Actor的合同回归，复用原Stage1小型真实Transformer和显式测试数据。
+
+这些CPU测试只验证数学、mask、无泄漏与导数接线，不能作为真实Newton或学生执行收益。
+固定噪声比较旧60帧监督；未来分支单独检查梯度；采样前后逐模块模式一致。静态构造测试
+禁止调用旧权重加载函数并核对随机种子，不生成任何正式训练资产。
+"""
+
+import copy
+
+import torch
+
+from tests.closedloop.test_stage1_actor import actor_factory  # noqa: F401
+from gem.closedloop.joint_physics.actor import JointPhysicsActor
+from gem.closedloop.mb_control.contracts import ForecastContext
+
+
+def test_supervision_parity_masks_and_future_gradient(actor_factory):
+    base, batch = actor_factory(motion_frames=60, starts=(45, 48))
+    actor = JointPhysicsActor(base).eval()
+    t = torch.tensor([0, 999])
+    noise = torch.randn(2, 60, 30)
+    old = base.training_forward(batch, t, noise)
+    new = actor.denoise_supervised(batch, None, t, noise)
+    for key in ("pred_x_start", "static_conf_logits", "target_x_start", "xt"):
+        torch.testing.assert_close(new[key], old[key], rtol=0, atol=0)
+    known = batch["known_qpos30_mask"]
+    torch.testing.assert_close(new["xt"][known], new["target_x_start"][known], rtol=0, atol=0)
+    assert torch.equal(new["unknown_mask"], batch["target_qpos30_valid"] & ~known)
+    contexts = [ForecastContext(torch.randn(1, 58), torch.ones(1, dtype=torch.bool), tick, tick+120)
+                for tick in (900, 960)]
+    out = actor.denoise_supervised(batch, contexts, t, noise)
+    out["pred_x_start"].square().mean().backward()
+    assert actor.future_encoder.output.weight.grad.norm() > 0
+    # 原架构零初始化的末层在第一次更新前允许阻断更早Future层，这是预期行为。
+    assert torch.isfinite(actor.future_encoder.output.weight.grad).all()
+
+
+def test_labels_not_conditions_and_invalid_future_zero(actor_factory):
+    base, batch = actor_factory(motion_frames=60, starts=(45,))
+    actor = JointPhysicsActor(base).eval()
+    changed = copy.deepcopy(batch)
+    changed["target_qpos30"][~batch["known_qpos30_mask"]] += 17
+    changed["target_contact"] = 1 - changed["target_contact"]
+    changed["meta"][0]["ground_supervision"] = {"sentinel": "not_actor_input"}
+    for k, v in base.adapt_conditions(batch).items():
+        torch.testing.assert_close(v, base.adapt_conditions(changed)[k], rtol=0, atol=0)
+    with torch.no_grad():
+        actor.future_encoder.output.weight.fill_(1)
+        actor.future_encoder.output.bias.fill_(2)
+    invalid = ForecastContext(torch.full((1, 58), float("nan")), torch.zeros(1, dtype=torch.bool), 900, 1020)
+    assert torch.equal(actor.future_residual(batch, [invalid]), torch.zeros(1, 60, 32))
+
+
+def test_sample_restores_all_module_modes(actor_factory):
+    base, batch = actor_factory(motion_frames=60, starts=(45,))
+    actor = JointPhysicsActor(base).train()
+    actor.stage1.music_embedder.eval()
+    before = [m.training for m in actor.modules()]
+    context = ForecastContext.invalid(batch["music_features"], 900)
+    with torch.no_grad():
+        output = actor.sample_differentiable(batch, context, torch.randn(1, 60, 30))
+    assert [m.training for m in actor.modules()] == before
+    assert output["qpos30"].shape == (1, 60, 30)
+    mask = batch["known_qpos30_mask"]
+    torch.testing.assert_close(output["qpos30"][mask], batch["known_qpos30"][mask], rtol=0, atol=0)
+
+
+def test_random_static_construction_never_loads_genmo(monkeypatch):
+    from gem.closedloop.joint_physics.config import ROOT, build_actor, read_config, seed_all
+    import gem.closedloop.training as legacy
+    def forbidden(*args, **kwargs):
+        raise AssertionError("禁止旧GENMO权重初始化")
+    for name in ("load_stage1_checkpoint", "warm_start_weights", "initialize_stage1_weights"):
+        monkeypatch.setattr(legacy, name, forbidden)
+    cfg = read_config(ROOT / "configs/closedloop/joint_physics_from_scratch.yaml")
+    cfg["stage1"]["model"].update(latent_dim=32, num_layers=2, num_heads=4, history_hidden_dim=24)
+    values = []
+    for seed in (72, 72, 73):
+        seed_all(seed)
+        actor, _ = build_actor(cfg, "cpu")
+        values.append(actor.stage1.denoiser.add_cond_linear.weight.detach().clone())
+        assert actor.initialization == "static_config_random_no_genmo_checkpoint"
+    assert torch.equal(values[0], values[1])
+    assert not torch.equal(values[0], values[2])

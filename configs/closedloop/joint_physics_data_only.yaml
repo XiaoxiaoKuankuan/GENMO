@@ -1,0 +1,4 @@
+# 对照A：同一随机网络、数据顺序和监督预算，只关闭执行约束。
+base_config: joint_physics_from_scratch.yaml
+physics:
+  enabled: false
