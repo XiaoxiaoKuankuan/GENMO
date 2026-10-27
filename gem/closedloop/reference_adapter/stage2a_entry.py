@@ -164,7 +164,8 @@ def main():
                 collector.reset(split='train', random_start=True, perturb=False)
                 for _ in range(24):
                     collector.step(zero=True, split='train_safety', perturb=False)
-                safety = fixed_probes(collector.state, per_song=2)
+                eligible = collector.state['frame']+64 < bank.ends[collector.state['song']]
+                safety = fixed_probes(select_state(collector.state, eligible), per_song=2)
                 extra['safety'] = {k: v.detach().clone() for k, v in safety.items()}
                 publish('real_transition_warmup')
                 collector.reset(split='train', perturb=True)
@@ -200,14 +201,25 @@ def main():
                 publish('current_policy_real_collection')
                 for _ in range(train['collect_vector_steps_per_update']):
                     collector.step(replay)
-                source = fixed_probes(collector.state, per_song=2)
+                eligible = collector.state['frame']+32 < bank.ends[collector.state['song']]
+                source = fixed_probes(select_state(collector.state, eligible),
+                                     per_song=max(2, (settings['response_pairs']+len(bank.by_split['train'])-1)//len(bank.by_split['train'])))
                 n = min(settings['response_pairs'], collector.num_envs//4, len(source['state']))
                 source = select_state(source, torch.linspace(0, len(source['state'])-1, n, device='cuda').long())
                 data = collect_reference_response(collector, source, replay=replay)
                 response.add(data)
                 publish('bounded_current_policy_WM_supervision')
                 steps = settings['wm_repair_steps'] if state['consecutive_rejections'] or engine.dynamics.model_version == 0 else train['wm_updates_per_iteration']
-                for _ in range(steps):
+                for wm_step in range(steps):
+                    if wm_step and wm_step % 10 == 0:
+                        # 固定监督预算内刷新真实方向，避免对同一16个配对反复拟合50遍。
+                        for _ in range(8):
+                            collector.step(replay)
+                        eligible = collector.state['frame']+32 < bank.ends[collector.state['song']]
+                        fresh = fixed_probes(select_state(collector.state, eligible), per_song=4)
+                        fresh = select_state(fresh, slice(0, min(settings['response_pairs'], len(fresh['state']), collector.num_envs//4)))
+                        data = collect_reference_response(collector, fresh, replay=replay)
+                        response.add(data)
                     report = fit_wm(engine.dynamics, optimizers['wm'], replay.windows(train['wm_batch'], 8), None, 0.,
                         reference_pairs=response.sample(train['wm_batch']), reference_weight=settings['reference_response_weight'])
                     append_json(output/'wm.jsonl', report)
@@ -233,7 +245,8 @@ def main():
                 indices = (torch.arange(count, device='cuda')+state['attempted_adapter_updates']*count)%len(safety['state'])
                 criteria = json.loads(Path(cfg['physical_criteria']).read_text()) | train['wm_quality']
                 result = trust_region_update(collector, select_state(safety, indices), engine.dynamics, critic,
-                    optimizers['adapter'], before, adam_before, criteria, horizon=vector['initial_bptt_steps'], replay=replay)
+                    optimizers['adapter'], before, adam_before, criteria, horizon=vector['initial_bptt_steps'], replay=replay,
+                    response_replay=response)
                 accepted = result['accepted'] and candidate['effective']
                 if accepted:
                     state['accepted_updates'] += 1
@@ -241,6 +254,10 @@ def main():
                 else:
                     control.adapter.load_state_dict(before); optimizers['adapter'].load_state_dict(adam_before)
                     state['consecutive_rejections'] += 1
+                    extra['last_rejected_candidate'] = extra['pending_candidate'] | dict(physical_evidence=result)
+                    atomic_save(dict(**extra['last_rejected_candidate'], config=cfg,
+                        dynamics=engine.dynamics.state_dict(), wm_version=engine.dynamics.model_version),
+                        output/f'rejected_candidate_{state["attempted_adapter_updates"]:03d}.pt')
                 pending = None
                 append_json(output/'updates.jsonl', dict(**state, candidate=candidate, trust_region=result, accepted=accepted))
                 extra['pending_candidate'] = None

@@ -37,8 +37,12 @@ class ReferenceResponseReplay:
         for key, value in data['rejected'].items():
             self.rejected[key] = self.rejected.get(key, 0)+int(value)
         self.total_pairs += len(data['state'])
+        temporal = {'plus_action', 'minus_action', 'plus_next', 'minus_next', 'reliable', 'contact_switch', 'repeated_states'}
         for key, value in data.items():
             if isinstance(value, torch.Tensor):
+                # 训练只监督8步窗口；H16/H32报告使用完整原始配对，不拿补齐数据冒充真实标签。
+                if key in temporal:
+                    value = value[:, :8]
                 value = value.detach()
                 self.data[key] = torch.cat((self.data[key], value))[-self.capacity:] if key in self.data else value[-self.capacity:]
 
@@ -56,7 +60,8 @@ class ReferenceResponseReplay:
 
     def load_state_dict(self, state, device):
         self.capacity, self.total_pairs, self.rejected = state['capacity'], state['total_pairs'], state['rejected']
-        self.data = {k: v.to(device) for k, v in state['data'].items()}
+        temporal = {'plus_action', 'minus_action', 'plus_next', 'minus_next', 'reliable', 'contact_switch', 'repeated_states'}
+        self.data = {k: (v[:, :8] if k in temporal else v).to(device) for k, v in state['data'].items()}
 
 
 def consistency_loss(dynamics, pairs, horizon=8):

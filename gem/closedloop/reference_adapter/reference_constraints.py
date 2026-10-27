@@ -168,7 +168,8 @@ class ReferenceProjection(torch.nn.Module):
         nominal_w = so3_log(nominal_rotation[1:]@nominal_rotation[:-1].transpose(-1, -2))/.02
         dw = w-nominal_w
         return torch.cat((dw[1:].norm(dim=-1)/self.rotation_velocity-1,
-            (dw.diff(dim=0)/.02).norm(dim=-1)/self.rotation_acceleration-1))
+            (dw.diff(dim=0)/.02).norm(dim=-1)/self.rotation_acceleration-1,
+            plan.norm(dim=-1)/.05-1))
 
     def project_rotation(self, proposal, projected, left, anchor, nominal_rotation, lower, upper):
         unit = self.velocity[3:6]*.02
@@ -185,13 +186,25 @@ class ReferenceProjection(torch.nn.Module):
         lo, hi = lower[selected, 3:6].flatten(1), upper[selected, 3:6].flatten(1)
         jacobian = torch.func.vmap(torch.func.jacrev(self.angular_constraints, argnums=0))
         # SQP只修正真实SO(3)约束不满足的旋转通道；每次仍最小化与原提案的距离。
-        for _ in range(6):
+        for _ in range(12):
             value = fn(x, past, current, rotation)
             jac = jacobian(x, past, current, rotation)
             bound = (jac@x[..., None]).squeeze(-1)-value
             matrix = torch.cat((base, jac), 1)
-            x = _CoupledProjection.apply(target, torch.cat((lo, torch.full_like(bound, -1e4)), -1),
-                torch.cat((hi, bound), -1), matrix, self.iterations)
+            # 同一半空间按法向长度缩放，避免角加速度Jacobian把ADMM条件数放大；
+            # 可行集合及最近点目标严格不变，缩放仍参与autograd。
+            scale = matrix.norm(dim=-1).clamp_min(1.)
+            candidate = _CoupledProjection.apply(target, torch.cat((lo, torch.full_like(bound, -1e4)), -1)/scale,
+                torch.cat((hi, bound), -1)/scale, matrix/scale[..., None], self.iterations)
+            # 非线性SQP采用本次优化内部的merit回溯，不对跨控制周期的参考做滤波。
+            # 原线性约束在凸组合下保持可行，实际SO(3)约束逐候选重新计算。
+            fractions = x.new_tensor([1., .5, .25, .125, .0625, .03125, .015625, 0.])
+            trial = x[:, None]+fractions[None, :, None]*(candidate-x)[:, None]
+            g = fn(trial.flatten(0, 1), past.repeat_interleave(len(fractions), 0),
+                   current.repeat_interleave(len(fractions), 0), rotation.repeat_interleave(len(fractions), 0))
+            merit = .5*(trial-target[:, None]).square().sum(-1)+1000*torch.relu(g).sum(-1).reshape(len(x), -1)
+            chosen = merit.argmin(-1)
+            x = trial[torch.arange(len(x), device=x.device), chosen]
         corrected = projected.clone()
         corrected[selected, :, 3:6] = x.reshape(-1, 3, 10).transpose(1, 2)*unit
         return corrected
@@ -210,13 +223,15 @@ class ReferenceProjection(torch.nn.Module):
         excess_w = dw.norm(dim=-1).amax(-1)-self.rotation_velocity
         excess_alpha = (dw.diff(dim=1)/.02).norm(dim=-1).amax(-1)-self.rotation_acceleration
         excess_bound = (proposal.abs()-self.bounds).amax((1, 2))
+        excess_rotation = proposal[..., 3:6].norm(dim=-1).amax(-1)-.05
         # 位移数值容差统一换算到导数，报告原量；不把不收敛解当可执行参考。
         good = ((excess_v <= self.tolerance/.02) & (excess_a <= self.tolerance/.02**2)
                 & (excess_w <= self.tolerance/.02) & (excess_alpha <= self.tolerance/.02**2)
                 & (excess_bound <= self.tolerance))
+        good &= excess_rotation <= self.tolerance
         return dict(feasible=good, velocity_excess=excess_v, acceleration_excess=excess_a,
             angular_velocity_excess=excess_w, angular_acceleration_excess=excess_alpha,
-            bound_excess=excess_bound)
+            bound_excess=excess_bound, rotation_magnitude_excess=excess_rotation)
 
 
 def constrain_plan(proposal, left, anchor, beta):

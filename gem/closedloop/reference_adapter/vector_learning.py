@@ -200,6 +200,8 @@ def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
                     complete = torch.autograd.grad(trajectory['objective'].mean(), parameters, retain_graph=True, allow_unused=True)
                     complete_norm = sum((g.square().sum() for g in complete if g is not None), loss.new_zeros(())).sqrt()
                     totals['gradient_probe_samples'] = len(z['state'])
+                    totals['gradient_complete_probe_norm'] = float(complete_norm)
+                    precision_grads = [torch.zeros_like(p) for p in parameters]
                     execution = trajectory['execution_objective']
                     grads = torch.autograd.grad(execution.mean(), parameters, retain_graph=True, allow_unused=True)
                     totals['execution_gradient_norm'] = float(sum(g.square().sum() for g in grads if g is not None).sqrt())
@@ -209,6 +211,11 @@ def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
                         dot = sum(((a*b).sum() for a, b in zip(grads, complete) if a is not None and b is not None), loss.new_zeros(()))
                         totals['gradient_'+name] = float(term_norm)
                         totals['gradient_cosine_total_'+name] = float(dot/(term_norm*complete_norm).clamp_min(1e-20))
+                        if name.startswith('precision_'):
+                            for i, gradient in enumerate(grads):
+                                if gradient is not None:
+                                    precision_grads[i] += gradient.detach()
+                    totals['gradient_precision_combined_norm'] = float(sum(g.square().sum() for g in precision_grads).sqrt())
                 loss.backward()
                 for name, term in trajectory['weighted'].items():
                     totals['value_'+name] = totals.get('value_'+name, 0.)+float(term.detach().sum())/count

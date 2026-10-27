@@ -1,5 +1,8 @@
 # 十帧Adapter失败审计与A/B/C修复对照
 
+本页为历史失败对照，已由用户最新指定的[Stage2-A WM+BPTT方法](stage2a_reference_compensation.md)
+替代。双低通和C组PPO不属于当前训练入口，不能依据本页启动旧方法。
+
 分支：`feature/stage2-supermimic-adapter`；配套SM：`feature/genmo-worldmodel-bridge`。
 运行范围仅Server-1。旧8组停止并保留，不能把本次从零初始化解释为旧模型续训。
 

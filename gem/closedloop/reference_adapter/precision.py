@@ -8,7 +8,7 @@
 """
 
 import torch
-from supermimic.rotations import so3_log
+from supermimic.rotations import so3_log, so3_exp
 
 NAMES = ('body_orientation', 'joint_position', 'joint_velocity', 'body_angular_velocity', 'root_local_displacement')
 RATIOS = (.30, .25, .20, .15, .10)
@@ -52,6 +52,12 @@ class PrecisionObjective:
         action = (proposal['action']-proposal['zero_action']).square().mean(-1)
         d = torch.cat((z['left'][:, None], z['anchor'][:, None], proposal['residual'], proposal['halo'][:, None]), 1)
         v = d.diff(dim=1)/.02
+        frames = (z['frame'][:, None]+control.bank.offset13).clamp_min(0)
+        rotation = control.bank.pose(z['song'][:, None], frames)[1]
+        corrected = rotation@so3_exp(d[..., 3:6])
+        angular = so3_log(corrected[:, 1:]@corrected[:, :-1].transpose(-1, -2))/.02
+        nominal_angular = so3_log(rotation[:, 1:]@rotation[:, :-1].transpose(-1, -2))/.02
+        v = torch.cat((v[..., :3], angular-nominal_angular, v[..., 6:]), -1)
         a = v.diff(dim=1)/.02
         budget = control.projection
         velocity = (v/budget.velocity).square().mean((1, 2))

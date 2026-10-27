@@ -30,7 +30,7 @@ class PairedParameters(ParameterControl):
 
 
 @torch.no_grad()
-def evaluate_candidate(collector, source, dynamics, critic, before, after, criteria, *, horizon=8, replay=None):
+def evaluate_candidate(collector, source, dynamics, critic, before, after, criteria, *, horizon=8, replay=None, response_replay=None):
     control = collector.control
     if horizon < 8:
         raise ValueError('H1不能作为Adapter参数更新许可')
@@ -55,16 +55,30 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
     repeat_error = torch.zeros(len(source['state']), device=collector.device)
     peak_excess = torch.zeros_like(repeat_error)
     physical_states = []
+    physical_actions, reliable, switches = [], [], []
+    previous_contact = None
     collector.control = variant
     try:
         for t in range(horizon):
-            row = collector.step(replay, auto_reset=True, split='train', perturb=True)
+            row = collector.step(replay, auto_reset=True, split='train', perturb=True, contact_count=count)
             total += .99**t*row['reward'][:count]*alive
             tracking += .99**t*row['raw']['track'][:count]*alive
             alive &= ~row['done'][:count]
             physical_states.append(row['end']['state'][:count].clone())
             states = physical_states[-1].reshape(-1, 4, 55)
             repeat_error = torch.maximum(repeat_error, (states[:, 1]-states[:, 0]).abs().amax(-1))
+            actions = row['proposal']['action'][:count].reshape(-1, 4, 21)
+            physical_actions.append(actions.clone())
+            contact = row['contacts'][0].reshape(len(source['state']), 4, -1)
+            changed = (contact[:, 2] != contact[:, 3]).any(-1)
+            if previous_contact is not None:
+                changed |= (contact != previous_contact).any((1, 2))
+            action_size = (actions[:, 2]-actions[:, 3]).square().mean(-1).sqrt()
+            good = ((mismatch <= 1e-5) & (repeat_error <= 1e-4) & ~changed & (action_size >= 1e-4)
+                    & alive.reshape(-1, 4).all(-1))
+            if reliable:
+                good &= reliable[-1]
+            reliable.append(good); switches.append(changed); previous_contact = contact
         scores, tracks, predictions = (x.reshape(-1, 4) for x in (total, tracking, prediction['objective']))
         cases = []
         for i, song in enumerate(source['song'].tolist()):
@@ -79,6 +93,18 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
         gate = summarize_horizon(cases, horizon, criteria)
         gate['initial_states_match'] = bool((mismatch <= 1e-5).all())
         gate['passed'] &= gate['initial_states_match']
+        if response_replay is not None:
+            actual = torch.stack(physical_states, 1).reshape(len(source['state']), 4, horizon, 55).transpose(1, 2)
+            actions = torch.stack(physical_actions, 1)
+            valid, switch = torch.stack(reliable, 1), torch.stack(switches, 1)
+            response_replay.add(dict(origin='current_policy_real_reference_response', split='train',
+                state=start['state'][::4], xi=start['xi'][::4], song=source['song'], frame=source['frame'],
+                plus_action=actions[:, :, 2], minus_action=actions[:, :, 3],
+                plus_next=actual[:, :, 2], minus_next=actual[:, :, 3], reliable=valid, contact_switch=switch,
+                policy_version=torch.full_like(source['song'], collector.policy_version),
+                initial_mismatch=mismatch, repeated_states=actual[:, :, :2],
+                rejected=dict(unreliable_steps=int((~valid).sum()), contact_switch_steps=int(switch.sum()),
+                              initial_mismatch=int((mismatch > 1e-5).sum()))))
         return dict(identity=dict(wm_version=dynamics.model_version, wm_sha256=parameter_identity(dynamics),
             adapter_before_sha256=parameter_identity(control.adapter), objective_scales=control.precision.scales,
             precision_weight=control.precision.weight, terminal_value=False), cases=cases, gate=gate,
@@ -92,7 +118,7 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
 
 
 def trust_region_update(collector, source, dynamics, critic, optimizer, before, adam_before,
-                        criteria, *, horizon=8, replay=None):
+                        criteria, *, horizon=8, replay=None, response_replay=None):
     control = collector.control
     candidate = copy.deepcopy(control.adapter.state_dict())
     adam_candidate = copy.deepcopy(optimizer.state_dict())
@@ -103,7 +129,7 @@ def trust_region_update(collector, source, dynamics, critic, optimizer, before, 
             scaled = {k: before[k]+fraction*(candidate[k]-before[k]) for k in before}
             control.adapter.load_state_dict(scaled)
             report = evaluate_candidate(collector, source, dynamics, critic, before, scaled,
-                criteria, horizon=horizon, replay=replay)
+                criteria, horizon=horizon, replay=replay, response_replay=response_replay)
             report['parameter_step_fraction'] = fraction
             report['identity']['adapter_candidate_sha256'] = parameter_identity(control.adapter)
             reports.append(report)

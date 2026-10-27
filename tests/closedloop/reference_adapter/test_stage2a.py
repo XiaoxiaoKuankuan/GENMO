@@ -145,3 +145,36 @@ def test_WM_BPTT_precision_preserves_frozen_parameters(system):
     for k, v in old_wm.items():
         torch.testing.assert_close(engine.dynamics.state_dict()[k], v, atol=0, rtol=0)
     engine.step.bundle.assert_unchanged(frozen)
+
+
+def test_response_replay_mixes_long_audit_and_H8_candidate_without_fake_padding():
+    from gem.closedloop.reference_adapter.reference_response import ReferenceResponseReplay
+    replay = ReferenceResponseReplay()
+    for length in (32, 8):
+        value = torch.arange(2*length*21).reshape(2, length, 21).float()
+        replay.add(dict(origin='current_policy_real_reference_response', split='train', rejected={},
+            state=torch.zeros(2, 55), plus_action=value, minus_action=-value,
+            reliable=torch.ones(2, length, dtype=torch.bool)))
+    assert replay.data['plus_action'].shape == (4, 8, 21)
+    assert replay.total_pairs == 4
+    assert replay.sample(32)['reliable'].shape == (32, 8)
+    clone = ReferenceResponseReplay()
+    clone.load_state_dict(replay.state_dict(), 'cpu')
+    torch.testing.assert_close(clone.data['plus_action'], replay.data['plus_action'], atol=0, rtol=0)
+
+
+def test_real_committed_SO3_seam_regression():
+    import json
+    from pathlib import Path
+    fixture = json.loads((Path(__file__).parent/'fixtures/so3_committed_seam.json').read_text())
+    p = projector()
+    raw = torch.zeros(1, 10, 27, dtype=torch.double)
+    left, anchor = torch.zeros(1, 27, dtype=torch.double), torch.zeros(1, 27, dtype=torch.double)
+    raw[..., 3:6] = torch.tensor(fixture['raw'], dtype=torch.double)
+    left[..., 3:6] = torch.tensor(fixture['left'], dtype=torch.double)
+    anchor[..., 3:6] = torch.tensor(fixture['anchor'], dtype=torch.double)
+    rotation = torch.tensor(fixture['rotation'], dtype=torch.double)[None]
+    projected = p(raw, left, anchor, rotation)
+    certificate = p.certificate(projected, left, anchor, rotation)
+    assert certificate['feasible'].all(), certificate
+    assert float(certificate['angular_acceleration_excess'].max()) < .0025
