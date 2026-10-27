@@ -73,6 +73,12 @@ def main():
         if not np.all(np.diff(a['tick'])==12):raise ValueError('Missing real controls')
         arrays.append(a)
     task=metadata[0]['task'];frames=max(len(a['tick']) for a in arrays);fps=50
+    adapter_diagnostic=all(m.get('schema')=='genmo.adapter.actual_physics_diagnostic.v1' for m in metadata)
+    if adapter_diagnostic:
+        # 相同世界坐标的小地图保留绝对跑偏证据；主镜头跟随不能掩盖根位置漂移。
+        paths=np.concatenate([a[k][:,:2] for a in arrays for k in ('qpos','nominal_qpos')])
+        map_mid=(paths.min(0)+paths.max(0))/2
+        map_span=max(float(np.ptp(paths,axis=0).max()),1.)*1.15
     audio_sha=sha(args.audio)
     if audio_sha!=task['sample']['row']['source_audio_sha256']:
         raise ValueError('Audio file differs from task manifest')
@@ -102,7 +108,7 @@ def main():
         for index in range(frames):
             canvas=Image.new('RGB',size,'#101a2a');draw=ImageDraw.Draw(canvas)
             draw.text((16,4),f"{task['split']} / {task['dataset']} / {task['sample_id']}    seed={task['seed']}    音乐 t={(index+1)/50:.2f}s",font=text_font,fill='white')
-            draw.text((16,29),'Isaac真实执行轨迹 · MuJoCo运动学回放 · 相同视角，跟随根平移 · 非MuJoCo动力学重跑',font=small_font,fill='#b7c5d9')
+            draw.text((16,29),'真实物理执行轨迹 · MuJoCo运动学回放 · 主镜头跟随根平移，小地图保留绝对轨迹' if adapter_diagnostic else 'Isaac真实执行轨迹 · MuJoCo运动学回放 · 相同视角，跟随根平移 · 非MuJoCo动力学重跑',font=small_font,fill='#b7c5d9')
             for column,(a,m,label,color) in enumerate(zip(arrays,metadata,args.labels,colors)):
                 left=column*w;draw.text((left+16,56),label,font=title_font,fill=color)
                 if index<len(a['tick']):
@@ -115,9 +121,25 @@ def main():
                         ((safe[:,0]==hard[:,0])&(q<=hard[:,0]))|((safe[:,1]==hard[:,1])&(q>=hard[:,1]))))
                     outside=int(np.sum((q<hard[:,0]-1e-6)|(q>hard[:,1]+1e-6)))
                     displacement=float(np.linalg.norm(a['qpos'][index,:2]-a['qpos'][0,:2]))
-                    draw.text((left+12,header+h+5),f"活动 {a['activity'][index]:.3f} / 目标 {a['target_activity'][index]:.3f} rad/s",font=text_font,fill='white')
-                    draw.text((left+12,header+h+32),f"近边界 {near}/21  硬越界 {outside}/21  根位移 {displacement:.2f}m",font=text_font,fill='#ffad96' if outside else '#c5d0df')
-                    draw.text((left+12,header+h+59),f"累计回报 {cumulative[column][index]:.2f}  活动门控 {a['activity_gate'][index]:.2f}",font=text_font,fill='#c5d0df')
+                    if adapter_diagnostic:
+                        error=float(np.sqrt(a['raw_error_root_pos'][index]));saturation=float(a['raw_residual_saturation'][index])
+                        draw.text((left+12,header+h+5),f"原始目标根位置误差 {error:.2f} m",font=text_font,fill='white')
+                        draw.text((left+12,header+h+32),f"Tracking {a['raw_track'][index]:.4f}   残差饱和 {saturation:.0%}",font=text_font,fill='#c5d0df')
+                        draw.text((left+12,header+h+59),f"关节活动 {a['activity'][index]:.2f} rad/s   真实 t={(index+1)/50:.2f}s",font=text_font,fill='#c5d0df')
+                        mx,my=left+w-170,header+h-155
+                        draw.rectangle((mx,my,mx+160,my+145),fill='#142236',outline='#8da3b9')
+                        draw.text((mx+4,my+3),'蓝：目标  橙：真实',font=small_font,fill='white')
+                        def points(positions):
+                            xy=(positions-map_mid)/map_span
+                            return [(mx+80+float(p[0])*128,my+87-float(p[1])*100) for p in xy]
+                        for key,col in [('nominal_qpos','#68b8ff'),('qpos','#ffae69')]:
+                            pts=points(a[key][:index+1,:2])
+                            if len(pts)>1:draw.line(pts,fill=col,width=2)
+                            px,py=pts[-1];draw.ellipse((px-3,py-3,px+3,py+3),fill=col)
+                    else:
+                        draw.text((left+12,header+h+5),f"活动 {a['activity'][index]:.3f} / 目标 {a['target_activity'][index]:.3f} rad/s",font=text_font,fill='white')
+                        draw.text((left+12,header+h+32),f"近边界 {near}/21  硬越界 {outside}/21  根位移 {displacement:.2f}m",font=text_font,fill='#ffad96' if outside else '#c5d0df')
+                        draw.text((left+12,header+h+59),f"累计回报 {cumulative[column][index]:.2f}  活动门控 {a['activity_gate'][index]:.2f}",font=text_font,fill='#c5d0df')
                 else:
                     reason='音乐结束' if m['end_reason']=='music_end' else '执行已终止：'+str(m['end_reason'])
                     draw.text((left+25,header+h//2-35),reason,font=title_font,fill=color)

@@ -1,0 +1,332 @@
+"""独立重放已保存Adapter，导出真实物理视频轨迹和同初态残差消融证据。
+
+本工具只读加载正式checkpoint中的冻结Actor、Adapter及诊断需要的WM/Critic；不恢复
+训练采集器，不创建优化器，不修改任何正式模型、Replay或日志。collect模式复用原
+VectorControl/VectorCollector及RobotSpec，在一个独立GPU仿真内同时运行零Adapter、
+两个指定模型和根/关节/幅值消融。每组使用相同四首独立评价歌、初态、50Hz控制及
+200Hz物理，只保存首个真实episode，失败后的状态不补分、不补姿态。渲染另由已有
+render_stage10_model_comparison.py读取真实qpos完成，不把运动学回放冒充新动力学。
+
+mechanism模式从真实重放保存的因果起点检验输入可观测性、位置奖励梯度、输出饱和、
+局部响应训练动作覆盖和Critic终端梯度来源。诊断不使用未来真实状态，不更新参数，
+每项结果保留模型身份、任务和时域；有限步消融不自动证明整个训练过程的唯一原因。
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+
+def write_json(path, value):
+    with Path(path).open('x') as handle:
+        json.dump(value, handle, ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def sha(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for block in iter(lambda: handle.read(8*1024**2), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def checkpoint_adapter(path, engine):
+    import torch
+    # mmap只触碰本次实际读取的张量页，避免把百万Replay搬到GPU。
+    ck = torch.load(path, map_location='cpu', weights_only=False, mmap=True)
+    if ck['input_spec'] != engine.step.adapter.input_spec:
+        raise ValueError('checkpoint与2654维具名输入合同不符')
+    if any(not torch.equal(v.cpu(), ck['frozen_bundle'][k])
+           for k, v in engine.step.bundle.state_dict().items()):
+        raise ValueError('冻结Actor/normalizer/资产与本次重放不符')
+    model = copy.deepcopy(engine.step.adapter)
+    model.load_state_dict(ck['adapter'])
+    return model, ck
+
+
+def variants():
+    rows = [('zero', -1, 'all', 0.)]
+    for model in range(2):
+        for component, scale in [('all', 1.), ('root', 1.), ('joints', 1.), ('all', .1)]:
+            rows.append((f'model{model}_{component}_{scale:g}', model, component, scale))
+    return rows
+
+
+def collect(args, cfg, engine, tasks, bank):
+    import numpy as np
+    import torch
+    from isaaclab.app import launch_simulation
+    from supermimic.env import make_sim
+    from supermimic.bridge.streaming_env import StreamingPhysicalEnv
+    from supermimic.rotations import mat_to_quat
+    from gem.closedloop.reference_adapter.vector_control import VectorControl, select_state
+    from gem.closedloop.reference_adapter.vector_collector import VectorCollector
+    from gem.closedloop.reference_adapter.evaluation import beat_report
+    from gem.closedloop.reference_adapter.vector_entry import compile_kinematics
+    if not args.no_compile:
+        compile_kinematics(engine, bank)
+    models, identities = [], []
+    for path in args.checkpoints:
+        model, ck = checkpoint_adapter(path, engine)
+        models.append(model)
+        identities.append(dict(path=str(Path(path).resolve()), accepted_updates=ck['state']['accepted_updates'],
+                               source=ck['state']['source'], file_bytes=Path(path).stat().st_size))
+        del ck
+    rows = variants()
+    ns = len(bank.by_split['evaluation']); count = ns*len(rows)
+    if args.num_envs < count:
+        raise ValueError(f'至少需要{count}个环境才能同初态并行消融')
+    indices = torch.arange(args.num_envs, device=bank.device)
+    variant = indices.div(ns, rounding_mode='floor') % len(rows)
+    song_ids = bank.by_split['evaluation'][indices % ns]
+    mask = torch.ones(len(rows), 27, device=bank.device)
+    for i, (_, _, component, _) in enumerate(rows):
+        if component == 'root': mask[i, 6:] = 0
+        if component == 'joints': mask[i, :6] = 0
+    scale = torch.tensor([r[3] for r in rows], device=bank.device)
+    model_id = torch.tensor([r[1] for r in rows], device=bank.device)[variant]
+    subsets = [(model_id == i).nonzero().flatten() for i in range(2)]
+
+    class PairedControl(VectorControl):
+        def propose(self, z, **unused):
+            residual = z['state'].new_zeros(len(z['state']), 10, 27)
+            for model, selected in zip(models, subsets):
+                zz = select_state(z, selected)
+                residual[selected] = model.forward_packed(self.packed(self.fields(zz)))
+            residual = residual*mask[variant, None]*scale[variant, None, None]
+            current, future, goal, halo = self.reference(z, residual)
+            return dict(residual=residual, current=current, future=future, goal=goal, halo=halo,
+                        action=self.bundle.act(z['history'], goal))
+
+    control = PairedControl(engine, bank)
+    output = Path(args.output)
+    started = time.time()
+    sim_cfg = make_sim('cuda:0', args)
+    with launch_simulation(sim_cfg, args), torch.no_grad():
+        env = StreamingPhysicalEnv(sim_cfg, args.num_envs, engine.step.bundle)
+        collector = VectorCollector(env, control, seed=20261026)
+        collector.reset(songs=song_ids, frames=torch.zeros_like(song_ids), perturb=False)
+        initial = collector.state['state'][:count].clone()
+        paired_error = float((initial.reshape(len(rows), ns, 55)-initial[:ns]).abs().max())
+        if paired_error > 1e-4:
+            raise ValueError(f'真实初态配对不符: {paired_error}')
+        active = torch.ones(count, dtype=torch.bool, device=bank.device)
+        failed = torch.zeros_like(active)
+        series = {k: [] for k in ('state', 'action', 'residual', 'nominal', 'corrected', 'target_qd', 'reward', 'live')}
+        raw_series, snapshots = {}, {}
+        step = 0
+        while bool(active.any()):
+            if step in (0, 50, 100, 200):
+                snapshots[step] = {k: v[:count].detach().cpu().clone() for k, v in collector.state.items()}
+            row = collector.step(auto_reset=True, split='evaluation', perturb=False)
+            nominal = bank.ref(row['start']['song'][:count], row['start']['frame'][:count]+1)
+            target = row['proposal']['future']
+            nominal_pose = torch.cat((nominal.root_p, mat_to_quat(nominal.root_R), nominal.q), -1)
+            corrected_pose = torch.cat((target.root_p[:count, 0], mat_to_quat(target.root_R[:count, 0]), target.q[:count, 0]), -1)
+            values = dict(state=row['end']['state'][:count], action=row['proposal']['action'][:count],
+                residual=row['proposal']['residual'][:count], nominal=nominal_pose, corrected=corrected_pose,
+                target_qd=target.qd[:count], reward=row['reward'][:count], live=active)
+            for k, v in values.items(): series[k].append(v.detach().cpu().clone())
+            for k, v in row['raw'].items():
+                if isinstance(v, torch.Tensor) and v.ndim == 1:
+                    raw_series.setdefault(k, []).append(v[:count].detach().cpu().clone())
+            failed |= active & row['failed'][:count]
+            active &= ~row['done'][:count]
+            step += 1
+            if step % 200 == 0:
+                print(json.dumps(dict(vector_steps=step, active=int(active.sum()), wall_s=time.time()-started)), flush=True)
+        series = {k: torch.stack(v).numpy() for k, v in series.items()}
+        raw_series = {k: torch.stack(v).numpy() for k, v in raw_series.items()}
+        torch.save(snapshots, output/'causal_starts.pt')
+        native = env.to_native.cpu().numpy()
+        names = [engine.step.bundle.spec.joint_names[int(i)] for i in native]
+        lo, hi = control.runtime.kin.q_lo.cpu().numpy()[native], control.runtime.kin.q_hi.cpu().numpy()[native]
+        soft_lo, soft_hi = control.runtime.mdp.soft_lo.cpu().numpy()[native], control.runtime.mdp.soft_hi.cpu().numpy()[native]
+        mjcf = engine.step.bundle.spec.mjcf_path
+        write_json(output/'render_assets.json', dict(source_mjcf_sha256=sha(mjcf), mjcf=str(mjcf), joint_names=names))
+        reports = []
+        for column in range(count):
+            variant_id, song_column = divmod(column, ns)
+            name, model_idx, component, scale_value = rows[variant_id]
+            song = int(song_ids[column]); task = tasks[song]
+            n = int(series['live'][:, column].sum())
+            state = series['state'][:n, column]
+            qpos = np.concatenate((state[:, :7], state[:, 13:34][:, native]), -1)
+            nominal = series['nominal'][:n, column]
+            nominal = np.concatenate((nominal[:, :7], nominal[:, 7:][:, native]), -1)
+            corrected = series['corrected'][:n, column]
+            corrected = np.concatenate((corrected[:, :7], corrected[:, 7:][:, native]), -1)
+            raw = {k: v[:n, column] for k, v in raw_series.items()}
+            initial_qd = initial[column:column+1, 34:].cpu()
+            qd = torch.cat((initial_qd, torch.from_numpy(state[:, 34:])))
+            audio = bank.audio[song]
+            beat = beat_report(qd.to(bank.device), torch.arange(n+1, device=bank.device)*12, audio)
+            stem = f'{name}_song{song_column}'
+            array_file = output/(stem+'.npz')
+            np.savez_compressed(array_file, qpos=qpos, nominal_qpos=nominal, corrected_qpos=corrected,
+                state=state, action=series['action'][:n, column], residual=series['residual'][:n, column],
+                target_qd=series['target_qd'][:n, column], tick=np.arange(1, n+1)*12,
+                actual_joint_gmt=qpos[:, 7:], safe_limits=np.stack((soft_lo, soft_hi), -1)[None],
+                hard_limits=np.stack((lo, hi), -1)[None], reward=series['reward'][:n, column],
+                activity=np.abs(state[:, 34:]).mean(-1), target_activity=raw['activity_nominal'],
+                activity_gate=np.ones(n), **{'raw_'+k: v for k, v in raw.items()})
+            render_task = dict(split=task['split'], dataset=task['source'], sample_id=task['id'], seed=42,
+                sample=dict(row=dict(source_audio_sha256=task['audio_sha256'])))
+            metadata = dict(schema='genmo.adapter.actual_physics_diagnostic.v1', task_id=task['id'], task=render_task,
+                trajectory_file=array_file.name, sha256=sha(array_file), fps=50, quaternion_convention='wxyz',
+                qpos_order='mujoco_native', joint_names=names, actual_control_steps=n,
+                end_reason='physical_failure' if bool(failed[column]) else 'music_end',
+                checkpoint=identities[model_idx] if model_idx >= 0 else None,
+                variant=name, component=component, residual_scale=scale_value, audio_path=task['audio_path'],
+                physics='original_SM_IsaacLab3_Newton_MuJoCoWarp_200Hz_50Hz_control',
+                num_envs=args.num_envs, initial_pair_max_abs=paired_error)
+            write_json(output/(stem+'.json'), metadata)
+            reports.append(dict(variant=name, task=task['id'], steps=n, completion=not bool(failed[column]),
+                failure_time_s=n*.02 if bool(failed[column]) else None, mean_tracking=float(raw['track'].mean()),
+                root_position_rmse_m=float(np.sqrt(raw['error_root_pos'].mean())),
+                root_orientation_rmse_rad=float(np.sqrt(raw['error_root_ori'].mean())),
+                root_final_error_m=float(np.linalg.norm(qpos[-1, :3]-nominal[-1, :3])),
+                jerk_rms=float((qd.diff(n=2, dim=0)/.02**2).square().mean().sqrt()),
+                mean_abs_joint_speed=float(qd.abs().mean()), music=beat,
+                raw_means={k: float(v.mean()) for k, v in raw.items()}, trajectory=str(array_file)))
+        summaries = []
+        for name, _, _, _ in rows:
+            subset = [r for r in reports if r['variant'] == name]
+            summaries.append(dict(variant=name, completion_rate=sum(r['completion'] for r in subset)/ns,
+                **{k: sum(r[k] for r in subset)/ns for k in ('mean_tracking', 'root_position_rmse_m',
+                       'root_orientation_rmse_rad', 'jerk_rms', 'mean_abs_joint_speed')},
+                mean_beat_f1=sum(r['music']['f1'] or 0. for r in subset)/ns))
+        write_json(output/'physical_ablation.json', dict(models=identities, variants=rows, episodes=reports,
+            summaries=summaries, source='actual_physics_same_initial_state_no_optimizer_updates',
+            actual_transitions=collector.real_transitions, vector_steps=step, wall_seconds=time.time()-started,
+            initial_pair_max_abs=paired_error, torch_peak_mib=torch.cuda.max_memory_allocated()/2**20))
+        print(json.dumps(summaries, ensure_ascii=False), flush=True)
+
+
+def mechanism(args, engine, bank):
+    import torch
+    from gem.closedloop.reference_adapter.vector_control import VectorControl, select_state
+    from gem.closedloop.reference_adapter.vector_learning import GroupNormalizedCritic, rollout
+    from gem.closedloop.reference_adapter.dynamics import frozen_parameters
+    source = Path(args.trajectories)
+    snapshots = torch.load(source/'causal_starts.pt', map_location='cpu', weights_only=False)
+    control = VectorControl(engine, bank)
+    ns = len(bank.by_split['evaluation'])
+    output = Path(args.output)
+    reports = []
+    for model_index, path in enumerate(args.checkpoints):
+        model, ck = checkpoint_adapter(path, engine)
+        engine.step.adapter.load_state_dict(model.state_dict())
+        engine.dynamics.load_state_dict(ck['dynamics'])
+        critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec).to(bank.device)
+        critic.load_state_dict(ck['critic']); del model
+        begin = (1+4*model_index)*ns
+        states = [select_state(v, slice(begin, begin+ns)) for _, v in sorted(snapshots.items())]
+        z = {k: torch.cat([v[k] for v in states]).to(bank.device) for k in states[0]}
+        parameters = tuple(control.adapter.parameters())
+        with torch.no_grad():
+            x = control.packed(control.fields(z)); proposal = control.propose(z)
+            nominal = bank.ref(z['song'], z['frame'])
+            zero = control.propose(z, zero=True)
+            logits = control.adapter.net(x)
+            action_difference = (proposal['action']-zero['action']).norm(dim=-1)
+            saturation = (logits.tanh().abs() >= .98).float().mean()
+        translation = []
+        for shift in (0., .1, .3, .6, 1., 2., 5.):
+            shifted = {k: v.detach().clone() for k, v in z.items()}
+            shifted['state'][:, 0] += shift
+            shifted['state'].requires_grad_()
+            xx = control.packed(control.fields(shifted))
+            pp = control.propose(shifted)
+            _, terms = control.runtime.reward(shifted['state'], pp['action'].detach(), z['action'], nominal, diagnostics=True)
+            root_reward = .01*terms['root_pos']
+            gp, = torch.autograd.grad(root_reward.sum(), shifted['state'])
+            translation.append(dict(shift_m=shift, input_max_abs=float((xx-x).abs().max()),
+                action_max_abs=float((pp['action']-proposal['action']).abs().max()),
+                mean_root_reward=float(root_reward.mean()), mean_root_x_gradient_abs=float(gp[:, 0].abs().mean()),
+                terminated=int(control.runtime.termination(shifted['state'], nominal).sum())))
+        report = dict(model_index=model_index, checkpoint=str(path), accepted_updates=ck['state']['accepted_updates'],
+            physical_starts=len(z['state']), start_frames=z['frame'].tolist(), translation=translation,
+            residual_saturation=float(saturation), logits_abs_max=float(logits.abs().max()),
+            logits_abs_median=float(logits.abs().median()),
+            action_change_from_zero_L2_median=float(action_difference.median()),
+            action_change_over_tangent_radius_median=float(action_difference.median()/.02), horizons=[])
+        def grad(value):
+            values = torch.autograd.grad(value.mean(), parameters, retain_graph=True, allow_unused=True)
+            return torch.cat([(torch.zeros_like(p) if v is None else v).flatten() for p, v in zip(parameters, values)])
+        def cos(a, b):
+            return float(torch.dot(a, b)/(a.norm()*b.norm()).clamp_min(1e-20))
+        with engine.dynamics.adapter_phase(), frozen_parameters(critic):
+            for horizon in (1, 4, 8):
+                tr = rollout(control, engine.dynamics, critic, z, horizon, terminal_value=True)
+                dense = tr['objective']-tr['terminal_contribution']
+                g_dense, g_terminal, g_track = grad(dense), grad(tr['terminal_contribution']), grad(tr['execution_objective'])
+                end = tr['end']
+                physical = {k: v if k == 'state' else v.detach() for k, v in end.items()}
+                context = {k: v.detach() if k == 'state' else v for k, v in end.items()}
+                discount = .99**horizon*tr['continuation'].prod(0).detach()
+                g_physical = grad(discount*critic(control.critic_features(physical)))
+                g_context = grad(discount*critic(control.critic_features(context)))
+                values = {k: float(v.detach().mean()) for k, v in tr['weighted'].items()}
+                component_norms = {k: float(grad(v).norm()) for k, v in tr['weighted'].items()}
+                report['horizons'].append(dict(horizon=horizon, mean_dense=float(dense.detach().mean()),
+                    mean_terminal=float(tr['terminal_contribution'].detach().mean()),
+                    dense_gradient_norm=float(g_dense.norm()), terminal_gradient_norm=float(g_terminal.norm()),
+                    terminal_over_dense_gradient=float(g_terminal.norm()/g_dense.norm().clamp_min(1e-20)),
+                    terminal_physical_state_gradient_norm=float(g_physical.norm()),
+                    terminal_context_gradient_norm=float(g_context.norm()),
+                    terminal_vs_tracking_cosine=cos(g_terminal, g_track), dense_vs_tracking_cosine=cos(g_dense, g_track),
+                    values=values, weighted_gradient_norms=component_norms))
+                del tr, dense, g_dense, g_terminal, g_track, g_physical, g_context
+        reports.append(report)
+        del ck
+        print(json.dumps(report, ensure_ascii=False), flush=True)
+    write_json(output/'mechanism.json', dict(models=reports,
+        evidence='frozen_checkpoint_autograd_on_causal_real_starts_no_optimizer_update',
+        caveat='value calibration does not establish value input-gradient accuracy; ablations are separate real physics'))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', required=True)
+    parser.add_argument('--checkpoints', nargs=2, required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--num-envs', type=int, default=2048)
+    parser.add_argument('--no-compile', action='store_true')
+    parser.add_argument('--mode', choices=['collect', 'mechanism'], default='collect')
+    parser.add_argument('--trajectories')
+    preliminary, _ = parser.parse_known_args()
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.to_container(OmegaConf.load(preliminary.config), resolve=True)
+    sys.path.insert(0, cfg['supermimic']['repo'])
+    from isaaclab.app import add_launcher_args
+    add_launcher_args(parser)
+    args = parser.parse_args()
+    import torch
+    from gem.closedloop.reference_adapter.application import build_engine, read_tasks, seed_all
+    from gem.closedloop.reference_adapter.vector_bank import VectorBank
+    if torch.cuda.device_count() != 1:
+        raise ValueError('诊断仅使用一个独立可见GPU')
+    output = Path(args.output).resolve(); output.mkdir(parents=True, exist_ok=False)
+    torch.set_num_threads(1); seed_all(42)
+    write_json(output/'manifest.json', dict(command=[sys.executable, *sys.argv], config=cfg,
+        pid=os.getpid(), gpu=os.environ.get('CUDA_VISIBLE_DEVICES'), source=os.popen('git rev-parse HEAD').read().strip(),
+        started_unix=time.time(), mode=args.mode, modifies_training=False))
+    engine = build_engine(cfg, 'cuda:0')
+    tasks = read_tasks(cfg['tasks']); bank = VectorBank(tasks, engine, 'cuda:0')
+    if args.mode == 'collect': collect(args, cfg, engine, tasks, bank)
+    else: mechanism(args, engine, bank)
+
+
+if __name__ == '__main__':
+    main()
