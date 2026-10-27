@@ -129,7 +129,8 @@ def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False
                        "anchor_selection": window.provenance.get("audit_anchor_selection"),
                        "horizon": horizon, "joint_genmo_feature": joint, "prediction_origin": "gt_interface_probe" if interface_probe else "student_denoised_x0"}
                 try:
-                    result = execute_window(selected, prediction, forward["static_conf_logits"], actor, adapter, cfg["execution_loss"])
+                    result = execute_window(selected, prediction, forward["static_conf_logits"], actor, adapter, cfg["execution_loss"],
+                                            prediction_origin=row['prediction_origin'])
                     gradient, = torch.autograd.grad(result["loss"], prediction, retain_graph=True)
                     direction = torch.zeros_like(prediction)
                     start = window.ticket.prefix_frames
@@ -140,12 +141,13 @@ def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False
                     with torch.no_grad():
                         for sign in (1, -1):
                             perturbation = prediction+sign*eps*direction
-                            model = execute_window(selected, perturbation, forward["static_conf_logits"], actor, adapter, cfg["execution_loss"])
+                            model = execute_window(selected, perturbation, forward["static_conf_logits"], actor, adapter, cfg["execution_loss"],
+                                                   prediction_origin=row['prediction_origin'])
                             values.append(float(model["loss"]))
                             if env is not None:
                                 repeat.append(replay_to_start(env, episode, selected))
                                 physical.append(execute_window(selected, perturbation, forward["static_conf_logits"], actor, adapter,
-                                                               cfg["execution_loss"], transition=env.step_physics))
+                                                               cfg["execution_loss"], transition=env.step_physics,prediction_origin=row['prediction_origin']))
                     fd = (values[0]-values[1])/(2*eps)
                     row.update(execution_loss=float(result["loss"].detach()), x0_gradient_norm=float(gradient.norm()),
                                autograd=automatic, finite_difference=fd,

@@ -56,7 +56,9 @@ def main():
             for name,prediction in (('student',out['pred_x_start']),('gt_interface_only',out['target_x_start'])):
                 try:
                     if windows[0] is None:raise PhysicsRejected(missing[0])
-                    value=execute_window(windows[0],prediction,out['static_conf_logits'],actor,adapter,cfg['execution_loss'],support=support.for_tags(metadata[0]['tags']))
+                    value=execute_window(windows[0],prediction,out['static_conf_logits'],actor,adapter,cfg['execution_loss'],
+                                         support=support.for_tags(metadata[0]['tags']),
+                                         prediction_origin='student_denoised_x0' if name=='student' else name)
                     record[name]={'valid':True,'loss':float(value['loss'])}
                 except PhysicsRejected as error:
                     record[name]={'valid':False,'reason':error.reason,'details':error.details}

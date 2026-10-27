@@ -126,7 +126,8 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
                     base = {'source':key,'dataset':item['dataset'],'frame':item['frame'],'horizon':horizon,
                             'timestep':k,'tags':tags,'prediction_origin':'gt_interface_only' if interface_probe else 'student_denoised_x0'}
                     try:
-                        result = execute_window(selected_window,prediction,out['static_conf_logits'],actor,adapter,cfg['execution_loss'])
+                        result = execute_window(selected_window,prediction,out['static_conf_logits'],actor,adapter,cfg['execution_loss'],
+                                                prediction_origin=base['prediction_origin'])
                         grad, = torch.autograd.grad(result['loss'],prediction,retain_graph=True)
                         if not torch.isfinite(grad).all() or not bool(grad.norm()>0):
                             raise PhysicsRejected('zero_or_nonfinite_execution_gradient')
@@ -145,7 +146,8 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
                             with torch.no_grad():
                                 for sign in (1,-1):
                                     candidate = prediction+sign*eps*direction
-                                    model = execute_window(selected_window,candidate,out['static_conf_logits'],actor,adapter,cfg['execution_loss'])
+                                    model = execute_window(selected_window,candidate,out['static_conf_logits'],actor,adapter,cfg['execution_loss'],
+                                                           prediction_origin=base['prediction_origin'])
                                     values.append(float(model['loss']))
                                     repeats.append(replay_to_start(env,episode,selected_window))
                                     trace = []
@@ -154,7 +156,7 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
                                         trace.append(env.contact_events())
                                         return value
                                     physical.append(execute_window(selected_window,candidate,out['static_conf_logits'],actor,adapter,
-                                                                   cfg['execution_loss'],transition=transition))
+                                                                   cfg['execution_loss'],transition=transition,prediction_origin=base['prediction_origin']))
                                     contacts.append(trace)
                             fd = (values[0]-values[1])/(2*eps)
                             pd = (float(physical[0]['loss'])-float(physical[1]['loss']))/(2*eps)

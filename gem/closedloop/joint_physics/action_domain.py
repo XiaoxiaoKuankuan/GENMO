@@ -74,7 +74,8 @@ def validate(cfg, report_path, output, adapter, env):
             window = windows[0]
             if window is None:raise PhysicsRejected(reasons[0])
             prediction = codec.normalize(batch['target_qpos30'])
-            model = execute_window(window,prediction,prediction.new_zeros(1,60,2),actor,adapter,cfg['execution_loss'])
+            model = execute_window(window,prediction,prediction.new_zeros(1,60,2),actor,adapter,cfg['execution_loss'],
+                                   prediction_origin='gt_interface_only')
             episode = store.episode(batch['meta'][0])
             same_start = replay_to_start(env,episode,window)
             states,contacts = [],[]

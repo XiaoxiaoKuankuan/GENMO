@@ -106,7 +106,8 @@ class ValidatedSupport:
                  "upper": float(self.upper[j]+.02)} for i,j in outside]})
 
 
-def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support=None, transition=None):
+def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support=None, transition=None,
+                   prediction_origin="student_denoised_x0"):
     window.validate()
     reference = candidate_reference(window, predicted_x0, logits, actor.stage1.endecoder.codec,
                                     actor.stage1.endecoder)
@@ -116,6 +117,8 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
         outside = ((q.detach() < kin.q_lo-1e-4) | (q.detach() > kin.q_hi+1e-4)).nonzero().tolist()
         if outside:
             raise PhysicsRejected(reason, {"first_reject_tick": window.start.tick, "components": outside,
+                                            "prediction_origin": prediction_origin, "action_origin": "not_executed",
+                                            "failure_phase": "reference_hard_limits",
                                             "maximum_violation_rad": float(torch.maximum(kin.q_lo-q.detach(), q.detach()-kin.q_hi).max())})
     if enforce:
         hard_joint(reference.world_qpos[...,7:][...,adapter.to_sm], "reference_hard_joint_limit")
@@ -169,7 +172,7 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
                         raise PhysicsRejected("sm_physical_termination")
         except PhysicsRejected as error:
             error.details.update(first_reject_tick=rejection_tick, control_step=step, failure_phase=phase,
-                                 action_origin="frozen_sm_from_student_denoised_x0")
+                                 prediction_origin=prediction_origin, action_origin="frozen_sm_from_"+prediction_origin)
             raise
         except ReferenceExhausted as error:
             raise PhysicsRejected("incomplete_reference_window") from error
@@ -187,7 +190,7 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             support.check_motion(torch.cat((window.start.state,*states)),adapter.bundle.spec.joint_names)
         except PhysicsRejected as error:
             error.details.update(first_reject_tick=z.tick,failure_phase='complete_motion_profile',
-                                 action_origin='frozen_sm_from_student_denoised_x0')
+                                 prediction_origin=prediction_origin, action_origin='frozen_sm_from_'+prediction_origin)
             raise
     return {"loss": normalized_window(losses, cfg["discount"]).mean(),
         "safety": normalized_window(safety, cfg["discount"]).mean(),
