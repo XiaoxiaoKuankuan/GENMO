@@ -125,7 +125,7 @@ def anchor_coverage(sample):
 
 
 @torch.no_grad()
-def offline_audit(cfg,run,output,versions):
+def offline_audit(cfg,run,output,versions,*,evaluation_folders=None,audit_training_logs=True):
     from .application import build_components
     from .checkpoint import unpack_value
     from .music_repair_audit import anchors_from_episode
@@ -134,8 +134,9 @@ def offline_audit(cfg,run,output,versions):
     from supermimic.motion import ReferenceBatch
     from supermimic.rotations import quat_to_mat,yaw_mat,so3_log
     torch.set_num_threads(4);output.mkdir(parents=True,exist_ok=False)
-    write_json(output/'input_manifest.json',{'source_run':str(run),'versions':versions,'source_config':cfg,'started_unix':time.time()})
-    audit_logs(run,output)
+    write_json(output/'input_manifest.json',{'source_run':str(run),'versions':versions,'source_config':cfg,'started_unix':time.time(),
+        'evaluation_folders':evaluation_folders,'audit_training_logs':audit_training_logs})
+    if audit_training_logs:audit_logs(run,output)
     local_cfg=json.loads(json.dumps(cfg));local_cfg['model']['compile_networks']=False;local_cfg['teacher']['enabled']=False
     actor,adapter,*_=build_components(local_cfg,'cpu');del actor
     rows=[];all_coverage=[];all_samples=[]
@@ -152,7 +153,7 @@ def offline_audit(cfg,run,output,versions):
             for k,x in groups.items():parts[k].append(x)
         return torch.cat(values),{k:torch.cat(x) for k,x in parts.items()}
     for version in versions:
-        folder=run/'evaluations/fixed_delay_replay'/('initial_genmo_baseline' if version==0 else f'actor_{version:06}')
+        folder=Path(evaluation_folders[str(version)]) if evaluation_folders else run/'evaluations/fixed_delay_replay'/('initial_genmo_baseline' if version==0 else f'actor_{version:06}')
         for source in sorted(folder.glob('shard_*/*_real_controls.pt')):
             payload=torch.load(source,map_location='cpu',weights_only=False,mmap=True);memo={}
             controls=unpack_value(payload['controls'],adapter,'cpu',memo);generations=unpack_value(payload['generations'],adapter,'cpu',memo)

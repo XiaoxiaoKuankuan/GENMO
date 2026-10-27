@@ -15,12 +15,17 @@ if __name__ == '__main__':
         p=argparse.ArgumentParser(description=__doc__)
         p.add_argument('--offline',action='store_true');p.add_argument('--run',required=True)
         p.add_argument('--output',required=True);p.add_argument('--versions',nargs='+',type=int,default=[0,100,300,600,700])
+        p.add_argument('--evaluation-folders',help='显式版本到完整真实评价目录的JSON映射，独立新实验不借用旧版本轨迹')
+        p.add_argument('--skip-log-audit',action='store_true')
         args=p.parse_args()
         import yaml
         cfg=yaml.safe_load((Path(args.run)/'config.yaml').read_text())
         sys.path.insert(0,cfg['supermimic']['repo'])
         from gem.closedloop.mb_control.drift_diagnostics import offline_audit
-        offline_audit(cfg,Path(args.run),Path(args.output),args.versions)
+        import json
+        folders=json.loads(Path(args.evaluation_folders).read_text()) if args.evaluation_folders else None
+        offline_audit(cfg,Path(args.run),Path(args.output),args.versions,
+            evaluation_folders=folders,audit_training_logs=not args.skip_log_audit)
     else:
         from gem.closedloop.mb_control.entry import main
         main('drift')
