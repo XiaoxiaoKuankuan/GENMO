@@ -112,7 +112,7 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
     mass=execution_mass(engine,cfg['training'])
     def primary(interval):
         t=interval.event['objective_terms']
-        return float((t['dance_loss']+cfg['rewards'].get('episode_dance_weight',0.)*t.get('episode_dance_loss',0.)).mean())/mass
+        return float((t['dance_loss']+cfg['rewards'].get('episode_dance_weight',0.)*t.get('episode_dance_loss',0.)).mean().detach())/mass
     reports=[];failures=[]
     root=run/'evaluations/fixed_delay_replay'/('initial_genmo_baseline' if version==0 else f'actor_{version:06}')
     for task in tasks:

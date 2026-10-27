@@ -10,13 +10,15 @@
 import gc
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import time
 import torch
 from omegaconf import OmegaConf
 
 from .application import SupervisionStream,build_stage1_losses,task_inputs,behavior_config,provenance
-from .checkpoint import save_checkpoint,capture_rng
+from .checkpoint import save_checkpoint,load_checkpoint,capture_rng
 from .formal import run_evaluation_processes,write_json
 from .replay import RecentReplay
 from .trainer import Stage2Trainer
@@ -44,6 +46,34 @@ def run_experiment(collector,actor,critic,engine,original,cfg,tasks,output,devic
         'fresh_simulation':False,'reason':'复用逐张量相同初始模型已有8曲完整Newton轨迹；新增episode初态变换在配对初态为恒等'})
     behavior=behavior_config(cfg,actor,engine.adapter);source_info=provenance(cfg)
     task_cursor=0;collector.state=None;failed_episodes=[];evaluation_rows=[]
+    if settings.get('resume_checkpoint'):
+        restored=load_checkpoint(settings['resume_checkpoint'],trainer,replay,behavior_config=behavior,device=device)
+        supervision.load_state_dict(restored['runtime_state']['supervision'])
+        task_cursor=restored['runtime_state']['task_cursor']
+        write_json(output/'resume_lineage.json',{'source':settings['resume_checkpoint'],
+            'accepted_updates':trainer.accepted_actor_updates,'actor_adamw_rng_supervision_restored':True,
+            'physical_solver_restored':False,'collector_episodes_restarted':True,
+            'worker_rng_restart':'request_tick_noise_is_explicitly_seeded; no hidden solver continuation'})
+        del restored
+    pending_evaluations=[]
+    def ingest_evaluation(update,path):
+        summary=json.loads((path/'physical_summary.json').read_text())
+        if any(r['update']==update for r in evaluation_rows):return
+        evaluation_rows.append({'update':update,'completed':summary['completed'],'episodes':summary['episodes'],
+            'dance_loss':sum(r['physical_metrics_mean']['dance_loss'] for r in summary['physical_results'])/len(summary['physical_results']),
+            'physical_summary':str(path/'physical_summary.json')})
+        evaluation_rows.sort(key=lambda r:r['update']);write_json(output/'evaluation_progress.json',evaluation_rows)
+    def poll_evaluations():
+        for item in list(pending_evaluations):
+            process,log,update,path=item
+            if process.poll() is None:continue
+            log.close();pending_evaluations.remove(item)
+            if process.returncode:
+                write_json(output/f'evaluation_{update:06}_failure.json',{'returncode':process.returncode,'path':str(path),'training_not_stopped_by_quality':True})
+            else:ingest_evaluation(update,path)
+        for item in settings.get('inherited_evaluations',[]):
+            path=Path(item['path'])
+            if (path/'physical_summary.json').exists():ingest_evaluation(item['update'],path)
     remotes=[];published_version=-1
     if cfg['execution'].get('physical_worker_gpus'):
         from .parallel_collection import RemotePhysicalCollector,publish_tensor
@@ -58,10 +88,11 @@ def run_experiment(collector,actor,critic,engine,original,cfg,tasks,output,devic
         path=output/'checkpoints'/f'actor_{update:06}.pt'
         save_checkpoint(path,trainer,replay,behavior_config=behavior,
             runtime_state={'supervision':supervision.state_dict(),'task_cursor':task_cursor,
-                'collector_restart_requires_new_episode':True,'experiment_attempt_budget':settings['maximum_attempts']},provenance=source_info)
+                'collector_restart_requires_new_episode':True,'experiment_attempt_budget':settings['maximum_attempts'],'worker_rng':{str(r.collector_id):r.rng for r in remotes}},provenance=source_info)
         return path
-    save(0)
+    save(trainer.accepted_actor_updates)
     while trainer.accepted_actor_updates<50 and trainer.update_index<settings['maximum_attempts']:
+        poll_evaluations()
         collector.actor_version=trainer.accepted_actor_updates
         collector.ready_anchors.clear();samples=[];intervals=[];sampling=[]
         while len(samples)<cfg['training']['actor_microbatch']:
@@ -126,15 +157,22 @@ def run_experiment(collector,actor,critic,engine,original,cfg,tasks,output,devic
             OmegaConf.save(OmegaConf.create(eval_cfg),eval_config)
             if collector.worker.future is not None:raise RuntimeError("候选更新边界仍有在途请求，不能覆盖")
             torch.cuda.empty_cache();gc.collect()
-            run_evaluation_processes(eval_cfg,eval_config,path,eval_path,'full',os.environ.copy())
-            summary=json.loads((eval_path/'physical_summary.json').read_text())
-            evaluation_rows.append({'update':update,'completed':summary['completed'],'episodes':summary['episodes'],
-                'dance_loss':sum(r['physical_metrics_mean']['dance_loss'] for r in summary['physical_results'])/len(summary['physical_results']),
-                'physical_summary':str(eval_path/'physical_summary.json')})
-            write_json(output/'evaluation_progress.json',evaluation_rows)
+            if settings.get('asynchronous_evaluation',False):
+                log=(output/f'evaluation_{update:06}_coordinator.log').open('w')
+                command=[sys.executable,'-u','-m','gem.closedloop.mb_control.drift_evaluation_worker',
+                    '--config',str(eval_config),'--checkpoint',str(path),'--output',str(eval_path)]
+                process=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=os.environ.copy())
+                pending_evaluations.append((process,log,update,eval_path))
+                write_json(output/f'evaluation_{update:06}_process.json',{'pid':process.pid,'command':command})
+            else:
+                run_evaluation_processes(eval_cfg,eval_config,path,eval_path,'full',os.environ.copy())
+                ingest_evaluation(update,eval_path)
         # 长episode保存全部生成器事件会占用内存，但作为真实诊断证据保留；不清除有效缓存。
         del samples,intervals;gc.collect()
     save(trainer.accepted_actor_updates) if trainer.accepted_actor_updates not in (0,10,25,50) else None
     for remote in remotes:remote.close()
+    while pending_evaluations:
+        poll_evaluations();time.sleep(.5)
+    poll_evaluations()
     write_json(output/'completed.json',{'accepted_updates':trainer.accepted_actor_updates,'attempts':trainer.update_index,
         'evaluations':evaluation_rows,'large_formal_training_started':False,'quality_exit_enabled':False})
