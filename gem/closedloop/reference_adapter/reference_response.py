@@ -150,8 +150,9 @@ def consistency_loss(dynamics, pairs, horizon=8, *, kin, scales=None, weights=No
         predicted = response_groups(origin, plus, minus, kin)
         action_size = (pairs['plus_action'][:, :t+1]-pairs['minus_action'][:, :t+1]).square().mean((1, 2)).sqrt()
         for key in errors:
-            # 固定物理尺度加有界幅度权重，最大为1；不将接近动作下限的噪声放大一万倍。
-            gain = action_norm_scale/(action_size.square()+action_norm_scale**2).sqrt()
+            # 平滑有界的动作归一化：默认上限100，替代旧下限1e-4对应的一万倍。
+            # 仍保留响应量纲；不能再乘action_norm_scale把该监督整体缩小一万倍。
+            gain = (action_size.square()+action_norm_scale**2).rsqrt()
             error = (predicted[key]-actual[key])/scales[key]*gain[:, None]
             errors[key].append(torch.nn.functional.huber_loss(error, torch.zeros_like(error), reduction='none').mean(-1))
     mask = pairs['reliable'][:, :horizon]
@@ -161,7 +162,8 @@ def consistency_loss(dynamics, pairs, horizon=8, *, kin, scales=None, weights=No
         reference_response_horizon=horizon, reference_response_reliable_endpoint=int(mask[:, -1].sum()),
         response_group_losses={k: float(v.detach()) for k, v in losses.items()},
         response_group_scales=scales, response_group_weights=weights,
-        response_semantics='finite_amplitude_not_smooth_tangent', action_normalization_scale=action_norm_scale)
+        response_semantics='finite_amplitude_not_smooth_tangent', action_normalization_scale=action_norm_scale,
+        action_normalization_gain_max=1/action_norm_scale)
 
 
 @torch.no_grad()

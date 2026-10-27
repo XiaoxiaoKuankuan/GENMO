@@ -24,6 +24,57 @@ def concatenate_responses(a, b):
     return {k: torch.cat((a[k], b[k])) if isinstance(a[k], torch.Tensor) else a[k] for k in a}
 
 
+def calibrate_training_losses(dynamics, control, windows, replay, cfg):
+    """只用训练标签测量H8/16/32的真实梯度，预先限制新项的相对强度。"""
+    import torch
+    from .reference_response import consistency_loss, reward_response_loss
+    settings, experiment = cfg['stage2a']['long_horizon'], cfg['wm_ablation']
+    params = tuple(dynamics.model.net.parameters())
+    rng = torch.cuda.get_rng_state_all()
+    ids = torch.randint(len(windows['state']), (64,), device=windows['state'].device)
+    long = {k: v[ids] if isinstance(v, torch.Tensor) else v for k, v in windows.items()}
+    def prefix(h):
+        return {k: v[:, :h] if isinstance(v, torch.Tensor) else v for k, v in long.items()}
+    base, _ = dynamics.supervised_loss(prefix(8))
+    one, _ = dynamics.one_step_loss(long)
+    base = base+experiment['one_step_weight']*one
+    for horizon, coefficient in settings['state_weights'].items():
+        term, _ = dynamics.supervised_loss(prefix(int(horizon)))
+        base = base+coefficient*term
+    base_grad = torch.autograd.grad(base, params)
+    base_norm = float(sum(g.square().sum() for g in base_grad).sqrt())
+    rows = []
+    for horizon in (8, 16, 32):
+        pairs = replay.sample(32, horizon=horizon)
+        if pairs is None:
+            raise ValueError('梯度标定缺少训练集完整真实响应')
+        response, _ = consistency_loss(dynamics, pairs, horizon, kin=control.runtime.kin,
+                                      **settings['response'])
+        reward, _ = reward_response_loss(dynamics, control, pairs, horizon,
+                                        scale=experiment['reward_response_scale'])
+        row = dict(horizon=horizon, base_gradient_norm=base_norm)
+        for name, loss in (('reference', response), ('reward', reward)):
+            grad = torch.autograd.grad(loss, params)
+            norm = float(sum(g.square().sum() for g in grad).sqrt())
+            cosine = float(sum((g*b).sum() for g, b in zip(grad, base_grad)))/max(norm*base_norm, 1e-12)
+            row.update({name+'_gradient_norm': norm, name+'_base_cosine': cosine,
+                        name+'_loss': float(loss.detach())})
+        rows.append(row)
+    # 同一组预先固定权重；取三个训练时域中最严格的上限，不按审计结果调参。
+    fraction = experiment['reward_gradient_fraction']
+    reward_weight = min(experiment['reward_response_weight'],
+        *(fraction*base_norm/max(r['reward_gradient_norm'], 1e-12) for r in rows))
+    reference_weight = min(cfg['stage2a']['reference_response_weight'],
+        *(fraction*base_norm/max(r['reference_gradient_norm'], 1e-12) for r in rows))
+    for row in rows:
+        row.update(reward_weighted_fraction=reward_weight*row['reward_gradient_norm']/max(base_norm,1e-12),
+                   reference_weighted_fraction=reference_weight*row['reference_gradient_norm']/max(base_norm,1e-12))
+    torch.cuda.set_rng_state_all(rng)
+    return dict(rows=rows, effective_weight=reward_weight, reference_weight=reference_weight,
+        gradient_fraction_cap=fraction, selection='training_only_H8_H16_H32_no_validation_or_audit_tuning',
+        new_terms='each_capped_separately_relative_to_full_state_plus_one_step_supervision')
+
+
 def prepare_ablation_data(collector, replay, validation, extra, optimizers, critic, cfg, output):
     import torch
     from .vector_control import select_state
@@ -109,6 +160,7 @@ def main():
     p.add_argument('--config', required=True); p.add_argument('--data', required=True)
     p.add_argument('--group', choices=('A','B','C','D'), required=True)
     p.add_argument('--output', required=True)
+    p.add_argument('--calibrate-only', action='store_true', help='只测训练标签H8/16/32梯度，不更新或运行审计')
     first,_=p.parse_known_args()
     cfg=OmegaConf.to_container(OmegaConf.load(first.config), resolve=True)
     sys.path.insert(0,cfg['supermimic']['repo'])
@@ -148,6 +200,12 @@ def main():
                             **{k:v for k,v in b.items() if k!='_sequence'}))
     windows=data['train_windows_d' if args.group=='D' else 'train_windows']
     validation=data['validation_windows'];vpairs=data['validation_pairs']
+    if args.calibrate_only:
+        compile_kinematics(engine,bank)
+        result=calibrate_training_losses(engine.dynamics,control,windows,replay,cfg)
+        json_write(out/'training_gradient_calibration.json',result)
+        print(json.dumps(result),flush=True)
+        return 0
     zero=copy.deepcopy(control.adapter.state_dict())
     old=torch.load(cfg['wm_ablation']['direction_probe'],map_location='cpu',weights_only=False,mmap=True)
     probe=old['adapter']
@@ -155,10 +213,14 @@ def main():
     criteria=json.loads(Path(cfg['physical_criteria']).read_text()) | cfg['training']['wm_quality']
     settings=cfg['stage2a']['long_horizon'];ablation=cfg['wm_ablation']
     one_weight=ablation['one_step_weight'] if args.group!='A' else 0.
-    reward_weight=data['reward_gradient_calibration']['effective_weight'] if args.group in ('C','D') else 0.
+    calibration=(json.loads(Path(ablation['calibration_file']).read_text()) if ablation.get('calibration_file')
+                 else data['reward_gradient_calibration'])
+    reward_weight=calibration['effective_weight'] if args.group in ('C','D') else 0.
+    reference_weight=calibration.get('reference_weight',cfg['stage2a']['reference_response_weight'])
     data_sha=file_digest(args.data);frozen=engine.step.bundle.frozen_snapshot()
     json_write(out/'manifest.json',dict(config=cfg,group=args.group,data_sha256=data_sha,
         initial_WM=parameter_identity(engine.dynamics),one_step_weight=one_weight,reward_response_weight=reward_weight,
+        reference_response_weight=reference_weight,training_gradient_calibration=calibration,
         shared_changes='remove_contact_veto_bounded_action_normalization_Huber_response',
         command=[sys.executable,*sys.argv],source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()))
     compile_kinematics(engine,bank)
@@ -211,7 +273,7 @@ def main():
                 horizon=(8,16,32)[(update-1)%3]
                 pairs=replay.sample(ablation['response_batch'],horizon=horizon)
                 report=fit_wm(engine.dynamics,optimizer,short,None,0.,reference_pairs=pairs,
-                    reference_weight=cfg['stage2a']['reference_response_weight'],reference_kin=control.runtime.kin,
+                    reference_weight=reference_weight,reference_kin=control.runtime.kin,
                     response_settings=settings['response'],long_windows=long,long_weights=settings['state_weights'],
                     checkpoint_steps=True,one_step_weight=one_weight,reward_response_weight=reward_weight,
                     reward_control=control,reward_response_scale=ablation['reward_response_scale'])
