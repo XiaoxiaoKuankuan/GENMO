@@ -55,3 +55,20 @@ def test_actual_sidecar_conditions_do_not_read_unknown_labels(monkeypatch):
     assert (windows[0].request.state[:, 13:34]-target.q).abs().max() > 1e-5
     assert before["meta"][0]["proprio_source"] == "real_continuous_newton_sidecar"
     assert context[0].valid.all()
+    # 实际连续状态验证控制快速路径：advance的最新观测与再次refresh严格相同；
+    # 延后trim不得改变当前姿态、未来goal或速度支持，不能用改物理合同换取时延。
+    episode = store.episode(batch['meta'][0])
+    normal = windows[0].request
+    fast = normal
+    for _ in range(8):
+        index = normal.tick//12
+        action = episode['action'][index:index+1]
+        next_state = episode['state'][index+1:index+2]
+        normal = adapter.advance(adapter.refresh_current_observation(normal),next_state,action,origin='real')
+        fast = adapter.advance(fast,next_state,action,origin='real',trim_reference=False)
+        torch.testing.assert_close(normal.sm_history,fast.sm_history,atol=0,rtol=0)
+        for left,right in zip(normal.reference.read_current_future(normal.tick),fast.reference.read_current_future(fast.tick)):
+            if isinstance(left,torch.Tensor):
+                torch.testing.assert_close(left,right,atol=0,rtol=0)
+            else:
+                for a,b in zip(left,right):torch.testing.assert_close(a,b,atol=0,rtol=0)

@@ -89,6 +89,9 @@ class PhysicalCollector:
         self.cancelled_requests = []
         self.overruns, self.wall_started = 0, None
         self.control_wall_seconds = []
+        # 可选推理优化：advance已经重建当前观测，只有参考实际接管后需要重算。
+        # 不修改SM观测定义；不可变参考在决策边界裁剪，避免每20ms重复校验/拷贝。
+        self.reuse_control_observation = False
         self.actor_version = 0
         self.collector_id, self.episode_index = 0, -1
         self.anchor_horizon = 0
@@ -206,6 +209,7 @@ class PhysicalCollector:
             try:
                 while True:
                     control_started = time.perf_counter()
+                    reference_changed = False
                     if z.tick >= z.music_end_tick:
                         self.terminal, reason = True, "music_end"
                         break
@@ -221,6 +225,7 @@ class PhysicalCollector:
                             actual_ready = delivery_event["actual_ready_tick"]
                         if z.tick >= actual_ready:
                             z, event = self.scheduler.commit(z, plan, actual_ready_tick=actual_ready)
+                            reference_changed = event["accepted"]
                             event["timings"] = timings
                             event["timing_mode"] = self.timing_mode
                             event["actor_version"] = self.actor_version
@@ -237,7 +242,8 @@ class PhysicalCollector:
                                 break
                     if not z.pending and z.tick >= next_boundary:
                         break
-                    z = self.adapter.refresh_current_observation(z)
+                    if not self.reuse_control_observation or reference_changed:
+                        z = self.adapter.refresh_current_observation(z)
                     before_control = z.detached() if self.record_controls or self.anchor_horizon else None
                     if self.anchor_horizon:
                         self._find_first_consumption(before_control)
@@ -255,7 +261,8 @@ class PhysicalCollector:
                         episode_alignment=episode_alignment(z,required=bool(self.rewards.config.get("episode_dance_weight",0.))))
                     failed = bool(self.adapter.runtime.termination(state1, ref1).any())
                     totals.add(reward, torch.zeros_like(reward) if failed else torch.ones_like(reward))
-                    z = self.adapter.advance(z, state1, action, origin="real")
+                    z = self.adapter.advance(z, state1, action, origin="real",
+                        trim_reference=not self.reuse_control_observation)
                     contact = self.env.contact_events() if self.record_contacts or self.record_contact_metrics else None
                     if self.record_contact_metrics:
                         self._accumulate_contacts(contact)
@@ -299,6 +306,8 @@ class PhysicalCollector:
                     "actual_ready_tick": ticket.request_tick + math.ceil((finished - self.worker.started) * 600),
                     "reason": reason, "timings": timings, "consumed_by_scheduler": False})
                 self.worker.clear()
+            if self.reuse_control_observation:
+                z = replace(z, reference=z.reference.trim(z.tick))
             z = replace(z, pending=False, pending_request=None, decision_id=z.decision_id + 1)
             if self.terminal and self.controls:
                 self.controls[-1] = replace(self.controls[-1], terminal=True, reason=reason)

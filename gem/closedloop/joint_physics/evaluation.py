@@ -303,6 +303,7 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
                           request_interval_ticks=cfg["evaluation"]["request_interval_ticks"],
                           latency_margin_ticks=cfg["evaluation"].get("latency_margin_ticks",0))
     collector = PhysicalCollector(env, actor, adapter, scheduler, TrackingMonitor(adapter), record_trajectory=True)
+    collector.reuse_control_observation = cfg['runtime'].get('reuse_control_observation',False)
     reason = "not_started"
     try:
         collector.reset(music, initial)
@@ -357,10 +358,17 @@ def closed_loop_source(cfg, actor, adapter, env, dataset, row, checkpoint=None):
             "startup_hold_counted_as_dance_gain": False,
             "inference_backend": cfg["runtime"].get("inference_backend","eager"),
             "worker_process":cfg["runtime"].get("worker_process",False),
+            "reuse_control_observation":collector.reuse_control_observation,
+            "inference_device":cfg["runtime"].get("inference_device",cfg["runtime"]["device"]),
             "control_wall_quantiles_seconds": {f"p{p}":float(torch.tensor(collector.control_wall_seconds).quantile(p/100))
                 for p in (50,95,99)} if collector.control_wall_seconds else {},
             "request_interval_seconds": cfg["evaluation"]["request_interval_ticks"]/600,
             "motion": motion_metrics(collector.trajectory, music), "timing_mode": collector.timing_mode}
+        timings = [event['timings'] for event in collector.events]
+        result['request_timing_quantiles_seconds'] = {
+            key:{f'p{p}':float(torch.tensor([t[key] for t in timings]).quantile(p/100)) for p in (50,95,99)}
+            for key in ('forecast_seconds','generation_decode_seconds','total_seconds') if timings}
+        result['completed_request_count'] = len(timings)
         return result, collector.trajectory
     finally:
         collector.worker.close()
@@ -462,6 +470,8 @@ def generation_statistics(output, batch):
     if len(poses)<2:
         return {"generation_diagnostic": "insufficient_unknown_frames"}
     pairs = unknown[:,1:] & unknown[:,:-1]
+    if not bool(pairs.any()):
+        return {"generation_diagnostic":"insufficient_adjacent_unknown_frames","unknown_frames":len(poses)}
     velocity = ((q[:,1:]-q[:,:-1])*30)[pairs]
     rotation = quaternion_to_matrix(poses[:,3:7])
     yaw = torch.atan2(rotation[:,1,0],rotation[:,0,0])

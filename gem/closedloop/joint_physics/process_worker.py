@@ -9,6 +9,7 @@ DDIM20/CFG和当前真实快照条件。通过CPU张量传递请求/参考，不
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields
+import copy
 import multiprocessing as mp
 from queue import Empty
 import time
@@ -71,8 +72,11 @@ def _serve(cfg,checkpoint,incoming,outgoing):
 class ProcessGenerationWorker:
     def __init__(self,cfg,checkpoint,adapter):
         context = mp.get_context('spawn')
+        child_cfg = copy.deepcopy(cfg)
+        child_cfg['runtime']['device'] = cfg['runtime'].get('inference_device',cfg['runtime']['device'])
+        self.inference_device = child_cfg['runtime']['device']
         self.incoming,self.outgoing=context.Queue(),context.Queue()
-        self.process=context.Process(target=_serve,args=(cfg,str(checkpoint),self.incoming,self.outgoing),daemon=True)
+        self.process=context.Process(target=_serve,args=(child_cfg,str(checkpoint),self.incoming,self.outgoing),daemon=True)
         self.executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='genmo-receive')
         self.device,self.future=adapter.runtime.kin.device,None
         begun=time.perf_counter()
@@ -101,7 +105,8 @@ class ProcessGenerationWorker:
         timing=reply['timings']
         timing.update(total_seconds=finished-self.started,
                       transport_queue_seconds=max(0.,finished-self.started-reply['child_total_seconds']),
-                      worker_backend='separate_process_same_gpu')
+                      worker_backend='separate_process',inference_device=self.inference_device,
+                      physics_device=str(self.device))
         return plan,finished,timing,context
 
     def warmup(self,state,ticket,noise):
