@@ -165,3 +165,16 @@ def test_no_change_is_diagnosed_and_PPO_uses_no_WM_gradient(system):
     assert result['effective']
     assert all(p.grad is None for p in engine.dynamics.parameters())
     engine.step.bundle.assert_unchanged(frozen)
+
+
+def test_parameter_ensemble_accepts_collector_explicit_none_latent(system):
+    from gem.closedloop.reference_adapter.parameter_audit import ParameterControl
+    engine, control, z = constrained_system(system, 4)
+    before = copy.deepcopy(control.adapter.state_dict())
+    after = copy.deepcopy(before)
+    after['net.6.bias'][6] = .1
+    variants = ParameterControl(control, [before, before, after, before])
+    z['parameter_variant'] = torch.arange(4)
+    out = variants.propose(z, zero=False, residual_offset=None, action_offset=None, latent=None)
+    torch.testing.assert_close(out['goal'][0], out['goal'][1], atol=0, rtol=0)
+    assert (out['goal'][2]-out['goal'][0]).abs().max() > 0

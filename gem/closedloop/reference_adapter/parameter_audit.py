@@ -23,6 +23,9 @@ class ParameterControl(VectorControl):
                           for s in snapshots]
 
     def propose(self, z, **kwargs):
+        supplied_latent = kwargs.pop('latent', None)
+        if supplied_latent is not None:
+            return super().propose(z, latent=supplied_latent, **kwargs)
         if kwargs.get('zero') or 'parameter_variant' not in z:
             return super().propose(z, **kwargs)
         x = self.packed(self.fields(z))
