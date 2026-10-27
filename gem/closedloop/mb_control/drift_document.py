@@ -120,6 +120,7 @@ def main():
     <p>接受样本幅度比最低0.66327、速度比最低0.65078、相位余弦最低−0.00994，均能通过0.65/−0.2门槛。global判断只覆盖当前少数支持点，局部教师条件还随学生历史改变。结论：门槛足以防明显静止，却不能保证固定音乐动作身份、累计转向或未见请求保持。</p>
     <p>建议使用跨音乐/跨时段持久固定请求库检查参数更新，并分开检查未对齐episode偏差；不能仅靠提高阈值或无限缩学习率解决。代码：output_trust_region.py:39；teacher_training.py:237–254、309–339。</p>''')
     add('6. H16真正看到的新动作很少','''<p>5140个真实anchor中，H16均有16步受新未来goal影响，但10步仅由未来goal影响，1步只有当前速度halo支持，真正消费新姿态中心只有5步，对应3个不同30Hz源点（含速度支持共4点）。不能将16步当作16帧完整新动作。</p>
+    <p>具体例子：request_tick=0，首次影响控制tick=216（0.36秒），首个可修改30Hz源点tick=360（0.60秒），插值当前姿态首次消费新参考tick=348（0.58秒）。首次控制影响到当前姿态消费相隔0.22秒，H16总长只有0.32秒；5140个固定评价anchor的这一差值均为0.22秒。所有请求时间和源点列表保存在request_coverage.jsonl。</p>
     <p>整曲1037个计划中，每计划平均实际取得41.34个新源点，最终以当前姿态消费10.41点，30.02点在消费前被后续计划覆盖；音乐范围内覆盖比例72.99%。H16只直接约束最终约10个姿态源点中的3个。当前rollout_anchor后续参考接管使用记录的行为计划，不重新可微生成后续计划，不能称为完整多决策闭环BPTT。</p>
     <p>imagination.py:164实际设置decisions=1，:177从sample.state.detached()开始。新增episode目标可以读到已经积累的世界偏差，但当前梯度无法回传到此前造成偏差的生成决策；本轮只补了累计坐标目标，没有补上跨决策的因果梯度。未来goal提前影响SM是真实的控制作用，前10步不能说成无梯度；它仍不等于整段新舞蹈已经被执行和评价。</p>
     <p>建议同请求增加多个经过真实方向验证的消费时间窗口，已消费参考detach；按真实版本/时间追踪覆盖。不要为了扩大时间覆盖直接把H改32，更不能把被覆盖源点当实际执行。</p>''')
@@ -166,6 +167,8 @@ def main():
         ['新合同Critic','teacher_training.py:190；critic.py:13；short_audit.teacher_target_contract','lambdaV继续0；新MC/双目标条件Critic未重训，不能复用旧奖励价值模型']]))
     evidence=['objective_summary.json','offline_v3/trajectory_objectives.json','offline_v3/accepted_dance_worsening.json','offline_v3/candidate_history.jsonl','physical_direction_summary.json','physical_candidate_details.json','trust_drift_summary.json','gradient_conflict_summary.json','sampling_unique_summary.json','music_time_coverage.json','training_teacher_timing_comparison.json','reference_lifetimes/summary.json','conditional_drift/summary.json','body_orientation_comparison.json','paired_input_audit.json','decisive_report.json']
     if new_audit:evidence.append('new_trajectory_audit/trajectory_objectives.json')
+    for p in ['checkpoint_50_load_validation.json','workspace_preservation.json','finalization_status.json']:
+        if (root/p).exists():evidence.append(p)
     add('证据文件','<ul>'+''.join('<li><a href="'+p+'">'+p+'</a></li>' for p in evidence)+'</ul>')
     import matplotlib
     matplotlib.use('Agg')
