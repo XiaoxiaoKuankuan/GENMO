@@ -35,6 +35,7 @@ def analyze(root):
             'headroom':'测到的缺口，不等于第二阶段必然可恢复的收益',
             'complexity':'实际被消费参考的运动量，早停歌曲存在右删失，非人工复杂舞蹈标签'},
         score_bins={},upper={},lower={},per_joint=[],timing={},worst_tracking=[],failures=[])
+    result['stopped_by_user']=(root/'user_requested_stop.json').exists()
     for lo,hi in [(0,50),(50,70),(70,80),(80,90),(90,95),(95,100.000001)]:
         selected=[r for r in physical if lo<=r['statistics']['tracking_score_100']<hi]
         result['score_bins'][f'{lo}-{min(hi,100):g}']=dict(count=len(selected),completed=sum(r['complete'] for r in selected))
@@ -78,7 +79,8 @@ def analyze(root):
     a=result['physical'];s=a['song_equal_weight']
     page='<!doctype html><html lang="zh"><meta charset="utf-8"><title>Stage1全音乐评价与第二阶段优化空间</title><style>body{font:17px system-ui;max-width:1250px;margin:32px auto;padding:0 20px;color:#163047}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:10px;text-align:left}.note{background:#fff1d6;padding:16px}small{color:#526579}</style>'
     page+='<h1>Stage1全音乐评价与第二阶段优化空间</h1><p>'+html.escape(result['updated_utc'])+'</p>'
-    page+=f'<p class="note">'+('全量任务已结束。' if complete else '全量评价仍在执行，当前数字只代表已完成子集。')+f' 原库{manifest["original_dataset_entries"]}条舞蹈记录，去重后{len(tasks)}份音乐输入；已有{len(rows)}份结果，真实物理{len(physical)}份。</p>'
+    state_text='本轮已由用户停止，结果作为旧链路证据保留。' if result['stopped_by_user'] else ('全量任务已结束。' if complete else '全量评价仍在执行，当前数字只代表已完成子集。')
+    page+=f'<p class="note">'+state_text+f' 原库{manifest["original_dataset_entries"]}条舞蹈记录，去重后{len(tasks)}份音乐输入；已有{len(rows)}份结果，真实物理{len(physical)}份。</p>'
     page+='<table><tr><th>指标</th><th>实测</th><th>说明</th></tr>'
     cells=[('完成率',fmt(a['completion_rate']*100 if a['completion_rate'] is not None else None)+'%',f'{a["completed"]}/{len(physical)}，工程异常另列'),
         ('执行期间跟踪分',fmt(s['tracking_score_100']['mean'])+'/100','逐音乐等权，原八项定义'),
@@ -103,7 +105,8 @@ def analyze(root):
     for r in result['worst_tracking'][:15]:
         vals=[r['task'],r['reason'],fmt(r['statistics']['tracking_score_100']),fmt(r['physical_seconds'])+'/'+fmt(r['music_seconds']),fmt(r['statistics']['joint_rmse_rad'])]
         page+='<tr>'+''.join('<td>'+html.escape(v)+'</td>' for v in vals)+'</tr>'
-    page+='</table><p><a href="Stage1全量音乐评价.html">全部逐曲明细</a> · <a href="optimization_space_analysis.json">分数分布、逐关节及难度统计JSON</a> · <a href="manifest.json">原始评价合同</a></p><small>原s595000、SM ckpt_024000、完整DDIM20、CFG2.5、seed42；真实Newton与墙钟异步。单种子不代表所有生成噪声。复杂度按已观察参考统计，早停歌曲可能低估后续动作难度。</small></html>'
+    mode=html.escape(manifest['timing_mode'])
+    page+=f'</table><p><a href="Stage1全量音乐评价.html">全部逐曲明细</a> · <a href="optimization_space_analysis.json">分数分布、逐关节及难度统计JSON</a> · <a href="manifest.json">原始评价合同</a></p><small>原s595000、SM ckpt_024000、完整DDIM20、CFG2.5、seed42；真实Newton，时间模式：{mode}。单种子不代表所有生成噪声。复杂度按已观察参考统计，早停歌曲可能低估后续动作难度。</small></html>'
     tmp=root/'Stage1优化空间分析.html.tmp';tmp.write_text(page);tmp.replace(root/'Stage1优化空间分析.html')
     return result
 

@@ -127,7 +127,7 @@ def prepare(config, output, gpus):
         duplicate_policy='identical_feature_bytes_same_nominal_initial_state_same_seed_one_physical_trial',
         score_definition='100*upper_eight_tracking; coverage_score additionally multiplies executed/music duration',
         no_stage2_optimizer=True,all_physical_failures_kept=True,
-        source_revision=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip())
+        source_revision=subprocess.run(['git','rev-parse','HEAD'],text=True,capture_output=True).stdout.strip() or 'source_archive_without_git')
     write_json(root/'manifest.json',manifest)
     print(json.dumps(manifest,ensure_ascii=False),flush=True)
 
@@ -191,6 +191,7 @@ def report(root):
         states=states,aggregate=totals,by_source={},by_split={},difficulty={},
         timing_mode=manifest['timing_mode'],seed=manifest['seed'],
         limitation='完成率不等于复杂舞蹈动作成功率；误差缺口不是第二阶段已证明可恢复的收益；单种子不代表所有噪声。')
+    result['stopped_by_user']=(root/'user_requested_stop.json').exists()
     for field in ('source','split'):
         result['by_'+field]={key:aggregate([r for r in rows if r.get(field)==key]) for key in sorted({json.loads(j['task'])[field] for j in jobs})}
     for key in ('reference_joint_speed_rms_rad_s','reference_range_mean_rad','reference_yaw_speed_rms_rad_s'):
@@ -219,7 +220,8 @@ def report(root):
     page='<!doctype html><html lang="zh"><meta charset="utf-8"><title>Stage1全量音乐真实物理评价</title><style>body{font:16px system-ui;margin:32px;color:#152536}table{border-collapse:collapse;width:100%}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left}th{position:sticky;top:0;background:#eef3f8}code{white-space:pre-wrap}.note{background:#fff3da;padding:16px}</style>'
     page+='<h1>冻结 Stage1＋SuperMimic：全量音乐评价</h1>'
     page+=f'<p>更新时间 {html.escape(result["updated_utc"])}；已形成结果 {states.get("done",0)}/{len(jobs)}；原舞蹈记录 {manifest["original_dataset_entries"]}。</p>'
-    page+='<p class="note">'+('全量任务已结束。' if result['complete'] else '评价进行中，以下只代表已执行子集，不能外推全库。')+' 完成表示执行到音乐结束；跟踪误差只统计已执行时段，失败尾部不补造轨迹。全曲覆盖折算得分将缺失尾部按零分计入。原八项分数的100分是指标上限，不是已证明可实现的Stage2收益。</p>'
+    state_text='本轮已由用户停止，以下为保留的已测子集。' if result['stopped_by_user'] else ('全量任务已结束。' if result['complete'] else '评价进行中，以下只代表已执行子集，不能外推全库。')
+    page+='<p class="note">'+state_text+' 完成表示执行到音乐结束；跟踪误差只统计已执行时段，失败尾部不补造轨迹。全曲覆盖折算得分将缺失尾部按零分计入。原八项分数的100分是指标上限，不是已证明可实现的Stage2收益。</p>'
     page+=f'<p>真实物理 {totals["physical_episodes"]} 首，完成 {totals["completed"]} 首，工程错误 {totals["engineering_errors"]} 首。完成率 {fmt(totals["completion_rate"])}。</p>'
     for field,label in [('by_source','来源'),('by_split','数据划分')]:
         page+='<h2>'+label+'</h2><table><tr><th>组</th><th>已测</th><th>完成</th><th>完成率</th><th>跟踪得分</th><th>全曲折算得分</th><th>关节RMSE(rad)</th></tr>'
