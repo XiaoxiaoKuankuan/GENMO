@@ -55,6 +55,32 @@ class DynamicsModel(nn.Module):
         finally:
             self._graph_active = False
 
+    def one_step_loss(self, windows, *, weights=None):
+        """批量真实状态教师监督，梯度直接进入原WM.net，原归一化统计不更新。"""
+        if windows.get('origin') != 'real':
+            raise ValueError('一步监督只能读取真实连续转移')
+        mask = windows['mask'].bool()
+        if not bool(mask.any()):
+            raise ValueError('一步监督没有有效真实标签')
+        s, a, xi, target = (windows[k][mask] for k in ('state', 'action', 'xi', 'next_state'))
+        predicted = self.step(s, a, xi)
+        error = self.model.state_error(unflatten_state(predicted), unflatten_state(target))
+        std = torch.maximum(self.model.out_norm.std(), self.error_floor)
+        names = ('root_position', 'root_orientation', 'root_linear_velocity', 'root_angular_velocity',
+                 'joint_position', 'joint_velocity')
+        sizes = (3, 3, 3, 3, 21, 21)
+        weights = dict.fromkeys(names, 1.) if weights is None else weights
+        if set(weights) != set(names) or min(weights.values()) < 0 or sum(weights.values()) <= 0:
+            raise ValueError('一步状态组权重必须完整、非负且至少一项为正')
+        groups = dict(zip(names, (error/std).split(sizes, dim=-1)))
+        losses = {k: v.square().mean() for k, v in groups.items()}
+        loss = sum(weights[k]*v for k, v in losses.items())/sum(weights.values())
+        return loss, dict(one_step_loss=float(loss.detach()), one_step_valid_transitions=int(mask.sum()),
+            one_step_group_losses={k: float(v.detach()) for k, v in losses.items()},
+            one_step_physical_rmse={k: float(v.detach().square().mean().sqrt())
+                                   for k, v in zip(names, error.split(sizes, dim=-1))},
+            one_step_group_weights=dict(weights))
+
     def supervised_loss(self, windows, *, checkpoint_steps=False):
         from torch.utils.checkpoint import checkpoint
         if windows.get("origin") != "real":
@@ -64,18 +90,18 @@ class DynamicsModel(nn.Module):
             raise ValueError("WM窗口起点必须有效")
         state = s[:, 0]
         std = torch.maximum(self.model.out_norm.std(), self.error_floor)
-        errors, one_step = [], []
+        errors = []
         for t in range(a.shape[1]):
             state = (checkpoint(self.step, state, a[:, t], xi[:, t], use_reentrant=False)
                      if checkpoint_steps else self.step(state, a[:, t], xi[:, t]))
             errors.append((self.model.state_error(unflatten_state(state), unflatten_state(target[:, t])) / std).square().mean(-1))
-            # 单步targets只报告，避免为不参与损失的诊断额外保存整个长窗口的图。
-            with torch.no_grad():
-                predicted = self.model.net(self.model.in_norm(self.model.inputs(unflatten_state(s[:, t]), a[:, t], normalize_xi(xi[:, t]))))
-                expected = self.model.out_norm(self.model.targets(unflatten_state(s[:, t]), unflatten_state(target[:, t])))
-                one_step.append((predicted-expected).square().mean(-1))
+        # 原targets诊断仍保留，但批量计算；真正参与反传的一步状态监督见one_step_loss。
+        with torch.no_grad():
+            actual, actions, physics, following = (v.flatten(0, 1) for v in (s, a, xi, target))
+            predicted = self.model.net(self.model.in_norm(self.model.inputs(unflatten_state(actual), actions, normalize_xi(physics))))
+            expected = self.model.out_norm(self.model.targets(unflatten_state(actual), unflatten_state(following)))
+            one = (predicted-expected).square().mean(-1).reshape(mask.shape)
         error = torch.stack(errors, 1)
-        one = torch.stack(one_step, 1)
         # 沿用SM的多步state_error主损失；单步targets误差另列，不改变归一化。
         loss = (error * mask).sum() / mask.sum().clamp_min(1)
         return loss, {"wm_state_error": loss.detach(), "wm_targets_mse": (one*mask).sum().detach()/mask.sum().clamp_min(1),

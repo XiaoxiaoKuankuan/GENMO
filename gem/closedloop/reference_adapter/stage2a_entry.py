@@ -24,8 +24,9 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--resume')
+    parser.add_argument('--wm-initialize', help='只初始化独立WM，Adapter仍为零；不是完整恢复')
     parser.add_argument('--num-envs', type=int)
-    parser.add_argument('--mode', choices=('train', 'integration', 'wm-repair'), default='train')
+    parser.add_argument('--mode', choices=('train', 'integration', 'wm-repair', 'wm-data'), default='train')
     preliminary, _ = parser.parse_known_args()
     from omegaconf import OmegaConf
     cfg = OmegaConf.to_container(OmegaConf.load(preliminary.config), resolve=True)
@@ -75,6 +76,10 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     seed_all(train['seed']); torch.set_num_threads(1)
     engine = build_engine(cfg, 'cuda:0')
+    if args.wm_initialize:
+        wm = torch.load(args.wm_initialize, map_location='cpu', weights_only=False, mmap=True)
+        engine.dynamics.load_state_dict(wm['dynamics'])
+        engine.dynamics.model_version = wm.get('wm_version', 0)
     bank = VectorBank(tasks, engine, 'cuda:0')
     control = VectorControl(engine, bank)
     json_write(output/'numerical_original_SM_contract.json', numerical_check(engine, bank, control))
@@ -201,6 +206,19 @@ def main():
                     evaluate('000000')
             collector.high_error_starts = extra['high_error_starts']
             torch.cuda.reset_peak_memory_stats()
+            if args.mode == 'wm-data':
+                from .wm_ablation import prepare_ablation_data
+                data_before = copy.deepcopy(control.adapter.state_dict())
+                data_adam = copy.deepcopy(optimizers['adapter'].state_dict())
+                try:
+                    path = prepare_ablation_data(collector, replay, validation, extra, optimizers, critic, cfg, output)
+                finally:
+                    control.adapter.load_state_dict(data_before)
+                    optimizers['adapter'].load_state_dict(data_adam)
+                extra['ablation_data'] = str(path)
+                checkpoint('fixed_ablation_data_no_accepted_Adapter')
+                publish('fixed_real_ablation_data_complete_zero_Adapter_updates')
+                return 0
             if args.mode == 'integration':
                 eligible = (collector.state['frame']+64 < bank.ends[collector.state['song']]).nonzero().flatten()
                 source = select_state(collector.state, eligible[:min(8, collector.num_envs//4)])
@@ -210,7 +228,9 @@ def main():
                 fitting = fit_wm(engine.dynamics, optimizers['wm'], replay.windows(32, 8), None, 0.,
                     reference_pairs=response.sample(32, horizon=32), reference_weight=settings['reference_response_weight'],
                     reference_kin=control.runtime.kin, response_settings=long_settings['response'],
-                    long_windows=replay.windows(32, 32), long_weights=long_settings['state_weights'], checkpoint_steps=True)
+                    long_windows=replay.windows(32, 32), long_weights=long_settings['state_weights'], checkpoint_steps=True,
+                    one_step_weight=long_settings.get('one_step_weight', 0.),
+                    reward_response_weight=long_settings.get('reward_response_weight', 0.), reward_control=control)
                 identity = dict(adapter=parameter_identity(control.adapter), wm=parameter_identity(engine.dynamics),
                                 critic=parameter_identity(critic))
                 saved = checkpoint('integration')
@@ -273,7 +293,9 @@ def main():
                         reference_pairs=response.sample(long_settings['response_batch'], horizon=response_h),
                         reference_weight=settings['reference_response_weight'], reference_kin=control.runtime.kin,
                         response_settings=long_settings['response'], long_windows=replay.windows(long_settings['state_batch'], 32),
-                        long_weights=long_settings['state_weights'], checkpoint_steps=True)
+                        long_weights=long_settings['state_weights'], checkpoint_steps=True,
+                        one_step_weight=long_settings.get('one_step_weight', 0.),
+                        reward_response_weight=long_settings.get('reward_response_weight', 0.), reward_control=control)
                     append_json(output/'wm.jsonl', report)
                 response_report = validate_response(engine.dynamics, data, kin=control.runtime.kin,
                                                     scales=long_settings['response']['scales'])

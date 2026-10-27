@@ -97,7 +97,8 @@ def tangent_loss(dynamics, pairs):
 
 def fit_wm(dynamics, optimizer, windows, pairs, weight, *, reference_pairs=None, reference_weight=0.,
            reference_kin=None, response_settings=None, long_windows=None, long_weights=None,
-           checkpoint_steps=False):
+           checkpoint_steps=False, one_step_weight=0., one_step_settings=None, reward_response_weight=0.,
+           reward_control=None, reward_response_scale=.001):
     if dynamics._graph_active:
         raise RuntimeError('想象图存活时禁止修改WM')
     optimizer.zero_grad(set_to_none=True)
@@ -105,6 +106,10 @@ def fit_wm(dynamics, optimizer, windows, pairs, weight, *, reference_pairs=None,
     local, details = tangent_loss(dynamics, pairs) if pairs is not None else (supervised*0, {})
     loss = supervised+weight*local
     response = supervised*0
+    if one_step_weight:
+        one, metrics = dynamics.one_step_loss(long_windows if long_windows is not None else windows, **(one_step_settings or {}))
+        loss = loss+one_step_weight*one
+        details.update(metrics, one_step_weight=one_step_weight)
     if long_windows is not None:
         long_weights = {16: .25, 32: .25} if long_weights is None else long_weights
         long_reports = {}
@@ -123,6 +128,13 @@ def fit_wm(dynamics, optimizer, windows, pairs, weight, *, reference_pairs=None,
             kin=reference_kin, checkpoint_steps=checkpoint_steps, **(response_settings or {}))
         details.update(extra)
         loss = loss+reference_weight*response
+        if reward_response_weight:
+            from .reference_response import reward_response_loss
+            reward_loss, reward_report = reward_response_loss(dynamics, reward_control, reference_pairs,
+                reference_pairs['plus_action'].shape[1], scale=reward_response_scale, checkpoint_steps=checkpoint_steps)
+            loss = loss+reward_response_weight*reward_loss
+            reward_report.pop('reward_response_endpoints')
+            details.update(reward_report, reward_response_weight=reward_response_weight)
     loss.backward()
     norm = nn.utils.clip_grad_norm_(dynamics.model.net.parameters(), 1., error_if_nonfinite=True)
     optimizer.step(); optimizer.zero_grad(set_to_none=True)
