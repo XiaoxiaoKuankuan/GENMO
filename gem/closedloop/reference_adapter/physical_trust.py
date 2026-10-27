@@ -56,7 +56,7 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
     repeat_error = torch.zeros(len(source['state']), device=collector.device)
     peak_excess = torch.zeros_like(repeat_error)
     physical_states = []
-    physical_actions, reliable, switches = [], [], []
+    physical_actions, reliable, switches, continuous = [], [], [], []
     previous_contact = None
     collector.control = variant
     try:
@@ -64,6 +64,7 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
             row = collector.step(replay, auto_reset=True, split='train', perturb=True, contact_count=count)
             total += .99**t*row['reward'][:count]*alive
             tracking += .99**t*row['raw']['track'][:count]*alive
+            continuous.append(alive.reshape(-1, 4).all(-1).clone())
             alive &= ~row['done'][:count]
             physical_states.append(row['end']['state'][:count].clone())
             states = physical_states[-1].reshape(-1, 4, 55)
@@ -102,6 +103,7 @@ def evaluate_candidate(collector, source, dynamics, critic, before, after, crite
                 state=start['state'][::4], xi=start['xi'][::4], song=source['song'], frame=source['frame'],
                 plus_action=actions[:, :, 2], minus_action=actions[:, :, 3],
                 plus_next=actual[:, :, 2], minus_next=actual[:, :, 3], reliable=valid, contact_switch=switch,
+                trajectory_valid=torch.stack(continuous, 1),
                 policy_version=torch.full_like(source['song'], collector.policy_version),
                 intervention_steps=torch.full_like(source['song'], horizon),
                 intervention_kind=torch.ones_like(source['song']),

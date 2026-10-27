@@ -211,7 +211,7 @@ def collect_reference_response(collector, source, *, horizon=64, amplitude=.005,
     noise[..., :2] = 0
     offset = torch.zeros(collector.num_envs, 10, 27, device=collector.device)
     offset[2:count:4], offset[3:count:4] = noise, -noise
-    states, actions, switches, reliable = [], [], [], []
+    states, actions, switches, reliable, continuous = [], [], [], [], []
     live = torch.ones(count, dtype=torch.bool, device=collector.device)
     previous_contact = None
     for t in range(horizon):
@@ -227,6 +227,7 @@ def collect_reference_response(collector, source, *, horizon=64, amplitude=.005,
             change |= (contact != previous_contact).any((1, 2))
         repeat = (current[:, 0]-current[:, 1]).abs().amax(-1)
         size = (action[:, 2]-action[:, 3]).square().mean(-1).sqrt()
+        continuous.append(live.reshape(groups, 4).all(-1).clone())
         live &= ~row['done'][:count]
         good = ((mismatch <= 1e-5) & (repeat <= 1e-4) & ~change & (size >= 1e-4)
                 & live.reshape(groups, 4).all(-1))
@@ -244,6 +245,7 @@ def collect_reference_response(collector, source, *, horizon=64, amplitude=.005,
         state=start['state'][::4], xi=start['xi'][::4], song=source['song'], frame=source['frame'],
         plus_action=actions[:, :, 2], minus_action=actions[:, :, 3],
         plus_next=states[:, :, 2], minus_next=states[:, :, 3], reliable=valid, contact_switch=switch,
+        trajectory_valid=torch.stack(continuous, 1),
         policy_version=torch.full_like(source['song'], collector.policy_version),
         intervention_steps=duration, intervention_kind=torch.zeros_like(duration),
         initial_mismatch=mismatch, repeated_states=states[:, :, :2],

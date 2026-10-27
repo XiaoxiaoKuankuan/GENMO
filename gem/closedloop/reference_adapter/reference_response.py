@@ -17,7 +17,7 @@ GROUP_SCALES = dict(root_position=.05, root_orientation=.1, joint_position=.1,
 GROUP_WEIGHTS = dict(root_position=.15, root_orientation=.15, joint_position=.35,
                      joint_velocity=.35, root_angular_velocity=.1, body_angular_velocity=.1)
 TEMPORAL = {'plus_action', 'minus_action', 'plus_next', 'minus_next', 'reliable',
-            'contact_switch', 'repeated_states'}
+            'contact_switch', 'repeated_states', 'trajectory_valid'}
 
 
 def body_velocity(kin, state):
@@ -55,6 +55,7 @@ class ReferenceResponseReplay:
         values = {k: v.detach() for k, v in data.items() if isinstance(v, torch.Tensor)}
         values.setdefault('intervention_steps', torch.ones(count, dtype=torch.long, device=data['state'].device))
         values.setdefault('intervention_kind', torch.zeros(count, dtype=torch.long, device=data['state'].device))
+        values.setdefault('trajectory_valid', data['reliable'].detach().clone())
         for key in TEMPORAL & values.keys():
             if values[key].shape[1] != length:
                 raise ValueError('同一真实响应的时间维度不一致，禁止补齐标签')
@@ -118,6 +119,9 @@ class ReferenceResponseReplay:
             raise ValueError('旧8步截断Replay不能冒充完整长响应恢复；旧模型可仅作显式对照')
         self.capacity, self.total_pairs, self.rejected = state['capacity'], state['total_pairs'], state['rejected']
         self.buckets = {int(h): {k: v.to(device) for k, v in b.items()} for h, b in state['buckets'].items()}
+        for b in self.buckets.values():
+            # 旧数据只将已有可靠前缀认作连续，不为未知/终止后时段补出有效标签。
+            b.setdefault('trajectory_valid', b['reliable'].clone())
 
 
 def consistency_loss(dynamics, pairs, horizon=8, *, kin, scales=None, weights=None, checkpoint_steps=False):
@@ -170,16 +174,19 @@ def validate_response(dynamics, pairs, horizons=(1, 4, 8, 16, 32, 64), *, kin, s
         actual = response_groups(origin, pairs['plus_next'][:, t], pairs['minus_next'][:, t], kin)
         predicted = response_groups(origin, plus, minus, kin)
         valid = pairs['reliable'][:, :t+1].all(-1)
+        continuous = pairs.get('trajectory_valid', pairs['reliable'])[:, :t+1].all(-1)
         fields = {}
         for key in actual:
             target, model = actual[key]/scales[key], predicted[key]/scales[key]
             cosine = (target*model).sum(-1)/(target.norm(dim=-1)*model.norm(dim=-1)).clamp_min(1e-12)
             relative = (target-model).norm(dim=-1)/target.norm(dim=-1).clamp_min(1e-6)
             fields[key] = dict(cosine=cosine.cpu().tolist(), relative_error=relative.cpu().tolist(),
-                physical_response_rmse=float((actual[key]-predicted[key]).square().mean().sqrt()),
+                physical_response_rmse=float((actual[key][continuous]-predicted[key][continuous]).square().mean().sqrt())
+                    if bool(continuous.any()) else None,
                 high_snr_reverse_count=int(((cosine < 0) & valid & (target.norm(dim=-1) > 1e-4)).sum()))
         result['horizons'][str(t+1)] = dict(reliable_pairs=int(valid.sum()), total_pairs=len(valid),
-            fields=fields, reliable=valid.cpu().tolist(), plus_state_error=_state_error(plus, pairs['plus_next'][:, t]),
-            minus_state_error=_state_error(minus, pairs['minus_next'][:, t]),
+            fields=fields, reliable=valid.cpu().tolist(), continuous_real_pairs=int(continuous.sum()),
+            plus_state_error=_state_error(plus[continuous], pairs['plus_next'][continuous, t]) if bool(continuous.any()) else None,
+            minus_state_error=_state_error(minus[continuous], pairs['minus_next'][continuous, t]) if bool(continuous.any()) else None,
             contact_switch=pairs['contact_switch'][:, :t+1].any(-1).cpu().tolist())
     return result
