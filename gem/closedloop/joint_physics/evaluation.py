@@ -46,7 +46,8 @@ def sample_seed(meta, seed):
 
 def evaluation_windows(cfg, actor, adapter, *, split):
     catalog = SourceCatalog(cfg, split)
-    store = SidecarStore(cfg["data"]["sidecar"], split, asset_contract(cfg, adapter))
+    store = SidecarStore(cfg["data"]["sidecar"], split, asset_contract(cfg, adapter),
+                        sample_contract=cfg["data"]["sample_contract"])
     for source_index, (dataset, row) in enumerate(catalog.sources()):
         if source_index >= cfg["evaluation"]["max_sources"]:
             break
@@ -97,7 +98,7 @@ def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False
                                            drop_music_mask=torch.zeros(1, dtype=torch.bool, device=noise.device))
         prediction = (actor.stage1.endecoder.normalize(batch["target_qpos30"]).detach().requires_grad_()
                       if interface_probe else forward["pred_x_start"])
-        for horizon in (8, 16):
+        for horizon in cfg["audit"]["horizons"]:
             selected = replace(window, horizon=horizon)
             for joint in (10, 17):
                 row = {"source": episode["source_key"], "frame": batch["meta"][0]["decision_frame"],
@@ -144,7 +145,7 @@ def audit_gradients(cfg, checkpoint, output, adapter, env, interface_probe=False
                 print(json.dumps(row, ensure_ascii=False), flush=True)
     adapter.bundle.assert_unchanged(frozen)
     horizons, supported = {}, []
-    for horizon in (8, 16):
+    for horizon in cfg["audit"]["horizons"]:
         selected = [r for r in rows if r.get("horizon") == horizon and "rejection" not in r]
         direction = sum(r.get("newton_direction_pass", False) for r in selected)
         passed = (env is not None and len(selected) >= cfg["audit"]["minimum_probes"] and
@@ -172,7 +173,6 @@ def validate_forecasts(cfg, adapter):
     """只用已提交旧计划预测，再与未进入条件的实测未来状态比较；不重跑/改写物理。"""
     from types import SimpleNamespace
     from gem.robots.bumi.endecoder import BumiEndecoder
-    from gem.closedloop.mb_control.forecast import forecast_rollout
     from .config import ROOT
     options = dict(cfg["stage1"]["endecoder"])
     options["kinematics_path"] = str(ROOT/options["kinematics_path"])
@@ -181,7 +181,10 @@ def validate_forecasts(cfg, adapter):
     for episode, batch, contexts, window, reason in evaluation_windows(cfg, holder, adapter, split="train"):
         if window is None:
             continue
-        predicted = forecast_rollout(window.request, adapter, window.start.tick).predicted.state
+        requests = episode["offline_requests"]
+        i = batch["meta"][0]["decision_frame"]//3
+        end = int(requests["state_offsets"][i+1])
+        predicted = requests["predicted_states"][end-1:end].to(window.start.state)
         errors = state_errors(predicted, window.start.state)
         rows.append({"source": episode["source_key"], "request_tick": window.request.tick, "forecast_tick": window.start.tick,
             "steps": (window.start.tick-window.request.tick)//12, "errors": {k:float(v) for k,v in errors.items()},

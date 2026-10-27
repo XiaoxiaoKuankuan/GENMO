@@ -55,7 +55,8 @@ class JointTrainer:
             "stats_sha256": digest(cfg["stage1"]["endecoder"]["stats_path"]),
             "fk_sha256": self.actor.stage1.endecoder.kinematics.kinematics_sha256}
         self.frozen = self.adapter.bundle.frozen_snapshot() if self.adapter is not None else None
-        self.store = SidecarStore(cfg["data"]["sidecar"], "train", self.assets) if cfg["data"]["sidecar"] else None
+        self.store = SidecarStore(cfg["data"]["sidecar"], "train", self.assets,
+            sample_contract=cfg["data"]["sample_contract"]) if cfg["data"]["sidecar"] else None
         report = cfg["physics"].get("validation_report")
         self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device, execution_contract(cfg)) if report else None
         self.noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+1000+rank)

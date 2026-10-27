@@ -1,0 +1,12 @@
+# Server-2正式目标配置：原配对库与只读SM bridge；离线sidecar必须通过--set或环境变量指定。
+# 本文件不自动启动训练。H32默认；H64需要同一新目标的真实报告单独通过后显式选择。
+base_config: joint_physics_from_scratch.yaml
+stage1:
+  endecoder:
+    stats_path: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/qpos30_train_stats.json
+supermimic:
+  repo: /home/user/liwei/bumi-closedloop-worktrees/supermimic/SuperMimic
+  checkpoint: /data0/user/liwei/GENMO_assets/supermimic_bridge_20261024/ckpt_024000.pt
+  robot_asset_dir: /home/user/liwei/bumi-closedloop-worktrees/supermimic/SuperMimic/data/bumi3_4340/robot
+runtime:
+  cpu_threads: 4

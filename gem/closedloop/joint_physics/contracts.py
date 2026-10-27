@@ -11,7 +11,8 @@ import json
 
 import torch
 
-SIDECAR_SCHEMA = "genmo.joint_physics.sidecar.v1"
+SIDECAR_SCHEMA = "genmo.joint_physics.sidecar.v2.offline_requests"
+RAW_SIDECAR_SCHEMA = "genmo.joint_physics.sidecar.v1"
 
 
 class PhysicsRejected(ValueError):

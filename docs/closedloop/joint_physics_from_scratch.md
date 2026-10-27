@@ -11,6 +11,11 @@
 本轮只做有界验收，没有启动长期八卡训练。代码可运行、导数接通和实际优化更新都不能
 代替自由生成或全曲物理收益；最终实测见同目录验收报告。
 
+2026-10-27追加要求已落实为当前默认：物理状态和请求前瞻一次性离线生成，训练随机读取
+持久化v2缓存；新执行Loss软关节限位关闭，`lambda_safety=0`，原监督限位不变。
+默认H32、独立审计H32/H64；旧H8/H16结果不授权新时域。后续训练目标为Server-2，
+使用`configs/closedloop/joint_physics_server2.yaml`。有旧任务占用时不抢占其GPU。
+
 ## 算法与复用边界
 
 ```mermaid
@@ -18,7 +23,7 @@ flowchart LR
   D[原音乐动作配对 Xgt] --> N[完整1000步加噪]
   N --> A[随机初始化原GENMO Transformer]
   C[音乐与历史50×48及逐坐标前缀] --> A
-  S[请求时真实sidecar与已提交旧计划] --> F[冻结SM/WM因果前瞻]
+  S[离线实测sidecar与当时已提交旧计划] --> F[一次性冻结SM/WM因果前瞻缓存]
   F --> E[FutureEncoder]
   E --> A
   A --> X[同一样本去噪x0]
@@ -57,13 +62,14 @@ flowchart LR
 | `actor.py` | 监督与DDIM共享Future条件、噪声/mask身份、模式恢复 |
 | `data.py` | 原数据来源加权采样、全曲随机公共网格裁剪、sidecar内容校验 |
 | `prepare_rollouts.py` | 冻结SM在真实Newton中的连续原动作跟踪和紧凑分片 |
+| `offline.py` | 一次性生成公共网格请求条件、预测状态与索引；既有真实缓存无仿真转换 |
 | `reference.py` | 请求快照、旧计划可见性、首次影响真实起点与候选参考 |
 | `execution.py / losses.py` | 冻结执行链、支持域拒绝、物理尺度与有效窗口归一化 |
 | `curriculum.py / trainer.py` | 完整监督噪声、物理子批、唯一AdamW、同步DDP与计数 |
 | `checkpoint.py` | 新schema完整恢复、每rank全部采样/RNG状态和不覆盖发布 |
 | `evaluation.py / entry.py` | 三类独立评价、新目标Newton方向和前瞻验证、CLI |
 
-对应四个`tools/*joint_physics*.py`入口、三份`configs/closedloop/joint_physics*.yaml`、
+对应四个`tools/*joint_physics*.py`入口、四份`configs/closedloop/joint_physics*.yaml`、
 `tests/closedloop/joint_physics/`与`scripts/train_joint_physics.sh`均独立于旧Stage2。
 
 ## 数据与sidecar合同
@@ -84,6 +90,7 @@ flowchart LR
 | `reference_qpos / source_versions` | 每首一次的原数据参考与源点版本；不重复保存整首音乐 |
 | `contacts / termination_reason` | 求解器真实接触和连续轨迹结束原因，失败不复位拼接 |
 | `assets / dataset / motion_sha256 / music_sha256` | 同源SM/WM、执行器、stats、FK、时钟及原划分身份 |
+| `offline_requests` | frame/prefix/forecast_tick、58维条件、有效性/失败原因、预测状态紧凑偏移表 |
 
 采集只在episode起点reset一次。参考地面使用原地面元数据作一次固定Z变换，动作与实际
 状态始终处于同一确定坐标系。teacher-forced旧计划在采集期间按显式版本预先提交；
@@ -94,6 +101,17 @@ sidecar包含真实未来状态，用于局部窗口起点/验证；请求条件
 经冻结WM预测。无泄漏测试修改未知未来标签/contact/地面监督后，历史、旧计划和Future
 条件逐元素不变。contact与地面标签不会成为Actor输入。
 
+当前schema为`genmo.joint_physics.sidecar.v2.offline_requests`。分片使用只读mmap，先按
+source ID定位episode，再按`frame//3`随机读取；历史使用控制步索引，预测状态使用偏移表，
+不为每个请求复制整曲。前缀采样合同必须一致。训练不运行Newton、不调用WM预处理前瞻、
+不生成或回填sidecar；WM只运行保留梯度的候选执行链。旧v1只能显式离线转换到新目录。
+真实读取测试将`WM.step_model`替换为报错函数，检查训练取样确实没有在线预处理。
+
+```bash
+python tools/prepare_joint_physics_data.py --config <cfg> --split train \
+  --import-sidecar <raw_v1_sidecar> --output <new_v2_offline_sidecar>
+```
+
 ## 执行损失与有效性
 
 首版仅`physics.prediction_mode=denoised_x0`；物理子批使用同一次监督去噪结果，没有训练
@@ -102,7 +120,8 @@ sidecar包含真实未来状态，用于局部窗口起点/验证；请求条件
 
 目标为同源数据动作。根位姿保持固定世界坐标；身体位姿转到根坐标以避免重复计算yaw。
 每个物理误差按配置中明确的米、弧度和速度尺度计算稳健损失；窗口按有效折扣质量求均值，
-改变H不会隐式放大相对BC权重。实际执行限位与原监督参考限位分别记录，Action Rate=0。
+改变H不会隐式放大相对BC权重。实际执行限位只记录诊断，不再形成新软限位Loss；
+`L_exec_safety=0`、`lambda_safety=0`、Action Rate=0。原监督参考限位保持不变。
 
 物理课程只筛选执行子批，监督仍均匀覆盖1000步。SNR由实际`alphas_cumprod`计算。
 音乐被drop的样本保留完整监督，但不给它施加某一首特定舞蹈的执行目标。缺缓存、保护区
@@ -110,10 +129,10 @@ sidecar包含真实未来状态，用于局部窗口起点/验证；请求条件
 不把坏预测替换为GT，不放宽支持域让学生通过。
 
 只用候选首次影响之前的真实状态作局部起点。报告分别保存preview-only步数、中心消费
-步数、结构支持源点和覆盖率。H8/H16分别只有0.16/0.32秒控制；可能全部为预览影响。
+步数、结构支持源点和覆盖率。H32/H64分别为0.64/1.28秒控制，H8/H16历史对照仍可配置。
 这些短窗不代表完整60帧舞蹈、多决策BPTT或完整反事实全曲梯度。
 
-新Newton报告必须匹配本方法执行目标/资产，H8/H16分别实际检查；另外核对真实请求起点
+新Newton报告必须匹配本方法执行目标/资产，H32/H64分别实际检查；另外核对真实请求起点
 的因果前瞻误差。源码提交仅追溯，不作为正确性门禁。首次报告的原始测量与补充合同报告
 分别保留，后者只读取该次已记录输入manifest，不改变原始方向结果或阈值。
 

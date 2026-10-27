@@ -106,12 +106,15 @@ def collect_source(dataset, row_index, cfg, adapter, env):
 
 
 def prepare(cfg, split, output, adapter, env):
+    from .offline import cache_requests, preprocessing_codec, source_provenance
     catalog = SourceCatalog(cfg, split)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     started = time.perf_counter()
     index = {"schema": SIDECAR_SCHEMA, "split": split, "assets": asset_contract(cfg, adapter),
-             "dataset": catalog.identity, "sources": {}, "shards": {}, "episodes": []}
+             "dataset": catalog.identity, "sources": {}, "shards": {}, "episodes": [],
+             "sample_contract": cfg["data"]["sample_contract"], "source_versions": source_provenance(cfg)}
+    codec = preprocessing_codec(cfg)
     pending = []
     frozen = adapter.bundle.frozen_snapshot()
     def flush():
@@ -127,8 +130,10 @@ def prepare(cfg, split, output, adapter, env):
         if limit is not None and len(index["episodes"]) >= limit:
             break
         episode = collect_source(dataset, row, cfg, adapter, env)
+        preprocessing = cache_requests(episode, dataset, row, adapter, codec)
         pending.append(episode)
         index["episodes"].append({k: episode[k] for k in ("source_key", "control_steps", "termination_reason", "wall_seconds")})
+        index["episodes"][-1]["offline_preprocessing"] = preprocessing
         print(json.dumps(index["episodes"][-1], ensure_ascii=False), flush=True)
         if len(pending) >= cfg["prepare"]["shard_episodes"]:
             flush()

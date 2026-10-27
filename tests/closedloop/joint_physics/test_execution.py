@@ -41,6 +41,7 @@ def test_real_frozen_weights_execution_gradient_and_fd(actor_factory):
     prediction = base.endecoder.normalize(batch["target_qpos30"]).detach().requires_grad_()
     logits = torch.zeros(1, 60, 2)
     result = execute_window(window, prediction, logits, actor, adapter, cfg["execution_loss"])
+    assert result["safety"].item() == 0
     gradient, = torch.autograd.grad(result["loss"], prediction)
     assert torch.isfinite(gradient).all() and gradient.norm() > 0
     direction = torch.zeros_like(prediction)
@@ -75,3 +76,4 @@ def test_horizon_normalization():
     a = normalized_window([torch.tensor([2.])] * 8, .99)
     b = normalized_window([torch.tensor([2.])] * 16, .99)
     torch.testing.assert_close(a, b)
+    torch.testing.assert_close(a, normalized_window([torch.tensor([2.])] * 64, .99))

@@ -46,3 +46,21 @@ def test_full_schedule_snr_and_dropout(actor_factory):
     out["music_dropout_mask"].fill_(True)
     assert not physics_selection(out, base.train_diffusion, cfg)[0].any()
     assert snr[0] > snr[-1] and torch.isfinite(snr).all()
+
+
+def test_offline_requests_random_lookup_and_prefix_identity(tmp_path):
+    (tmp_path/"index.json").write_text(json.dumps({"schema": SIDECAR_SCHEMA, "split": "train"}))
+    store = SidecarStore(tmp_path, "train")
+    episode = {"offline_requests": {"frames": torch.tensor([0, 3, 6]), "prefix_frames": torch.tensor([12, 13, 14]),
+        "valid": torch.tensor([True, False, True]), "reasons": ["available", "offline_failed", "available"],
+        "features": torch.arange(3*58).reshape(3,58).float(), "forecast_ticks": torch.tensor([120, 180, 240]),
+        "state_offsets": torch.tensor([0, 1, 1, 2]), "predicted_states": torch.zeros(2,55)}}
+    from gem.closedloop.joint_physics.contracts import PhysicsRejected
+    for frame, prefix in [(6,14),(0,12),(6,14)]:
+        context = store.request(episode, frame, prefix, "cpu")
+        assert context.request_tick == frame*20
+        assert context.features[0,0] == (frame//3)*58
+    with pytest.raises(ValueError, match="前缀"):
+        store.request(episode, 6, 12, "cpu")
+    with pytest.raises(PhysicsRejected, match="offline_failed"):
+        store.request(episode, 3, 13, "cpu")

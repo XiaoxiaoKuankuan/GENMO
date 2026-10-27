@@ -20,12 +20,15 @@ from gem.closedloop.joint_physics.reference import attach_sidecars
 from gem.robots.bumi.endecoder import BumiEndecoder
 
 
-def test_actual_sidecar_conditions_do_not_read_unknown_labels():
+def test_actual_sidecar_conditions_do_not_read_unknown_labels(monkeypatch):
     path = os.getenv("JOINT_REAL_TEST_CONFIG")
     if not path:
         pytest.skip("需要真实原配对数据和Newton sidecar，不能用模拟数据替代")
     cfg = read_config(path)
     adapter = build_adapter(cfg, "cpu")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("随机读取离线缓存时不得重新运行WM预处理")
+    monkeypatch.setattr(adapter.bundle, "step_model", forbidden)
     options = dict(cfg["stage1"]["endecoder"])
     options["kinematics_path"] = str(ROOT/options["kinematics_path"])
     codec = BumiEndecoder(**options).codec

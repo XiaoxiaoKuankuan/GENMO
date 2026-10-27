@@ -28,7 +28,9 @@ def execution_terms(state, reference, kin, cfg):
     terms = {key: robust(error, cfg["scales"][key]).flatten(1).mean(-1) for key, error in errors.items()}
     total = sum(terms[key]*cfg["weights"][key] for key in terms)
     violation = torch.relu(kin.q_lo-q) + torch.relu(q-kin.q_hi)
-    safety = robust(violation, .05).mean(-1)
+    # 用户要求关闭新执行目标软限位：保留纯诊断值，绝不计入优化目标。
+    terms["joint_limit_violation_rad"] = violation.mean(-1)
+    safety = state.new_zeros(state.shape[0])
     return total, safety, terms
 
 

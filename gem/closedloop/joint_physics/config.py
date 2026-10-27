@@ -32,8 +32,10 @@ def read_config(path, overrides=()):
     expected = {"motion_frames": 60, "motion_fps": 30, "ddim_steps": 20, "eta": 0., "cfg_scale": 2.5}
     if any(cfg["sampling"].get(k) != v for k, v in expected.items()):
         raise ValueError("固定60帧30Hz、20步DDIM、eta0、CFG2.5")
-    if cfg["physics"]["prediction_mode"] != "denoised_x0" or cfg["physics"]["horizon"] not in (8, 16):
-        raise ValueError("首版仅同一样本denoised_x0，H8/H16")
+    if cfg["physics"]["prediction_mode"] != "denoised_x0" or cfg["physics"]["horizon"] not in (8, 16, 32, 64):
+        raise ValueError("仅同一样本denoised_x0，H8/H16/H32/H64需分别真实验收")
+    if cfg["execution_loss"].get("soft_joint_limit_enabled", False) or cfg["physics"]["lambda_safety"] != 0:
+        raise ValueError("新执行目标软关节限位已关闭，lambda_safety必须为0；原监督项保留")
     if cfg["physics"]["backend"] != "isaaclab3_newton_mujoco_warp" or cfg["physics"]["determinism"] not in ("run_to_run", "gpu_to_gpu"):
         raise ValueError("必须匹配Newton/MuJoCo-Warp及其实际确定性枚举")
     if cfg["stage1"]["model"]["diffusion_steps"] != 1000:

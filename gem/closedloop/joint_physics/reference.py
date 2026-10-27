@@ -11,7 +11,6 @@ from dataclasses import replace
 import torch
 
 from gem.closedloop.mb_control.contracts import ClosedLoopState, ForecastContext, GeneratedPlan, RequestTicket, ReferenceExhausted
-from gem.closedloop.mb_control.forecast import forecast_rollout
 from gem.closedloop.mb_control.reference_buffer import ReferenceBuffer
 from gem.closedloop.mb_control.validation import UnsupportedModelState
 from .contracts import PhysicsRejected, Window, frame_tick
@@ -101,9 +100,10 @@ def attach_sidecars(batch, store, adapter, codec, horizon, support_guard=None):
                 updated["proprio_history_times"][i] = (tick - torch.arange(49, -1, -1, device=known.device)*12).double()/600
                 updated["known_qpos30"][i:i+1] = known
                 updated["meta"][i]["proprio_source"] = "real_continuous_newton_sidecar"
-                # 此处只预测请求时已知信息；不在本次候选的执行梯度链中，无需保留图。
-                with torch.no_grad():
-                    context = forecast_rollout(window.request, adapter, window.start.tick, support_guard=support_guard).context
+                context = store.request(episode, meta["decision_frame"], window.ticket.prefix_frames,
+                                        known.device, support_guard)
+                if context.forecast_tick != window.start.tick:
+                    raise ValueError("离线前瞻时刻与当前首次影响合同不匹配")
                 reason = "available"
             except (PhysicsRejected, ReferenceExhausted) as error:
                 window, reason = None, getattr(error, "reason", "reference_support_missing")

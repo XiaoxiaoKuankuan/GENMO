@@ -18,7 +18,7 @@ import torch
 from gem.closedloop.stage1_dataset import BumiClosedLoopStage1Dataset, collate_stage1_training_samples
 from gem.closedloop.training import batch_to_device
 from .config import data_config
-from .contracts import SIDECAR_SCHEMA, PhysicsRejected, digest, source_key
+from .contracts import SIDECAR_SCHEMA, RAW_SIDECAR_SCHEMA, PhysicsRejected, digest, source_key
 
 
 class SourceCatalog:
@@ -86,11 +86,14 @@ class JointDataStream:
 
 
 class SidecarStore:
-    def __init__(self, directory, split, expected_assets=None):
+    def __init__(self, directory, split, expected_assets=None, *, allow_raw=False, sample_contract=None):
         self.directory = Path(directory).resolve()
         self.index = json.loads((self.directory / "index.json").read_text())
-        if self.index["schema"] != SIDECAR_SCHEMA or self.index["split"] != split:
+        schemas = (SIDECAR_SCHEMA, RAW_SIDECAR_SCHEMA) if allow_raw else (SIDECAR_SCHEMA,)
+        if self.index["schema"] not in schemas or self.index["split"] != split:
             raise ValueError("sidecar schema/split不匹配，禁止跨split训练")
+        if sample_contract is not None and self.index.get("sample_contract") != sample_contract:
+            raise ValueError("离线请求缓存的前缀/采样合同不匹配，不能在线重算或读取错位条件")
         if expected_assets is not None and self.index["assets"] != expected_assets:
             raise ValueError("sidecar的SM/WM、stats、FK或物理合同不匹配")
         self.cache, self.verified = OrderedDict(), set()
@@ -105,7 +108,7 @@ class SidecarStore:
         if shard not in self.cache:
             if digest(self.directory / shard) != self.index["shards"][shard]:
                 raise ValueError("sidecar分片内容身份已改变")
-            self.cache[shard] = torch.load(self.directory / shard, weights_only=False, map_location="cpu")
+            self.cache[shard] = torch.load(self.directory / shard, weights_only=False, map_location="cpu", mmap=True)
             if len(self.cache) > 2:
                 self.cache.popitem(last=False)
         episode = self.cache[shard][entry["episode"]]
@@ -117,6 +120,23 @@ class SidecarStore:
                     raise ValueError("原音乐/动作与真实sidecar内容不一致")
             self.verified.add(key)
         return episode
+
+    def request(self, episode, frame, prefix_frames, device, support_guard=None):
+        """按source/time随机索引持久化条件；训练期间禁止调用WM重做前瞻。"""
+        from gem.closedloop.mb_control.contracts import ForecastContext
+        requests = episode["offline_requests"]
+        index = frame // 3
+        if frame % 3 or index >= len(requests["frames"]) or int(requests["frames"][index]) != frame:
+            raise PhysicsRejected("missing_offline_request")
+        if int(requests["prefix_frames"][index]) != prefix_frames:
+            raise ValueError("离线已知前缀身份不匹配")
+        if not bool(requests["valid"][index]):
+            raise PhysicsRejected(requests["reasons"][index])
+        lo, hi = requests["state_offsets"][index:index+2].tolist()
+        if support_guard is not None:
+            support_guard(requests["predicted_states"][lo:hi].to(device))
+        return ForecastContext(requests["features"][index:index+1].to(device),
+            torch.ones(1, dtype=torch.bool, device=device), frame*20, int(requests["forecast_ticks"][index]))
 
 
 def slice_batch(batch, index):
