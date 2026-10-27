@@ -110,7 +110,8 @@ def analyze(root):
         vals=[r['task'],r['reason'],fmt(r['statistics']['tracking_score_100']),fmt(r['physical_seconds'])+'/'+fmt(r['music_seconds']),fmt(r['statistics']['joint_rmse_rad'])]
         page+='<tr>'+''.join('<td>'+html.escape(v)+'</td>' for v in vals)+'</tr>'
     mode=html.escape(manifest['timing_mode'])
-    page+=f'</table><p><a href="Stage1全量音乐评价.html">全部逐曲明细</a> · <a href="optimization_space_analysis.json">分数分布、逐关节及难度统计JSON</a> · <a href="manifest.json">原始评价合同</a></p><small>原s595000、SM ckpt_024000、完整DDIM20、CFG2.5、seed42；真实Newton，时间模式：{mode}。单种子不代表所有生成噪声。复杂度按已观察参考统计，早停歌曲可能低估后续动作难度。</small></html>'
+    detail='Stage1全量音乐评价.html' if complete else 'per_music_results.json'
+    page+=f'</table><p><a href="{detail}">全部逐曲明细</a> · <a href="optimization_space_analysis.json">分数分布、逐关节及难度统计JSON</a> · <a href="manifest.json">原始评价合同</a></p><small>原s595000、SM ckpt_024000、完整DDIM20、CFG2.5、seed42；真实Newton，时间模式：{mode}。单种子不代表所有生成噪声。复杂度按已观察参考统计，早停歌曲可能低估后续动作难度。</small></html>'
     tmp=root/'Stage1优化空间分析.html.tmp';tmp.write_text(page);tmp.replace(root/'Stage1优化空间分析.html')
     return result
 
@@ -121,6 +122,9 @@ def main():
     while True:
         result=analyze(root)
         if not args.watch or (root/'supervisor_complete.json').exists():
+            if args.watch:
+                from .stage1_census import report
+                report(root)
             if args.watch:write_json(root/'analysis_complete.json',dict(utc=utc(),all_tasks_finished=result['all_tasks_finished'],results=result['results'],expected=result['expected']))
             break
         time.sleep(30)

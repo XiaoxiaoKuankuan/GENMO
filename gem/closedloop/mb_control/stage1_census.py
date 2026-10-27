@@ -229,7 +229,7 @@ def report(root):
             ss=v['song_equal_weight']; cells=[key,v['physical_episodes'],v['completed'],fmt(v['completion_rate']),fmt(ss['tracking_score_100']['mean']),fmt(ss['full_song_coverage_score_100']['mean']),fmt(ss['joint_rmse_rad']['mean'])]
             page+='<tr>'+''.join('<td>'+html.escape(str(x))+'</td>' for x in cells)+'</tr>'
         page+='</table>'
-    page+='<h2>逐曲原始结果</h2><p>种子42；原s595000；DDIM20/eta0/CFG2.5；真实墙钟异步；SM ckpt_024000；统一原基线nominal初态。</p><table><tr>'+''.join('<th>'+x+'</th>' for x in ['音乐输入','来源','划分','结果','跟踪分','全曲折算分','关节RMSE(rad)','根XY RMS(m)','yaw RMS(rad)'])+'</tr>'
+    page+='<h2>逐曲原始结果</h2><p>种子42；原s595000；DDIM20/eta0/CFG2.5；时间模式：'+html.escape(manifest['timing_mode'])+'；SM ckpt_024000；统一原基线nominal初态。</p><table><tr>'+''.join('<th>'+x+'</th>' for x in ['音乐输入','来源','划分','结果','跟踪分','全曲折算分','关节RMSE(rad)','根XY RMS(m)','yaw RMS(rad)'])+'</tr>'
     page+=''.join(tab_row(r) for r in rows)+'</table><p><a href="summary.json">完整分组统计</a> · <a href="per_music_results.json">逐曲JSON</a> · <a href="manifest.json">固定评价合同</a></p></html>'
     tmp=root/'Stage1全量音乐评价.html.tmp';tmp.write_text(page);tmp.replace(root/'Stage1全量音乐评价.html')
     return result
