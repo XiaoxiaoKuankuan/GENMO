@@ -57,7 +57,8 @@ def checkpoint_adapter(path, engine):
 def variants():
     rows = [('zero', -1, 'all', 0.)]
     for model in range(2):
-        for component, scale in [('all', 1.), ('root', 1.), ('joints', 1.), ('all', .1)]:
+        for component, scale in [('all', 1.), ('root', 1.), ('joints', 1.), ('all', .1),
+                                 ('translation', 1.), ('rotation', 1.)]:
             rows.append((f'model{model}_{component}_{scale:g}', model, component, scale))
     return rows
 
@@ -93,6 +94,8 @@ def collect(args, cfg, engine, tasks, bank):
     for i, (_, _, component, _) in enumerate(rows):
         if component == 'root': mask[i, 6:] = 0
         if component == 'joints': mask[i, :6] = 0
+        if component == 'translation': mask[i, 3:] = 0
+        if component == 'rotation': mask[i, :3] = 0; mask[i, 6:] = 0
     scale = torch.tensor([r[3] for r in rows], device=bank.device)
     model_id = torch.tensor([r[1] for r in rows], device=bank.device)[variant]
     subsets = [(model_id == i).nonzero().flatten() for i in range(2)]
@@ -131,6 +134,11 @@ def collect(args, cfg, engine, tasks, bank):
             row = collector.step(auto_reset=True, split='evaluation', perturb=False)
             nominal = bank.ref(row['start']['song'][:count], row['start']['frame'][:count]+1)
             target = row['proposal']['future']
+            nominal_future = bank.ref(row['start']['song'][:count, None],
+                row['start']['frame'][:count, None]+bank.offset11[None, 1:])
+            row['raw']['planned_root_velocity_error'] = (target.root_v[:count]-nominal_future.root_v).square().mean((1, 2)).sqrt()
+            row['raw']['planned_root_angular_velocity_error'] = (target.root_w[:count]-nominal_future.root_w).square().mean((1, 2)).sqrt()
+            row['raw']['planned_joint_velocity_error'] = (target.qd[:count]-nominal_future.qd).square().mean((1, 2)).sqrt()
             nominal_pose = torch.cat((nominal.root_p, mat_to_quat(nominal.root_R), nominal.q), -1)
             corrected_pose = torch.cat((target.root_p[:count, 0], mat_to_quat(target.root_R[:count, 0]), target.q[:count, 0]), -1)
             values = dict(state=row['end']['state'][:count], action=row['proposal']['action'][:count],
@@ -237,7 +245,9 @@ def mechanism(args, engine, bank):
         critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec).to(bank.device)
         critic.load_state_dict(ck['critic']); del model
         if snapshots is not None:
-            begin = (1+4*model_index)*ns
+            layout = json.loads((Path(args.trajectories)/'physical_ablation.json').read_text())['variants']
+            begin = next(i for i, (_, m, component, scale) in enumerate(layout)
+                         if m == model_index and component == 'all' and scale == 1.)*ns
             states = [select_state(v, slice(begin, begin+ns)) for _, v in sorted(snapshots.items())]
             z = {k: torch.cat([v[k] for v in states]).to(bank.device) for k in states[0]}
         else:
