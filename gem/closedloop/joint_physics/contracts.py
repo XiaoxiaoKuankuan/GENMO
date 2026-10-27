@@ -16,9 +16,10 @@ RAW_SIDECAR_SCHEMA = "genmo.joint_physics.sidecar.v1"
 
 
 class PhysicsRejected(ValueError):
-    def __init__(self, reason):
+    def __init__(self, reason, details=None):
         super().__init__(reason)
         self.reason = reason
+        self.details = details or {}
 
 
 def source_key(meta):

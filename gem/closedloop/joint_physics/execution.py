@@ -36,9 +36,12 @@ class ValidatedSupport:
         try:
             self.state_guard(state)
         except (UnsupportedModelState, FloatingPointError) as error:
-            raise PhysicsRejected("wm_state_out_of_domain") from error
+            raise PhysicsRejected("wm_state_out_of_domain", getattr(error, "details", {})) from error
         if not torch.isfinite(action).all() or bool(((action.detach() < self.lower-.02) | (action.detach() > self.upper+.02)).any()):
-            raise PhysicsRejected("action_out_of_validated_domain")
+            outside = ((action.detach() < self.lower-.02) | (action.detach() > self.upper+.02)).nonzero().tolist()
+            raise PhysicsRejected("action_out_of_validated_domain", {"components": [
+                {"joint_index": j, "value": float(action[i,j].detach()), "lower": float(self.lower[j]-.02),
+                 "upper": float(self.upper[j]+.02)} for i,j in outside]})
 
 
 def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support=None, transition=None):
@@ -74,6 +77,10 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             with torch.no_grad():
                 if bool(adapter.runtime.termination(z.state.detach(), target).any()):
                     failure_steps.append(step + 1)
+        except PhysicsRejected as error:
+            error.details.update(first_reject_tick=z.tick, control_step=step,
+                                 action_origin="frozen_sm_from_student_denoised_x0")
+            raise
         except ReferenceExhausted as error:
             raise PhysicsRejected("incomplete_reference_window") from error
         if not torch.isfinite(loss).all() or not torch.isfinite(limit).all():

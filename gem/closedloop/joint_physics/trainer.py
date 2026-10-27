@@ -102,8 +102,12 @@ class JointTrainer:
         weight, safety_weight = physics_weights(self.step, self.cfg["physics"])
         eligible, snr = physics_selection(out, self.actor.stage1.train_diffusion, self.cfg["physics"])
         rejection, accepted, coverage = Counter(), [], []
+        from .diagnostics import sample_record, summarize
+        sample_diagnostics = []
         indices = self.window_rng.permutation(b).tolist()
         for i in indices:
+            previous_rejection = rejection.copy()
+            record = sample_record(batch, i, timesteps[i], snr[i])
             if not self.cfg["physics"]["enabled"]:
                 rejection["physics_disabled"] += 1
             elif not weight and not safety_weight:
@@ -121,6 +125,8 @@ class JointTrainer:
             elif len(accepted) >= self.cfg["physics"]["subbatch"]:
                 rejection["physics_subbatch_budget"] += 1
             else:
+                record["stages"].extend(["curriculum_active", "conditions_passed", "execution_attempted"])
+                record["action_origin"] = "frozen_sm_from_student_denoised_x0"
                 try:
                     result = execute_window(windows[i], out["pred_x_start"][i:i+1], out["static_conf_logits"][i:i+1],
                         self.actor, self.adapter, self.cfg["execution_loss"], support=self.support)
@@ -132,6 +138,10 @@ class JointTrainer:
                     coverage.append(result["coverage"])
                 except PhysicsRejected as error:
                     rejection[error.reason] += 1
+                    record.update(error.details)
+            reason = list((rejection-previous_rejection).keys())
+            record["reason"] = reason[0] if reason else "execution_gradient_completed"
+            sample_diagnostics.append(record)
         count, scale = distributed_execution_scale(len(accepted), self.device, self.world_size)
         zero = out["pred_x_start"].sum()*0.
         local_exec = sum((r["loss"] for r in accepted), zero)
@@ -167,7 +177,8 @@ class JointTrainer:
         return {"step": self.step, **self.counters, "data_loss": float(reduced[0]/self.world_size),
             "execution_loss": float(reduced[1]/count.clamp_min(1)), "execution_safety": float(reduced[2]/count.clamp_min(1)),
             "physics_valid_rate": float(count)/(b*self.world_size), "lambda_exec": weight, "lambda_safety": safety_weight,
-            "rejections": dict(rejection), "snr_range": [float(snr.min()), float(snr.max())],
+            "rejections": dict(rejection), "sample_diagnostics": summarize(sample_diagnostics),
+            "snr_range": [float(snr.min()), float(snr.max())],
             "timesteps": timesteps.tolist(), "sample_ids": [(m["sample_id"], m["decision_frame"]) for m in batch["meta"]],
             "music_dropout_mask": drop.tolist(), "physics_noise_eligible": int(eligible.sum()),
             "history_sources": [m["proprio_source"] for m in batch["meta"]],
