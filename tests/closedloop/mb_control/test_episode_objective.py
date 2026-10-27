@@ -55,3 +55,12 @@ def test_local_alignment_can_hide_drift_but_episode_loss_has_correct_gradient():
     episode_loss.sum().backward()
     assert moved.grad[0,0]>0  # 梯度下降确实把累计位置偏移拉向原episode目标。
     assert p.grad is None  # 固定音乐教师不能被学生损失更新。
+
+
+def test_identity_shortcut_is_exact_and_never_approximates_drift():
+    identity=AnchorAlignment(torch.eye(3)[None],torch.zeros(1,3))
+    assert identity.is_identity()
+    shifted=AnchorAlignment(torch.eye(3)[None],torch.tensor([[1e-12,0.,0.]]))
+    assert not shifted.is_identity()
+    turned=AnchorAlignment(torch.eye(3)[None]+torch.tensor([[[0.,1e-12,0.],[0.,0.,0.],[0.,0.,0.]]]),torch.zeros(1,3))
+    assert not turned.is_identity()

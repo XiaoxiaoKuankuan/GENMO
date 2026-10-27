@@ -45,6 +45,15 @@ class AnchorAlignment:
         translation = torch.cat((translated[..., :2], torch.zeros_like(translated[..., 2:])), -1).detach()
         return cls(rotation, translation)
 
+    def is_identity(self):
+        """严格逐元素恒等检测；不使用容差，不近似非零初始坐标变换。"""
+        cached=getattr(self,"_identity_exact",None)
+        if cached is None:
+            identity=torch.eye(3,device=self.rotation.device,dtype=self.rotation.dtype).expand_as(self.rotation)
+            cached=torch.equal(self.rotation,identity) and torch.equal(self.translation,torch.zeros_like(self.translation))
+            object.__setattr__(self,"_identity_exact",cached)
+        return cached
+
     def reference(self, ref):
         r, t = self.rotation, self.translation
         return ref._replace(root_p=(r@ref.root_p.detach()[..., None]).squeeze(-1)+t,

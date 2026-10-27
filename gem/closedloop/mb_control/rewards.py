@@ -95,7 +95,7 @@ class TrackingRewards:
             if teacher_alignment is not None:
                 dance, dance_groups = execution_loss(state,teacher_alignment.reference(teacher_reference),kin,self.config.get("dance_scales"))
             episode_dance=unaligned
-            if self.config.get("episode_dance_weight",0.) and episode_alignment is not None:
+            if self.config.get("episode_dance_weight",0.) and episode_alignment is not None and not episode_alignment.is_identity():
                 episode_dance,_=execution_loss(state,episode_alignment.reference(teacher_reference),kin,self.config.get("dance_scales"))
             track, track_groups = execution_loss(state, reference, kin, self.config.get("dance_scales"))
             physical = self.config.get("action_rate_weight", .1)*rate + self.config.get("joint_limit_weight", 2.)*limits
