@@ -66,3 +66,24 @@ def test_type_certification_and_action_boundary():
     states[:,34:] = 3.
     with pytest.raises(PhysicsRejected,match='predicted_motion_type_uncertified'):
         guard.check_motion(states,tuple(f'l_leg_{i}' for i in range(21)))
+
+
+def test_disjoint_reports_preserve_failures_and_refuse_overwrite():
+    import copy
+    from gem.closedloop.joint_physics.certificates import merge_reports
+    first = {'schema':'genmo.joint_physics.validation.v2','certification_scope':'exact_motion_and_contact_profile',
+             'frozen_unchanged':True,'forecast_passed':True,'assets':{'sm':'fixed'},'objective':{'soft_limit':0},
+             'criteria':{'minimum_direction_fraction':.75},'source_ids':['a'],'rows':[{'passed':True}],
+             'profile_certificates':{'32':{'standing':{'passed':True}}},
+             'state_envelope':{'schema':'test','minimum':[0.],'maximum':[1.],'real_state_count':2},
+             'action_min':[-1.],'action_max':[1.]}
+    second = copy.deepcopy(first)
+    second.update(source_ids=['b'],rows=[{'passed':False}],profile_certificates={'64':{'turning':{'passed':False}}})
+    merged = merge_reports([first,second],[{'sha256':'a'},{'sha256':'b'}])
+    assert merged['supported_horizons']==[32] and len(merged['rows'])==2
+    assert not merged['profile_certificates']['64']['turning']['passed']
+    with pytest.raises(ValueError,match='重叠'):
+        merge_reports([first,first],[{},{}])
+    second['assets']={'sm':'changed'}
+    with pytest.raises(ValueError,match='合同不一致'):
+        merge_reports([first,second],[{},{}])
