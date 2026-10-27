@@ -61,6 +61,51 @@ class _EuclideanProjection(torch.autograd.Function):
         return proposal, boundary*(~upper_side), boundary*upper_side, None, None, None
 
 
+class _CoupledProjection(torch.autograd.Function):
+    """SO(3)线性化半空间QP；包含对约束矩阵的隐式导数，不能以直通梯度替代。"""
+    @staticmethod
+    def forward(ctx, proposal, lower, upper, matrix, iterations):
+        eye = torch.eye(proposal.shape[-1], device=proposal.device, dtype=proposal.dtype)
+        inverse = torch.linalg.inv(eye+10*matrix.transpose(-1, -2)@matrix)
+        if proposal.is_cuda:
+            from .projection_kernel import solve_coupled
+            x, dual = solve_coupled(proposal, lower, upper, matrix, inverse, iterations)
+        else:
+            x = proposal
+            ax = (matrix@x[..., None]).squeeze(-1)
+            z, dual = ax.clamp(lower, upper), torch.zeros_like(lower)
+            for _ in range(iterations):
+                rhs = proposal+10*(matrix.transpose(-1, -2)@(z-dual)[..., None]).squeeze(-1)
+                x = (inverse@rhs[..., None]).squeeze(-1)
+                ax = (matrix@x[..., None]).squeeze(-1)
+                z = (ax+dual).clamp(lower, upper)
+                dual = dual+ax-z
+        active = dual.abs() > 2e-5
+        a = matrix*active[..., None]
+        gram = a.transpose(-1, -2).double()@a.double()
+        eigen, basis = torch.linalg.eigh(gram)
+        reciprocal = torch.where(eigen > 1e-7, eigen.clamp_min(1e-7).reciprocal(), 0.)
+        pinv = ((basis*reciprocal[..., None, :])@basis.transpose(-1, -2)).to(proposal)
+        boundary = torch.where(dual > 0, upper, lower)
+        rhs = (a.transpose(-1, -2)@(((matrix@proposal[..., None]).squeeze(-1)-boundary)*active)[..., None])
+        polished = proposal-(pinv@rhs).squeeze(-1)
+        ax = (matrix@polished[..., None]).squeeze(-1)
+        use = torch.maximum(ax-upper, lower-ax).amax(-1) < 2e-5
+        x = torch.where(use[..., None], polished, x)
+        tangent = eye-pinv@(a.transpose(-1, -2)@a)
+        lagrange = (a@(pinv@(proposal-x)[..., None])).squeeze(-1)
+        ctx.save_for_backward(tangent, pinv, a, dual > 0, x, lagrange)
+        return x
+
+    @staticmethod
+    def backward(ctx, gradient):
+        tangent, pinv, matrix, upper, x, lagrange = ctx.saved_tensors
+        gy = (tangent@gradient[..., None]).squeeze(-1)
+        gb = (matrix@(pinv@gradient[..., None])).squeeze(-1)
+        ga = -lagrange[..., None]*gy[..., None, :]-gb[..., None]*x[..., None, :]
+        return gy, gb*(~upper), gb*upper, ga, None
+
+
 class ReferenceProjection(torch.nn.Module):
     """附加预算为算法候选范围，不是机器人硬件极限；SO(3)须另行实际检查。"""
     def __init__(self, spec, bounds, *, joint_velocity=1., joint_acceleration=10.,
@@ -85,7 +130,7 @@ class ReferenceProjection(torch.nn.Module):
         self.register_buffer('matrix', matrix)
         self.register_buffer('inverse', torch.linalg.inv(eye+10*matrix.T@matrix))
 
-    def forward(self, proposal, left, anchor):
+    def forward(self, proposal, left, anchor, nominal_rotation=None):
         unit = self.velocity*.02
         y = proposal.transpose(1, 2)/unit[None, :, None]
         l, c = left/unit, anchor/unit
@@ -101,13 +146,55 @@ class ReferenceProjection(torch.nn.Module):
         feasible = ((y@self.matrix.T >= lower) & (y@self.matrix.T <= upper)).all(-1)
         indices = (~feasible).flatten().nonzero().flatten()
         if len(indices) == 0:
-            return proposal
-        flat_y, flat_l, flat_u = y.reshape(-1, 10), lower.reshape(-1, 30), upper.reshape(-1, 30)
-        solved = _EuclideanProjection.apply(flat_y[indices], flat_l[indices], flat_u[indices],
-                                            self.matrix, self.inverse, self.iterations)
-        x = flat_y.index_copy(0, indices, solved).reshape_as(y)
-        projected = (x*unit[None, :, None]).transpose(1, 2)
-        return torch.where(feasible[:, None], proposal, projected)
+            result = proposal
+        else:
+            flat_y, flat_l, flat_u = y.reshape(-1, 10), lower.reshape(-1, 30), upper.reshape(-1, 30)
+            solved = _EuclideanProjection.apply(flat_y[indices], flat_l[indices], flat_u[indices],
+                                                self.matrix, self.inverse, self.iterations)
+            x = flat_y.index_copy(0, indices, solved).reshape_as(y)
+            projected = (x*unit[None, :, None]).transpose(1, 2)
+            result = torch.where(feasible[:, None], proposal, projected)
+        if nominal_rotation is not None:
+            result = self.project_rotation(proposal, result, left, anchor, nominal_rotation, lower, upper)
+        return result
+
+    def angular_constraints(self, x, left, anchor, nominal_rotation):
+        unit = self.velocity[3:6]*.02
+        plan = x.reshape(3, 10).T*unit
+        halo = 2*plan[-1:]-plan[-2:-1]
+        d = torch.cat((left[None], anchor[None], plan, halo))
+        corrected = nominal_rotation@so3_exp(d)
+        w = so3_log(corrected[1:]@corrected[:-1].transpose(-1, -2))/.02
+        nominal_w = so3_log(nominal_rotation[1:]@nominal_rotation[:-1].transpose(-1, -2))/.02
+        dw = w-nominal_w
+        return torch.cat((dw[1:].norm(dim=-1)/self.rotation_velocity-1,
+            (dw.diff(dim=0)/.02).norm(dim=-1)/self.rotation_acceleration-1))
+
+    def project_rotation(self, proposal, projected, left, anchor, nominal_rotation, lower, upper):
+        unit = self.velocity[3:6]*.02
+        x = (projected[..., 3:6]/unit).transpose(1, 2).flatten(1)
+        fn = torch.func.vmap(self.angular_constraints)
+        values = fn(x, left[:, 3:6], anchor[:, 3:6], nominal_rotation)
+        selected = (values.amax(-1) > 1e-5).nonzero().flatten()
+        if not len(selected):
+            return projected
+        x = x[selected]
+        target = (proposal[selected, :, 3:6]/unit).transpose(1, 2).flatten(1)
+        past, current, rotation = left[selected, 3:6], anchor[selected, 3:6], nominal_rotation[selected]
+        base = torch.block_diag(self.matrix, self.matrix, self.matrix).expand(len(selected), -1, -1)
+        lo, hi = lower[selected, 3:6].flatten(1), upper[selected, 3:6].flatten(1)
+        jacobian = torch.func.vmap(torch.func.jacrev(self.angular_constraints, argnums=0))
+        # SQP只修正真实SO(3)约束不满足的旋转通道；每次仍最小化与原提案的距离。
+        for _ in range(6):
+            value = fn(x, past, current, rotation)
+            jac = jacobian(x, past, current, rotation)
+            bound = (jac@x[..., None]).squeeze(-1)-value
+            matrix = torch.cat((base, jac), 1)
+            x = _CoupledProjection.apply(target, torch.cat((lo, torch.full_like(bound, -1e4)), -1),
+                torch.cat((hi, bound), -1), matrix, self.iterations)
+        corrected = projected.clone()
+        corrected[selected, :, 3:6] = x.reshape(-1, 3, 10).transpose(1, 2)*unit
+        return corrected
 
     def certificate(self, proposal, left, anchor, nominal_rotation):
         halo = 2*proposal[:, -1:]-proposal[:, -2:-1]

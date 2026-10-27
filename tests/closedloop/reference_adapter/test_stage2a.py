@@ -90,3 +90,28 @@ def test_new_projection_real_SM_zero_identity_and_execution_gradients(system):
     shifted = dict(z, state=z['state'].clone())
     shifted['state'][:, :2] += 10
     torch.testing.assert_close(control.packed(control.fields(shifted)), control.packed(control.fields(z)), atol=0, rtol=0)
+
+
+def test_SO3_constraints_use_true_composed_angular_acceleration():
+    from supermimic.rotations import so3_exp
+    p = projector()
+    time = torch.arange(13, dtype=torch.double)*.02
+    nominal = so3_exp(torch.stack((.2*torch.sin(time*5), .1*torch.cos(time*7), time*2), -1))[None]
+    proposal = torch.zeros(1, 10, 27, dtype=torch.double)
+    proposal[..., 3:6] = torch.tensor([.008, -.007, .006])
+    left = torch.zeros(1, 27, dtype=torch.double)
+    raw = p(proposal, left, left)
+    corrected = p(proposal, left, left, nominal)
+    report = p.certificate(corrected, left, left, nominal)
+    assert report['feasible'].all(), report
+    assert float(report['angular_acceleration_excess'].max()) < .0025
+    # 比较执行的整个数值算法的导数，不以有限梯度本身充当方向证据。
+    proposal.requires_grad_()
+    value = p(proposal, left, left, nominal)
+    probe = torch.linspace(.3, 1., value.numel(), dtype=torch.double).reshape_as(value)
+    grad, = torch.autograd.grad((value*probe).sum(), proposal)
+    direction = torch.zeros_like(proposal); direction[..., 3] = .01
+    eps = 1e-4
+    finite = ((p(proposal.detach()+eps*direction, left, left, nominal)
+              -p(proposal.detach()-eps*direction, left, left, nominal))*probe).sum()/(2*eps)
+    torch.testing.assert_close(finite, (grad*direction).sum(), atol=2e-4, rtol=.02)

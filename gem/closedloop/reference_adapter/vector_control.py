@@ -118,7 +118,9 @@ class VectorControl:
             residual = torch.cat((residual[..., :2]*0, residual[..., 2:]), -1)
         raw_residual = residual
         if self.projection is not None:
-            residual = self.projection(residual, z['left'], z['anchor'])
+            frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
+            rotation = self.bank.pose(z['song'][:, None], frames)[1]
+            residual = self.projection(residual, z['left'], z['anchor'], rotation)
         elif self.constraint_beta < 1:
             residual = constrain_plan(residual, z['left'], z['anchor'], self.constraint_beta)
         current, future, goal, halo = self.reference(z, residual)

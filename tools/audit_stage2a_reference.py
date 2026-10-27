@@ -122,7 +122,9 @@ def main():
         json_write(output/'failure.json', dict(traceback=traceback.format_exc(), accepted_updates=0,
             real_transitions=collector.real_transitions if collector else 0))
         if collector:
-            atomic_save(dict(state=collector.state, constraints=getattr(collector, 'last_constraint_failure', None)),
+            atomic_save(dict(state=getattr(collector, 'last_constraint_state', collector.state),
+                        proposal=getattr(collector, 'last_constraint_proposal', None),
+                        constraints=getattr(collector, 'last_constraint_failure', None)),
                         output/'failure_physical_state.pt')
         raise
 

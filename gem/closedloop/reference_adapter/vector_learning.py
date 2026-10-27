@@ -95,19 +95,27 @@ def tangent_loss(dynamics, pairs):
                                        tangent_prediction_rms=float((predicted.detach()/action_size[:, None]).square().mean().sqrt()))
 
 
-def fit_wm(dynamics, optimizer, windows, pairs, weight):
+def fit_wm(dynamics, optimizer, windows, pairs, weight, *, reference_pairs=None, reference_weight=0.):
     if dynamics._graph_active:
         raise RuntimeError('想象图存活时禁止修改WM')
     optimizer.zero_grad(set_to_none=True)
     supervised, report = dynamics.supervised_loss(windows)
     local, details = tangent_loss(dynamics, pairs) if pairs is not None else (supervised*0, {})
     loss = supervised+weight*local
+    response = supervised*0
+    if reference_pairs is not None:
+        from .reference_response import consistency_loss
+        response, extra = consistency_loss(dynamics, reference_pairs, windows['action'].shape[1])
+        details.update(extra)
+        loss = loss+reference_weight*response
     loss.backward()
     norm = nn.utils.clip_grad_norm_(dynamics.model.net.parameters(), 1., error_if_nonfinite=True)
     optimizer.step(); optimizer.zero_grad(set_to_none=True)
     dynamics.model_version += 1
     return {k: float(v) for k, v in report.items()} | details | dict(wm_loss=float(loss.detach()),
-        tangent_loss=float(local.detach()), tangent_weight=weight, wm_gradient_norm=float(norm), wm_updates=dynamics.model_version)
+        tangent_loss=float(local.detach()), tangent_weight=weight,
+        reference_response_loss=float(response.detach()), reference_response_weight=reference_weight,
+        wm_gradient_norm=float(norm), wm_updates=dynamics.model_version)
 
 
 def rollout(control, dynamics, critic, start, horizon, *, terminal_value, gamma=.99, intervention=None):
@@ -189,12 +197,18 @@ def adapter_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
                 trajectory = rollout(control, dynamics, critic, z, horizon, terminal_value=terminal_value)
                 loss = -trajectory['objective'].sum()/count
                 if offset == 0:
+                    complete = torch.autograd.grad(trajectory['objective'].mean(), parameters, retain_graph=True, allow_unused=True)
+                    complete_norm = sum((g.square().sum() for g in complete if g is not None), loss.new_zeros(())).sqrt()
+                    totals['gradient_probe_samples'] = len(z['state'])
                     execution = trajectory['execution_objective']
                     grads = torch.autograd.grad(execution.mean(), parameters, retain_graph=True, allow_unused=True)
                     totals['execution_gradient_norm'] = float(sum(g.square().sum() for g in grads if g is not None).sqrt())
                     for name, term in trajectory['weighted'].items():
                         grads = torch.autograd.grad(term.mean(), parameters, retain_graph=True, allow_unused=True)
-                        totals['gradient_'+name] = float(sum((g.square().sum() for g in grads if g is not None), loss.new_zeros(())).sqrt())
+                        term_norm = sum((g.square().sum() for g in grads if g is not None), loss.new_zeros(())).sqrt()
+                        dot = sum(((a*b).sum() for a, b in zip(grads, complete) if a is not None and b is not None), loss.new_zeros(()))
+                        totals['gradient_'+name] = float(term_norm)
+                        totals['gradient_cosine_total_'+name] = float(dot/(term_norm*complete_norm).clamp_min(1e-20))
                 loss.backward()
                 for name, term in trajectory['weighted'].items():
                     totals['value_'+name] = totals.get('value_'+name, 0.)+float(term.detach().sum())/count

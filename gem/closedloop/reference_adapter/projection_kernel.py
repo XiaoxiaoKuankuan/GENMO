@@ -48,3 +48,41 @@ def solve(proposal, lower, upper, matrix, inverse, iterations):
     _solve[(len(proposal),)](proposal, lower, upper, matrix.contiguous(), inverse.contiguous(), x, dual,
                             iterations, num_warps=4)
     return x, dual
+
+
+@triton.jit
+def _coupled(Y, L, U, A, INV, X, DUAL, N: tl.constexpr, M: tl.constexpr,
+             BN: tl.constexpr, BM: tl.constexpr, ITERATIONS: tl.constexpr):
+    row = tl.program_id(0)
+    i, j = tl.arange(0, BN), tl.arange(0, BM)
+    y = tl.load(Y+row*N+i, i < N, 0)
+    lower = tl.load(L+row*M+j, j < M, 0)
+    upper = tl.load(U+row*M+j, j < M, 0)
+    a = tl.load(A+row*M*N+j[:, None]*N+i[None, :], (j[:, None] < M) & (i[None, :] < N), 0)
+    inv = tl.load(INV+row*N*N+i[:, None]*N+i[None, :], (i[:, None] < N) & (i[None, :] < N), 0)
+    x = y
+    ax = tl.sum(a*x[None, :], 1)
+    z = tl.minimum(tl.maximum(ax, lower), upper)
+    dual = z*0
+    step = 0
+    converged = False
+    while (step < ITERATIONS) & (~converged):
+        rhs = y+10*tl.sum(a*(z-dual)[:, None], 0)
+        previous = x
+        x = tl.sum(inv*rhs[:, None], 0)
+        ax = tl.sum(a*x[None, :], 1)
+        z = tl.minimum(tl.maximum(ax+dual, lower), upper)
+        dual = dual+ax-z
+        if step % 16 == 15:
+            converged = (tl.max(tl.abs(ax-z), 0) < 1e-7) & (tl.max(tl.abs(x-previous), 0) < 1e-7)
+        step += 1
+    tl.store(X+row*N+i, x, i < N)
+    tl.store(DUAL+row*M+j, dual, j < M)
+
+
+def solve_coupled(proposal, lower, upper, matrix, inverse, iterations):
+    inputs = [v.contiguous() for v in (proposal, lower, upper, matrix, inverse)]
+    x, dual = torch.empty_like(proposal), torch.empty_like(lower)
+    _coupled[(len(proposal),)](*inputs, x, dual, proposal.shape[-1], lower.shape[-1],
+        triton.next_power_of_2(proposal.shape[-1]), triton.next_power_of_2(lower.shape[-1]), iterations, num_warps=4)
+    return x, dual

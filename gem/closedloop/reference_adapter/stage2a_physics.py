@@ -61,7 +61,8 @@ def install_repeated_start(collector, source, repeats):
     if count > collector.num_envs:
         raise ValueError('真实配对环境数不足')
     # 空余环境仍真实采集当前策略；前count个为同一起点的独立物理条件。
-    collector.reset(split='train', perturb=False)
+    if collector.state is None:
+        collector.reset(split='train', perturb=False)
     repeated = {k: v.repeat_interleave(repeats, 0).clone() for k, v in source.items()}
     ids = torch.arange(count, device=collector.device)
     collector.reset(ids, songs=repeated['song'], frames=repeated['frame'], initial=repeated['state'],
@@ -167,5 +168,56 @@ def oracle_experiment(collector, source, horizons=(8, 16, 32, 64)):
         return rows, data
     finally:
         collector.control = control
-        collector.state = None
+
+
+@torch.no_grad()
+def collect_reference_response(collector, source, *, horizon=32, amplitude=.005, replay=None):
+    """当前真实状态/历史四条件重置；只在第一步添加正负参考，后续闭环继续当前策略。"""
+    control = collector.control
+    count, mismatch = install_repeated_start(collector, source, 4)
+    groups = len(source['state'])
+    start = detach_state(select_state(collector.state, slice(0, count)))
+    noise = torch.randn(groups, 10, 27, device=collector.device, generator=collector.generator)
+    # 方向是独立十帧；可执行性由同一QP负责，不用另一套低通探索控制器。
+    noise = noise/noise.flatten(1).norm(dim=-1)[:, None, None].clamp_min(1e-12)*amplitude
+    noise[..., :2] = 0
+    offset = torch.zeros(collector.num_envs, 10, 27, device=collector.device)
+    offset[2:count:4], offset[3:count:4] = noise, -noise
+    states, actions, switches, reliable = [], [], [], []
+    live = torch.ones(count, dtype=torch.bool, device=collector.device)
+    previous_contact = None
+    for t in range(horizon):
+        row = collector.step(auto_reset=False, split='reference_response_train',
+                             residual_offset=offset if t == 0 else None, contact_count=count)
+        current = row['end']['state'][:count].reshape(groups, 4, 55)
+        action = row['proposal']['action'][:count].reshape(groups, 4, 21)
+        contact = row['contacts'][0].reshape(groups, 4, -1)
+        change = (contact[:, 2] != contact[:, 3]).any(-1)
+        if previous_contact is not None:
+            change |= (contact != previous_contact).any((1, 2))
+        repeat = (current[:, 0]-current[:, 1]).abs().amax(-1)
+        size = (action[:, 2]-action[:, 3]).square().mean(-1).sqrt()
+        live &= ~row['done'][:count]
+        good = ((mismatch <= 1e-5) & (repeat <= 1e-4) & ~change & (size >= 1e-4)
+                & live.reshape(groups, 4).all(-1))
+        if reliable:
+            good &= reliable[-1]
+        states.append(current); actions.append(action); switches.append(change); reliable.append(good)
+        previous_contact = contact
+        # 可选辅助真实转移仍保留实际episode/time；不把不同条件拼成连续轨迹。
+        if replay is not None:
+            replay.add(row['start'], row['proposal']['action'], row['end']['state'], row['reward'],
+                       row['continuation'], row['done'], row['failed'], collector.policy_version)
+    states, actions = torch.stack(states, 1), torch.stack(actions, 1)
+    valid, switch = torch.stack(reliable, 1), torch.stack(switches, 1)
+    return dict(origin='current_policy_real_reference_response', split='train',
+        state=start['state'][::4], xi=start['xi'][::4], song=source['song'], frame=source['frame'],
+        plus_action=actions[:, :, 2], minus_action=actions[:, :, 3],
+        plus_next=states[:, :, 2], minus_next=states[:, :, 3], reliable=valid, contact_switch=switch,
+        policy_version=torch.full_like(source['song'], collector.policy_version),
+        initial_mismatch=mismatch, repeated_states=states[:, :, :2],
+        rejected=dict(unreliable_steps=int((~valid).sum()), contact_switch_steps=int(switch.sum()),
+                      initial_mismatch=int((mismatch > 1e-5).sum())),
+        adapter_sha256=parameter_identity(control.adapter),
+        response_semantics='same_real_reset_start_current_policy_closed_loop_real_action_sequences')
 
