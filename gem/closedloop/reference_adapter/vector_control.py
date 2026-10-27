@@ -46,6 +46,7 @@ class VectorControl:
         self.projection = None
         self.precision = None
         self.soft_joint_limit_cost = True
+        self.sm_soft_termination_only = False
 
     def initial(self, observed, songs, frames, episodes):
         state, xi = observed['state'], observed['xi']
@@ -198,6 +199,10 @@ class VectorControl:
         music_end = frames >= self.bank.ends[z['song']]
         done = failed | music_end
         continuation = (1-self.runtime.termination(state_next, nominal, soft=True))*(~done)
+        if self.sm_soft_termination_only:
+            # 正式SM交替入口的想象使用原版soft termination；真实done仍负责复位。
+            # 音乐/名义支持结束是真终止，不能bootstrap。
+            continuation = (1-self.runtime.termination(state_next, nominal, soft=True))*(~music_end)
         if not self.soft_imagination_continuation:
             continuation = (~done).to(state_next)
         obs = self.runtime.observation(state_next, proposal['action'], z['xi'],

@@ -12,10 +12,11 @@ from .vector_control import select_state
 
 
 class VectorReplay:
-    def __init__(self, capacity, num_envs, device, gamma=.99):
+    def __init__(self, capacity, num_envs, device, gamma=.99, *, compute_mc=True):
         self.slots = max(20, capacity//num_envs)
         self.num_envs, self.capacity = num_envs, self.slots*num_envs
         self.device, self.gamma = device, gamma
+        self.compute_mc = compute_mc
         self.data, self.dynamic_keys = {}, ()
         self.cursor = self.size = self.total_vector_steps = 0
         self.completed_segments = self.completed_full_songs = self.head_truncated_terminals = 0
@@ -46,7 +47,7 @@ class VectorReplay:
         self.cursor = (self.cursor+1)%self.slots
         self.size = min(self.size+1, self.slots)
         self.total_vector_steps += 1
-        if bool(done.any()):
+        if self.compute_mc and bool(done.any()):
             self._finish(written, done, failed)
 
     @torch.no_grad()
@@ -139,7 +140,7 @@ class VectorReplay:
         return z, self.data['mc'][row, env], self.data['near_failure'][row, env]
 
     def state_dict(self):
-        return dict(slots=self.slots, num_envs=self.num_envs, gamma=self.gamma, cursor=self.cursor,
+        return dict(slots=self.slots, num_envs=self.num_envs, gamma=self.gamma, compute_mc=self.compute_mc, cursor=self.cursor,
             size=self.size, total_vector_steps=self.total_vector_steps, dynamic_keys=self.dynamic_keys,
             completed_segments=self.completed_segments, completed_full_songs=self.completed_full_songs,
             head_truncated_terminals=self.head_truncated_terminals,
@@ -148,6 +149,7 @@ class VectorReplay:
     def load_state_dict(self, state):
         if state['slots'] != self.slots or state['num_envs'] != self.num_envs:
             raise ValueError('完整Replay恢复需要相同容量和环境数')
+        self.compute_mc = state.get('compute_mc', True)
         for key in ('gamma', 'cursor', 'size', 'total_vector_steps', 'dynamic_keys', 'completed_segments',
                     'completed_full_songs', 'head_truncated_terminals'):
             setattr(self, key, state[key])

@@ -105,7 +105,7 @@ class VectorCollector:
     @torch.no_grad()
     def step(self, replay=None, *, zero=False, auto_reset=True, split='train', perturb=True,
              residual_offset=None, action_offset=None, replay_ids=None, contact_count=0, latent=None,
-             reset_split=None):
+             reset_split=None, action_noise=0.):
         z = self.state
         if z is None:
             raise RuntimeError('采集前必须reset')
@@ -114,6 +114,12 @@ class VectorCollector:
             torch.cuda.synchronize(self.device)
         t0 = time.perf_counter()
         proposal = self.control.propose(z, zero=zero, residual_offset=residual_offset, action_offset=action_offset, latent=latent)
+        if action_noise:
+            # 与SM collect相同：探索施加在Actor输出之后，Replay、奖励及下一观测
+            # 都读取这份实际执行动作；评价调用默认0，不改变冻结Actor/normalizer。
+            proposal['policy_action'] = proposal['action']
+            noise = torch.randn(proposal['action'].shape, device=self.device, generator=self.generator)
+            proposal['action'] = (proposal['action']+action_noise*noise).clamp(-20, 20)
         certificate = self.control.constraint_certificate(z, proposal)
         if certificate is not None and not bool(certificate['feasible'].all()):
             self.last_constraint_failure = {k: v.detach().cpu() for k, v in certificate.items()}
