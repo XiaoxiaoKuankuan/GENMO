@@ -56,6 +56,10 @@ class JointDataStream:
         self.rng = np.random.default_rng(cfg["training"]["seed"] + rank * 100003)
         self.draws = 0
         self.rank, self.world_size = rank, world_size
+        self.row_probabilities = []
+        for dataset, rows in zip(self.catalog.datasets, self.catalog.rows):
+            weights = np.bincount(dataset.idx2meta, minlength=len(dataset.rows))[rows].astype(float)
+            self.row_probabilities.append(weights / weights.sum())
 
     def next(self, count, device):
         samples = []
@@ -63,8 +67,7 @@ class JointDataStream:
             index = int(self.rng.choice(len(self.catalog.datasets), p=self.catalog.probabilities))
             dataset, rows = self.catalog.datasets[index], self.catalog.rows[index]
             # 沿用原Dataset展开索引的时长采样权重；窗口相位在全曲范围随机选择。
-            repeats = np.bincount(dataset.idx2meta, minlength=len(dataset.rows))[rows].astype(float)
-            row_index = int(self.rng.choice(rows, p=repeats / repeats.sum()))
+            row_index = int(self.rng.choice(rows, p=self.row_probabilities[index]))
             frames = int(dataset.rows[row_index]["num_frames"])
             start = int(self.rng.integers((frames - 1) // 3 + 1)) * 3
             sample = dataset.get_window(row_index, start_frame=start)
@@ -86,11 +89,13 @@ class JointDataStream:
 
 
 class SidecarStore:
-    def __init__(self, directory, split, expected_assets=None, *, allow_raw=False, sample_contract=None):
+    def __init__(self, directory, split, expected_assets=None, *, allow_raw=False, sample_contract=None, snapshot=None):
         self.children = None
+        self.options = dict(split=split, expected_assets=expected_assets, allow_raw=allow_raw, sample_contract=sample_contract)
+        self.paths = directory
         if isinstance(directory, (list, tuple)):
             self.children = [SidecarStore(path, split, expected_assets, allow_raw=allow_raw,
-                                         sample_contract=sample_contract) for path in directory]
+                                         sample_contract=sample_contract, snapshot=snapshot[i] if snapshot else None) for i, path in enumerate(directory)]
             self.index = dict(self.children[0].index, sources={})
             self.owners = {}
             for child in self.children:
@@ -103,6 +108,12 @@ class SidecarStore:
             return
         self.directory = Path(directory).resolve()
         self.index = json.loads((self.directory / "index.json").read_text())
+        live_index = self.index
+        if snapshot is not None:
+            if snapshot["directory"] != str(self.directory):
+                raise ValueError("恢复缓存目录不同")
+            self._append_only(snapshot["index"], live_index)
+            self.index = snapshot["index"]
         schemas = (SIDECAR_SCHEMA, RAW_SIDECAR_SCHEMA) if allow_raw else (SIDECAR_SCHEMA,)
         if self.index["schema"] not in schemas or self.index["split"] != split:
             raise ValueError("sidecar schema/split不匹配，禁止跨split训练")
@@ -111,7 +122,34 @@ class SidecarStore:
         if expected_assets is not None and self.index["assets"] != expected_assets:
             raise ValueError("sidecar的SM/WM、stats、FK或物理合同不匹配")
         self.cache, self.verified = OrderedDict(), set()
-        self.identity = digest(self.directory / "index.json")
+        self.shard_signatures = {}
+        self.identity = snapshot["identity"] if snapshot is not None else digest(self.directory / "index.json")
+
+    @staticmethod
+    def _append_only(old, new):
+        for key in ("schema", "split", "assets", "sample_contract"):
+            if old.get(key) != new.get(key):
+                raise ValueError("sidecar热扩展改变了资产或数据合同")
+        for group in ("sources", "shards"):
+            if any(new[group].get(key) != value for key, value in old[group].items()):
+                raise ValueError("sidecar只能增量添加，不能覆盖已有来源或分片")
+
+    def snapshot(self):
+        if self.children is not None:
+            return [child.snapshot() for child in self.children]
+        return {"directory": str(self.directory), "index": self.index, "identity": self.identity}
+
+    def refresh(self):
+        """原子发布index.json后自动发现增量；已有来源和分片必须保持原身份。"""
+        fresh = SidecarStore(self.paths, **self.options)
+        old_children = self.children if self.children is not None else [self]
+        new_children = fresh.children if fresh.children is not None else [fresh]
+        for old, new in zip(old_children, new_children):
+            self._append_only(old.index, new.index)
+        if fresh.identity == self.identity:
+            return False
+        self.__dict__.update(fresh.__dict__)
+        return True
 
     def episode(self, meta):
         key = source_key(meta)
@@ -124,8 +162,12 @@ class SidecarStore:
         entry = self.index["sources"][key]
         shard = entry["shard"]
         if shard not in self.cache:
-            if digest(self.directory / shard) != self.index["shards"][shard]:
-                raise ValueError("sidecar分片内容身份已改变")
+            stat = (self.directory / shard).stat()
+            signature = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            if self.shard_signatures.get(shard) != signature:
+                if digest(self.directory / shard) != self.index["shards"][shard]:
+                    raise ValueError("sidecar分片内容身份已改变")
+                self.shard_signatures[shard] = signature
             self.cache[shard] = torch.load(self.directory / shard, weights_only=False, map_location="cpu", mmap=True)
             if len(self.cache) > 2:
                 self.cache.popitem(last=False)

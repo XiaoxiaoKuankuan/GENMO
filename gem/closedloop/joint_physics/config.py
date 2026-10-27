@@ -44,6 +44,13 @@ def read_config(path, overrides=()):
         raise ValueError("首版Action Rate权重必须为0")
     if not cfg["execution_loss"].get("hard_safety", True):
         raise ValueError("正式CLI不得关闭硬机械限位与SM终止检查")
+    physics = cfg["physics"]
+    if physics.get("historical_support_mode", "strict") not in ("strict", "diagnostic"):
+        raise ValueError("历史支持域模式必须是strict或diagnostic")
+    policy = physics.get("training_safety")
+    if policy is not None and (not 8 <= policy["min_effective_horizon"] <= physics["horizon"]
+                               or physics.get("historical_support_mode") != "diagnostic"):
+        raise ValueError("有效前缀仅用于显式正式训练，至少8步且不超过目标H")
     if cfg["training"]["precision"] != "fp32":
         raise ValueError("本版先完成FP32导数验收，尚未开放混合精度")
     return cfg

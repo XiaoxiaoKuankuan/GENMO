@@ -79,7 +79,7 @@ def static_request(episode, index, horizon):
 
 
 class PhysicsRequestStream:
-    def __init__(self, catalog, store, joint_names, horizon, seed, rank=0, certification=None):
+    def __init__(self, catalog, store, joint_names, horizon, seed, rank=0, certification=None, *, historical_mode="strict", noise_levels=None):
         self.catalog, self.store, self.horizon = catalog, store, horizon
         self.source_rng = np.random.default_rng(seed+3000+rank)
         self.time_rng = np.random.default_rng(seed+4000+rank)
@@ -104,10 +104,15 @@ class PhysicsRequestStream:
                                    episode["contacts"][start:start+horizon])
                 item.update(tags=tags, source=key, dataset=dataset.dataset_name, music_identity=episode["music_sha256"])
                 categories.update(tags)
-                if certification is not None and not certification.certified(tags):
+                item["historically_certified"] = certification.certified(tags) if certification is not None else False
+                item["timesteps"] = list(noise_levels or [50, 100, 250])
+                if not torch.isfinite(episode["state"][start:start+horizon+1]).all():
+                    reasons["nonfinite_real_window"] += 1
+                    continue
+                if historical_mode == "strict" and certification is not None and not certification.certified(tags):
                     reasons["uncertified_motion_type"] += 1
                     continue
-                if certification is not None:
+                if historical_mode == "strict" and certification is not None:
                     profile = '|'.join(tags)
                     if profile not in initial_guards:
                         initial_guards[profile] = certification.for_tags(tags,device='cpu')
@@ -135,8 +140,14 @@ class PhysicsRequestStream:
             if accepted:
                 self.sources[key], self.requests[key] = (dataset,row), accepted
         self.keys = sorted(self.sources)
+        self.groups = {}
+        for key, options in self.requests.items():
+            grouped = defaultdict(list)
+            for request in options:
+                grouped["|".join(request["tags"])].append(request)
+            self.groups[key] = [grouped[name] for name in sorted(grouped)]
         self.identity = {"sidecar": store.identity, "horizon": horizon, "keys": self.keys,
-                         "static_selection":"time_prefix_halo_profile_real_window_state_action_v2",
+                         "static_selection":"time_prefix_halo_profile_real_window_state_action_v2", "historical_mode": historical_mode,
                          "classification": CLASSIFICATION, "catalog": catalog.identity}
 
     def next(self, count, device):
@@ -149,13 +160,9 @@ class PhysicsRequestStream:
                 self.cursor = 0
             key = self.keys[self.order[self.cursor]]
             self.cursor += 1
-            options = self.requests[key]
-            # 每源先均匀选运动类别，再选时间，避免高频重复近静止片段。
-            groups = defaultdict(list)
-            for request in options:
-                groups["|".join(request["tags"])].append(request)
-            group = sorted(groups)[int(self.time_rng.integers(len(groups)))]
-            request = groups[group][int(self.time_rng.integers(len(groups[group])))]
+            groups = self.groups[key]
+            group = groups[int(self.time_rng.integers(len(groups)))]
+            request = group[int(self.time_rng.integers(len(group)))]
             dataset,row = self.sources[key]
             sample = dataset.get_window(row, request["frame"])
             if source_key(sample["meta"]) != key or int(sample["prefix_frames"]) != request["prefix_frames"]:

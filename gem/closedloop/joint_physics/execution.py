@@ -2,7 +2,8 @@
 
 候选x0经原codec/参考缓存进入SM，每步从当前预测状态更新75维观测、历史和上一动作，
 再次求新动作。这里只detach固定真实起点和数据目标，不detach候选/动作/预测链。支持域
-门禁只读detach副本；失败整窗丢弃执行梯度而保留BC。短窗覆盖和预览步数独立报告。
+门禁只读detach副本；训练显式允许至少8步的合法前缀，真实Newton评价仍整窗严格检查。
+历史认证在正式训练中只作诊断，严重非法状态与终止仍截断。覆盖和实际有效步数独立报告。
 """
 
 from dataclasses import replace
@@ -106,8 +107,64 @@ class ValidatedSupport:
                  "upper": float(self.upper[j]+.02)} for i,j in outside]})
 
 
+class DiagnosticSupport:
+    """历史包络仅计数；严重非法状态由训练专用安全检查独立拒绝。"""
+    def __init__(self, support, tags):
+        from collections import Counter
+        self.counts = Counter()
+        if support.certified(tags):
+            self.guard = support.for_tags(tags)
+        else:
+            self.guard = support
+            self.counts["uncertified_motion_combination"] += 1
+        self.tags = sorted(t for t in tags if t not in ('double_support','single_support','landing','airborne'))
+
+    def _check(self, name, *args):
+        try:
+            getattr(self.guard, name)(*args)
+        except PhysicsRejected as error:
+            self.counts[error.reason] += 1
+
+    def check_state(self, state):
+        self._check("check_state", state)
+
+    def check_action(self, action):
+        self._check("check_action", action)
+
+    def check_motion(self, states, joint_names):
+        from .requests import motion_tags
+        if motion_tags(states, joint_names) != self.tags:
+            self.counts["predicted_motion_type_differs"] += 1
+
+
+def check_training_state(state, kin, policy):
+    """预声明的严重物理非法界限，独立于历史认证样本的最大最小值。"""
+    from supermimic.mdp import unflatten_state
+    if not torch.isfinite(state).all():
+        raise PhysicsRejected("nonfinite_predicted_state")
+    if bool(((state.detach()[...,3:7].norm(dim=-1)-1).abs() > .05).any()):
+        raise PhysicsRejected("invalid_predicted_rotation")
+    p, r, v, w, q, qd = unflatten_state(state.detach())
+    orthogonal = r.transpose(-1,-2) @ r - torch.eye(3, device=r.device)
+    if bool((orthogonal.abs().amax(dim=(-1,-2)) > .05).any()) or bool((torch.linalg.det(r) <= 0).any()):
+        raise PhysicsRejected("invalid_predicted_rotation")
+    margin = policy["joint_margin_rad"]
+    checks = {
+        "root_height": ((p[...,2] < policy["root_height_min"]) | (p[...,2] > policy["root_height_max"])).any(),
+        "joint_position": ((q < kin.q_lo-margin) | (q > kin.q_hi+margin)).any(),
+        "linear_velocity": (v.abs() > policy["linear_velocity_max"]).any(),
+        "angular_velocity": (w.abs() > policy["angular_velocity_max"]).any(),
+        "joint_velocity": (qd.abs() > policy["joint_velocity_max"]).any(),
+    }
+    failed = [name for name, invalid in checks.items() if bool(invalid)]
+    if failed:
+        raise PhysicsRejected("severely_illegal_physical_state", {"invalid_components": failed})
+
+
 def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support=None, transition=None,
-                   prediction_origin="student_denoised_x0"):
+                   prediction_origin="student_denoised_x0", training_policy=None):
+    if training_policy is not None and transition is not None:
+        raise ValueError("有效前缀训练策略禁止用于真实Newton评价")
     window.validate()
     try:
         reference = candidate_reference(window, predicted_x0, logits, actor.stage1.endecoder.codec,
@@ -125,12 +182,17 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
                                             "prediction_origin": prediction_origin, "action_origin": "not_executed",
                                             "failure_phase": "reference_hard_limits",
                                             "maximum_violation_rad": float(torch.maximum(kin.q_lo-q.detach(), q.detach()-kin.q_hi).max())})
-    if enforce:
+    if training_policy is not None and hasattr(support, "counts"):
+        q = reference.world_qpos[...,7:][...,adapter.to_sm].detach()
+        support.counts["reference_hard_joint_limit"] += int(bool(((q < adapter.runtime.kin.q_lo) | (q > adapter.runtime.kin.q_hi)).any()))
+    if enforce and training_policy is None:
         hard_joint(reference.world_qpos[...,7:][...,adapter.to_sm], "reference_hard_joint_limit")
     first = reference.first_influence(window.request.tick, window.ticket.first_mutable_source_tick)
     if first != window.start.tick:
         raise PhysicsRejected("first_influence_mismatch")
     z = replace(window.start.detached(), reference=reference)
+    if training_policy is not None:
+        check_training_state(z.state, adapter.runtime.kin, training_policy)
     if support is not None:
         try:
             support.check_state(z.state)
@@ -138,17 +200,16 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             error.details.update(first_reject_tick=z.tick, failure_phase="real_initial_state", action_origin="not_executed")
             raise PhysicsRejected("real_start_out_of_domain",error.details) from error
     losses, safety, terms, states, actions, support_ticks, center = [], [], [], [], [], set(), 0
-    failure_steps = []
+    failure_steps, truncated = [], None
     for step in range(window.horizon):
         rejection_tick, phase = z.tick, "reference_and_action"
         action_computed = False
         try:
             dependency = reference.dependency_support(z.tick)
             mutable = dependency[dependency >= window.ticket.first_mutable_source_tick]
-            support_ticks.update(int(x) for x in mutable)
             source = reference.ticks.new_tensor([z.tick])
             lo, hi, fraction = reference._indices(source)
-            center += int(bool((reference.ticks[lo] >= window.ticket.first_mutable_source_tick).any() or
+            consumes_center = int(bool((reference.ticks[lo] >= window.ticket.first_mutable_source_tick).any() or
                           ((reference.ticks[hi] >= window.ticket.first_mutable_source_tick) & (fraction != 0)).any()))
             z = adapter.refresh_current_observation(z)
             _, _, goal = z.reference.read_current_future(z.tick)
@@ -162,25 +223,36 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             next_state = adapter.bundle.step_model(z.state, action, z.xi) if transition is None else transition(action)
             if not torch.isfinite(next_state).all():
                 raise PhysicsRejected("nonfinite_predicted_state")
-            if enforce:
+            if training_policy is not None:
+                check_training_state(next_state, adapter.runtime.kin, training_policy)
+            if enforce and training_policy is None:
                 from supermimic.mdp import unflatten_state
                 hard_joint(unflatten_state(next_state)[4], "executed_hard_joint_limit")
             if support is not None:
                 support.check_state(next_state)
-            z = adapter.advance(z, next_state, action, origin="imagined" if transition is None else "real")
-            target, _, _ = window.target.read_current_future(z.tick, 0)
+            next_z = adapter.advance(z, next_state, action, origin="imagined" if transition is None else "real")
+            target, _, _ = window.target.read_current_future(next_z.tick, 0)
             target = target._make(t.detach() for t in target)
-            loss, limit, components = execution_terms(z.state, target, adapter.runtime.kin, cfg)
+            loss, limit, components = execution_terms(next_z.state, target, adapter.runtime.kin, cfg)
             # 只记录原SM失败判据，不以失败后reset拼接、不改变训练损失或覆盖门禁。
             with torch.no_grad():
-                if bool(adapter.runtime.termination(z.state.detach(), target).any()):
+                if bool(adapter.runtime.termination(next_z.state.detach(), target).any()):
                     failure_steps.append(step + 1)
                     if enforce:
                         raise PhysicsRejected("sm_physical_termination")
+            if not torch.isfinite(loss).all() or not torch.isfinite(limit).all():
+                raise PhysicsRejected("nonfinite_execution")
         except PhysicsRejected as error:
             error.details.update(first_reject_tick=rejection_tick, control_step=step, failure_phase=phase,
                                  prediction_origin=prediction_origin,
                                  action_origin="frozen_sm_from_"+prediction_origin if action_computed else 'not_executed')
+            recoverable = {"nonfinite_sm_action", "nonfinite_predicted_state", "invalid_predicted_rotation",
+                           "severely_illegal_physical_state", "sm_physical_termination", "nonfinite_execution"}
+            error.details["effective_horizon"] = len(losses)
+            if (training_policy is not None and error.reason in recoverable and
+                    len(losses) >= training_policy["min_effective_horizon"]):
+                truncated = {"reason": error.reason, **error.details}
+                break
             raise
         except ReferenceExhausted as error:
             raise PhysicsRejected("incomplete_reference_window", {'first_reject_tick':rejection_tick,
@@ -188,6 +260,9 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
                 'action_origin':'frozen_sm_from_'+prediction_origin if action_computed else 'not_executed'}) from error
         if not torch.isfinite(loss).all() or not torch.isfinite(limit).all():
             raise PhysicsRejected("nonfinite_execution")
+        z = next_z
+        support_ticks.update(int(x) for x in mutable)
+        center += consumes_center
         losses.append(loss)
         safety.append(limit)
         terms.append(components)
@@ -206,8 +281,9 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
         "safety": normalized_window(safety, cfg["discount"]).mean(),
         "terms": {k: normalized_window([t[k] for t in terms], cfg["discount"]).mean() for k in terms[0]},
         "states": torch.stack(states), "actions": torch.stack(actions),
-        "failure_steps": failure_steps,
-        "coverage": {"horizon": window.horizon, "preview_only_steps": window.horizon-center,
+        "failure_steps": failure_steps, "effective_horizon": len(losses), "truncation": truncated,
+        "historical_diagnostics": dict(getattr(support, "counts", {})),
+        "coverage": {"horizon": window.horizon, "effective_horizon": len(losses), "preview_only_steps": len(losses)-center,
             "center_consumption_steps": center, "supported_source_ticks": sorted(support_ticks),
             "supported_source_points": len(support_ticks), "mutable_source_points": 60-window.ticket.prefix_frames,
             "coverage_ratio": len(support_ticks)/(60-window.ticket.prefix_frames),

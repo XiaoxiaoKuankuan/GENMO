@@ -10,6 +10,8 @@ shift
 joint_python="${JOINT_PYTHON:-python}"
 joint_gpus="${JOINT_GPUS:-1}"
 export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 if (( joint_gpus > 1 )); then
   export NCCL_CUMEM_HOST_ENABLE=0
   export NCCL_IB_DISABLE=1

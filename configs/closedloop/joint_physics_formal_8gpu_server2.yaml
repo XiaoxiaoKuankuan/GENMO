@@ -1,0 +1,44 @@
+# Server-2正式八卡训练：随机初始化1024维16层GENMO，同步10000次全局AdamW更新。
+# 全库4287源监督与真实sidecar物理抽样独立；H32允许至少8步的合法前缀BPTT。
+# 历史WM认证范围只作诊断，真实Newton评价仍保留硬限位与终止。训练不启动Newton。
+# 缓存目录可原子追加index.json和不可变分片，每500步发现新增源；断点保存所用索引快照。
+base_config: joint_physics_repair_server2.yaml
+initialization: {mode: random, pretrained_genmo: null, resume_checkpoint: null}
+data:
+  source_ids: null
+  sidecar_refresh_every: 500
+physics:
+  horizon: 32
+  subbatch: 1
+  start_step: 1000
+  warmup_steps: 2000
+  lambda_exec: 0.01
+  lambda_safety: 0.0
+  every_steps: 4
+  readiness_hard_gate: false
+  historical_support_mode: diagnostic
+  noise_levels: [50, 100, 250]
+  training_safety:
+    min_effective_horizon: 8
+    joint_margin_rad: 0.5
+    root_height_min: 0.05
+    root_height_max: 3.0
+    linear_velocity_max: 20.0
+    angular_velocity_max: 30.0
+    joint_velocity_max: 60.0
+future_supervision: {enabled: true, every_steps: 4, batch_size: 1, weight: 0.1}
+training:
+  seed: 42
+  batch_size: 32
+  learning_rate: 0.00001
+  lr_warmup_steps: 1000
+  weight_decay: 0.01
+  grad_clip: 1.0
+  precision: fp32
+  max_steps: 10000
+  checkpoint_every: 500
+  log_every: 100
+  diagnostics_every: 10000
+  numerical_diagnostics_every: 10000
+  diagnostic_steps: []
+runtime: {cpu_threads: 4}

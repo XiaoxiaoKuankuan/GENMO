@@ -25,6 +25,11 @@ def physics_selection(output, diffusion, cfg):
 
 def physics_noise_levels(diffusion, cfg, report=None):
     """由实际1000步日程计算SNR，物理噪声只取当前认证实际覆盖的等级。"""
+    if cfg.get("historical_support_mode", "strict") == "diagnostic":
+        levels = torch.tensor(cfg.get("noise_levels", [50, 100, 250]), dtype=torch.long)
+        if not len(levels) or bool(((levels < 0) | (levels >= 1000)).any()):
+            raise ValueError("物理噪声必须位于原1000步日程")
+        return levels.unique(sorted=True)
     alpha = torch.as_tensor(diffusion.alphas_cumprod)
     snr = alpha/(1-alpha)
     indices = ((snr >= cfg["snr_min"]) & (snr <= cfg["snr_max"])).nonzero().flatten()
@@ -51,6 +56,8 @@ class Readiness:
         music = {r["music"] for r in valid}
         types = {t for r in valid for t in r["types"]}
         rate = len(valid)/max(1,len(self.rows))
+        if not self.cfg.get("readiness_hard_gate", True) and step >= self.cfg["start_step"]:
+            self.activated_step = self.cfg["start_step"]
         if (self.activated_step is None and step >= self.cfg["start_step"] and
             len(self.rows) >= self.cfg["readiness_min_samples"] and rate >= self.cfg["readiness_min_rate"] and
             len(sources) >= self.cfg["readiness_min_sources"] and len(music) >= self.cfg["readiness_min_sources"] and
@@ -60,6 +67,8 @@ class Readiness:
                 "valid_rate": rate, "sources": sorted(sources), "music_identities": sorted(music), "types": sorted(types)}
 
     def weight(self, step):
+        if not self.cfg.get("readiness_hard_gate", True):
+            return physics_weights(step, self.cfg)[0]
         if self.activated_step is None or not self.cfg["enabled"]:
             return 0.
         return self.cfg["lambda_exec"]*min(1., (step-self.activated_step+1)/max(1,self.cfg["warmup_steps"]))

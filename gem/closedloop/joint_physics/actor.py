@@ -79,15 +79,17 @@ class JointPhysicsActor(nn.Module):
                 "noise": noise, "music_dropout_mask": drop_music_mask,
                 "known_mask": adapted["known_mask"], "unknown_mask": valid & ~adapted["known_mask"]}
 
-    def forward(self, batch, forecast_context=None, physics_inputs=None, **kwargs):
+    def forward(self, batch, forecast_context=None, physics_inputs=None, future_inputs=None, **kwargs):
         data = self.denoise_supervised(batch, forecast_context, **kwargs)
-        if physics_inputs is None:
-            return data
-        # 同一次DDP forward内两次真正去噪。物理前向关闭网络dropout但保留输入及参数导数，
-        # 不消耗监督的全局dropout RNG，A/B监督噪声/样本/训练随机数保持可比。
-        with sampling_mode(self):
-            physics = self.denoise_supervised(**physics_inputs)
-        return data, physics
+        future = self.denoise_supervised(**future_inputs) if future_inputs is not None else None
+        physics = None
+        if physics_inputs is not None:
+            # 冻结网络随机dropout，但保持学生参数和输入的物理导数。
+            with sampling_mode(self):
+                physics = self.denoise_supervised(**physics_inputs)
+        if future_inputs is not None:
+            return data, physics, future
+        return (data, physics) if physics_inputs is not None else data
 
     def sample_differentiable(self, conditions, context, noise):
         from gem.closedloop.mb_control.sampler import sample_differentiable
