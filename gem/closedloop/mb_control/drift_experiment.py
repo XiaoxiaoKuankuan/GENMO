@@ -48,8 +48,8 @@ def run_experiment(collector,actor,critic,engine,original,cfg,tasks,output,devic
     task_cursor=0;collector.state=None;failed_episodes=[];evaluation_rows=[]
     if settings.get('resume_checkpoint'):
         restored=load_checkpoint(settings['resume_checkpoint'],trainer,replay,behavior_config=behavior,device=device)
-        supervision.load_state_dict(restored['runtime_state']['supervision'])
-        task_cursor=restored['runtime_state']['task_cursor']
+        supervision.load_state_dict(restored['supervision'])
+        task_cursor=restored['task_cursor']
         write_json(output/'resume_lineage.json',{'source':settings['resume_checkpoint'],
             'accepted_updates':trainer.accepted_actor_updates,'actor_adamw_rng_supervision_restored':True,
             'physical_solver_restored':False,'collector_episodes_restarted':True,
