@@ -196,13 +196,16 @@ def guarded_teacher_update(trainer,samples,supervised_batch,physical_intervals,p
         raise ValueError("新在线音乐合同只允许独立完整MC拟合Critic；旧区间TD没有固定anchor目标上下文，不能复用")
     actor.eval();trainer.critic.eval();trainer.actor_optimizer.zero_grad(set_to_none=True)
     named=[(n,p) for n,p in actor.named_parameters() if p.requires_grad];names=[n for n,_ in named];params=[p for _,p in named]
-    keys=("dance","track","local","global","bc","action_rate","joint_limit","terminal_value")
-    weights={"dance":1.,"track":engine.rewards.config.get("track_weight",.1),
+    keys=("dance","episode","track","local","global","bc","action_rate","joint_limit","terminal_value")
+    weights={"dance":1.,"episode":engine.rewards.config.get("episode_dance_weight",0.),"track":engine.rewards.config.get("track_weight",.1),
         "local":config.get("local_prior_weight",2.),"global":config.get("global_prior_weight",.2),
         "bc":config["bc_weight"],"action_rate":engine.rewards.config.get("action_rate_weight",0.),
         "joint_limit":engine.rewards.config.get("joint_limit_weight",2.),"terminal_value":0.}
     gradients={k:[None]*len(params) for k in keys};losses_before={k:0. for k in keys}
     fixed=[];rows=[];rejected=[];execution_norms=[];diagnostics={}
+
+    from .episode_objective import execution_mass
+    mass=execution_mass(engine,config)
 
     def losses(sample,interval,plan,local):
         terms=interval.event["objective_terms"]
@@ -211,9 +214,9 @@ def guarded_teacher_update(trainer,samples,supervised_batch,physical_intervals,p
             global_support_ticks=consumed_music_support(sample,engine.horizon_steps),
             global_control_ticks=consumed_music_ticks(sample,engine.horizon_steps),
             global_reference_records=sample.transitions[:engine.horizon_steps],global_reference_version=sample.generation.reference_version)
-        return {"dance":terms["dance_loss"].mean(),"track":terms["current_reference_loss"].mean(),
-            "local":lp,"global":gp,"action_rate":terms["action_rate_cost"].mean(),
-            "joint_limit":terms["joint_limit_cost"].mean(),"terminal_value":lp.new_zeros(())}
+        return {"dance":terms["dance_loss"].mean()/mass,"episode":terms["episode_dance_loss"].mean()/mass,"track":terms["current_reference_loss"].mean()/mass,
+            "local":lp,"global":gp,"action_rate":terms["action_rate_cost"].mean()/mass,
+            "joint_limit":terms["joint_limit_cost"].mean()/mass,"terminal_value":lp.new_zeros(())}
 
     for sample in samples:
         description=describe_sample(sample,engine.adapter)
@@ -244,7 +247,7 @@ def guarded_teacher_update(trainer,samples,supervised_batch,physical_intervals,p
             alignment=AnchorAlignment.at_reference_anchor(recorded_anchor,fixed_ref.read_current_future(sample.state.tick,future_steps=0)[0])
             absolute_target=fixed_ref.source_at(clock.clamp(fixed_ref.lower,fixed_ref.upper))
             target=alignment.poses(absolute_target)
-            fixed.append((sample,local,plan.world_qpos.detach(),target,mask,float(terms["dance"].detach()),absolute_target))
+            fixed.append((sample,local,plan.world_qpos.detach(),target,mask,float((terms["dance"]+weights["episode"]*terms["episode"]).detach()),absolute_target))
             execution_norms.append(float(probe.detach().norm()))
             rows.append(dict(description,accepted=False,stage="D_drawn",gradient_valid=True,rejection=None))
             del interval,plan,noise,terms,probe
@@ -275,13 +278,23 @@ def guarded_teacher_update(trainer,samples,supervised_batch,physical_intervals,p
         for k in keys} for m,indices in modules.items()}
     projected={k:[None if g is None else g*weights[k] for g in gradients[k]] for k in keys}
     projection_log=[]
-    if config.get("auxiliary_gradient_projection",False) and norms["dance"]:
+    primary=[sum([projected[k][i] for k in ("dance","episode") if projected[k][i] is not None])
+             if any(projected[k][i] is not None for k in ("dance","episode")) else None for i in range(len(params))]
+    primary_norm=_norm(primary)
+    budget_log={}
+    for k,ratio in config.get("soft_auxiliary_gradient_budget",{}).items():
+        if k not in ("track","local","global","bc","action_rate"):raise ValueError("硬限位和主任务不能截断为软辅助预算")
+        before_norm=_norm(projected[k]);factor=min(1.,float(ratio)*primary_norm/max(before_norm,1e-20))
+        projected[k]=[g*factor if g is not None else None for g in projected[k]]
+        budget_log[k]={"before":before_norm,"after":before_norm*factor,"factor":factor}
+
+    if config.get("auxiliary_gradient_projection",False) and primary_norm:
         for k in ("track","local","global","bc","action_rate"):
-            dot=sum(float((a*b).sum()) for a,b in zip(projected[k],gradients["dance"]) if a is not None and b is not None)
+            dot=sum(float((a*b).sum()) for a,b in zip(projected[k],primary) if a is not None and b is not None)
             if dot<0:
-                coefficient=dot/norms["dance"]**2
+                coefficient=dot/primary_norm**2
                 projected[k]=[(a if a is not None else torch.zeros_like(b))-coefficient*b if b is not None else a
-                              for a,b in zip(projected[k],gradients["dance"])]
+                              for a,b in zip(projected[k],primary)]
                 projection_log.append({"term":k,"removed_coefficient":coefficient})
     for i,p in enumerate(params):
         values=[projected[k][i] for k in keys if projected[k][i] is not None]
@@ -303,7 +316,7 @@ def guarded_teacher_update(trainer,samples,supervised_batch,physical_intervals,p
                 for k,v in values.items():after[k]+=float(v)/valid
                 rs,metrics=check_outputs(before,plan.world_qpos,local.world_qpos,target,mask,
                     prefix=plan.ticket.prefix_frames,config=trust,unaligned_global_target=absolute_target)
-                if float(values["dance"])>anchor_dance+trust["dance_worsening_atol"]+trust["dance_worsening_rtol"]*abs(anchor_dance):
+                if float(values["dance"]+weights["episode"]*values["episode"])>anchor_dance+trust["dance_worsening_atol"]+trust["dance_worsening_rtol"]*abs(anchor_dance):
                     reasons.append("candidate_dance_loss_worse")
                 reasons.extend(rs);outputs.append(metrics)
                 for k,v in interval.event["objective_terms"].items():
@@ -318,7 +331,7 @@ def guarded_teacher_update(trainer,samples,supervised_batch,physical_intervals,p
         bc,_=trainer.stage1_losses(supervised_batch,prediction["pred_x_start"],prediction["static_conf_logits"],
             global_step=config.get("stage1_supervision_step",595000));after["bc"]=float(bc)
         if any(not math.isfinite(v) for v in after.values()):reasons.append("nonfinite_candidate")
-        if after["dance"]>losses_before["dance"]+trust["dance_worsening_atol"]+trust["dance_worsening_rtol"]*abs(losses_before["dance"]):
+        if after["dance"]+weights["episode"]*after["episode"]>losses_before["dance"]+weights["episode"]*losses_before["episode"]+trust["dance_worsening_atol"]+trust["dance_worsening_rtol"]*abs(losses_before["dance"]+weights["episode"]*losses_before["episode"]):
             reasons.append("candidate_dance_loss_worse")
         return sorted(set(reasons)),{"outputs":outputs,"losses_before":losses_before,"losses_after":after,
             "loss_delta":{k:after[k]-losses_before[k] for k in keys},"joint_limit_diagnostics_after":joint_diagnostics}
@@ -357,8 +370,8 @@ def guarded_teacher_update(trainer,samples,supervised_batch,physical_intervals,p
         "future_encoder_gradient_norms":{k:module_metrics["future_encoder"][k]["weighted_norm"] for k in keys},
         "future_encoder_stage1_bc_gradient":module_metrics["future_encoder"]["bc"]["raw_norm"],
         "parameter_module_counts":{m:len(indices) for m,indices in modules.items()},
-        "auxiliary_projection":projection_log,"output_trust_region":verdict,
-        "original_music_execution_loss":losses_before["dance"],"current_reference_tracking_loss":losses_before["track"],
+        "auxiliary_projection":projection_log,"soft_auxiliary_gradient_budget":budget_log,"execution_discount_mass":mass,"output_trust_region":verdict,
+        "original_music_execution_loss":losses_before["dance"],"episode_music_execution_loss":losses_before["episode"],"current_reference_tracking_loss":losses_before["track"],
         "local_preservation_loss":losses_before["local"],"global_preservation_loss":losses_before["global"],
         "original_stage1_loss":losses_before["bc"],"execution_state_noise_gradient_norms":execution_norms,
         "valid_execution_rollouts":valid,"actor_grad_norm":grad_norm,

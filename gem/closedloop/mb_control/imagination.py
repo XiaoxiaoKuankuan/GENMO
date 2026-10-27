@@ -182,6 +182,8 @@ class PhysicalAnchorImagination:
         consumed_steps = 0
         objective_terms = {}
         alignment = None
+        from .episode_objective import episode_alignment
+        episode = episode_alignment(z,required=bool(self.rewards.config.get("episode_dance_weight",0.)))
         if not support_check_only and self.rewards.config.get("dance_alignment")=="anchor_se2":
             from .dance_losses import AnchorAlignment
             if z.teacher_reference is None:raise ValueError("anchor对齐缺少冻结音乐目标")
@@ -232,10 +234,10 @@ class PhysicalAnchorImagination:
                 target = (z.teacher_reference.read_current_future(z.tick+12, future_steps=0)[0]
                           if z.teacher_reference is not None else None)
                 reward, metrics = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target,
-                                              teacher_alignment=alignment)
+                                              teacher_alignment=alignment,episode_alignment=episode)
             if not support_check_only and self.rewards.mode == "teacher_music":
                 # 短时 Actor 的固定H目标不靠缩短软存活时域逃避负损失；真实终止仍独立记录。
-                for name in ("dance_loss", "dance_loss_unaligned", "current_reference_loss", "physical_cost",
+                for name in ("dance_loss", "episode_dance_loss", "dance_loss_unaligned", "current_reference_loss", "physical_cost",
                              "action_rate_cost", "joint_limit_cost", "action_rate_mean", "hard_joint_limit_cost"):
                     objective_terms[name] = objective_terms.get(name, 0.) + self.gamma**index*.02*metrics[name]
                 for name,value in metrics.items():

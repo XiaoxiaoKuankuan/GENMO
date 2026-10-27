@@ -39,7 +39,7 @@ class TrackingRewards:
         if config.get("music_surrogate_enabled", False):
             raise ValueError("音乐代理未验证，首版仅原Stage1监督与独立音乐评价")
 
-    def __call__(self, state, action, previous_action, reference, *, teacher_reference=None, teacher_alignment=None):
+    def __call__(self, state, action, previous_action, reference, *, teacher_reference=None, teacher_alignment=None, episode_alignment=None):
         sm_reward, sm_terms = self.runtime.reward(state, action, previous_action, reference)
         p, R, v, w, q, qd = unflatten_state(state)
         kin, ref = self.runtime.kin, reference
@@ -94,10 +94,13 @@ class TrackingRewards:
             unaligned = dance
             if teacher_alignment is not None:
                 dance, dance_groups = execution_loss(state,teacher_alignment.reference(teacher_reference),kin,self.config.get("dance_scales"))
+            episode_dance=unaligned
+            if self.config.get("episode_dance_weight",0.) and episode_alignment is not None:
+                episode_dance,_=execution_loss(state,episode_alignment.reference(teacher_reference),kin,self.config.get("dance_scales"))
             track, track_groups = execution_loss(state, reference, kin, self.config.get("dance_scales"))
             physical = self.config.get("action_rate_weight", .1)*rate + self.config.get("joint_limit_weight", 2.)*limits
-            music_reward = -(dance + self.config.get("track_weight", .1)*track + physical)*.02
-            metrics.update(dance_loss=dance, current_reference_loss=track, physical_cost=physical,
+            music_reward = -(dance + self.config.get("episode_dance_weight",0.)*episode_dance + self.config.get("track_weight", .1)*track + physical)*.02
+            metrics.update(dance_loss=dance, episode_dance_loss=episode_dance, current_reference_loss=track, physical_cost=physical,
                 dance_loss_unaligned=unaligned, absolute_teacher_root_position_error=(p-teacher_reference.root_p).norm(dim=-1),
                 weighted_action_rate_cost=self.config.get("action_rate_weight",.1)*rate,
                 weighted_joint_limit_cost=self.config.get("joint_limit_weight",2.)*limits,

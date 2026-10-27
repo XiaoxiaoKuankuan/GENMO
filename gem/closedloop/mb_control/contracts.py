@@ -54,6 +54,8 @@ class ClosedLoopState:
     motion_class: str = "unlabelled"
     teacher_alignment_rotation: Any = None
     teacher_alignment_translation: Any = None
+    episode_teacher_rotation: Any = None
+    episode_teacher_translation: Any = None
 
     def validate(self, *, decision=False):
         b = len(self.state)
@@ -80,7 +82,7 @@ class ClosedLoopState:
     def detached(self):
         names = ("state", "xi", "previous_action", "sm_history", "genmo_history", "genmo_valid")
         return replace(self, **{k: getattr(self, k).detach().clone() for k in names},
-                       **{k:getattr(self,k).detach().clone() for k in ("teacher_alignment_rotation","teacher_alignment_translation") if getattr(self,k) is not None},
+                       **{k:getattr(self,k).detach().clone() for k in ("teacher_alignment_rotation","teacher_alignment_translation","episode_teacher_rotation","episode_teacher_translation") if getattr(self,k) is not None},
                        music=self.music.detach(), reference=self.reference.detached(),
                        pending_request=self.pending_request.detached() if self.pending_request is not None else None)
 

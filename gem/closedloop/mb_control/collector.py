@@ -133,6 +133,11 @@ class PhysicalCollector:
         task = getattr(self.adapter, "current_task", {})
         self.state = replace(self.state, teacher_reference=teacher_reference, task_id=str(task.get("id", "")),
             task_source=task.get("source", "unknown"), motion_class=task.get("motion_class", "unlabelled"))
+        if teacher_reference is not None and self.rewards.config.get("episode_dance_weight",0.):
+            from .episode_objective import with_episode_alignment
+            from .dance_losses import AnchorAlignment
+            alignment=AnchorAlignment.at_anchor(observed["state"],teacher_reference.read_current_future(0,0)[0])
+            self.state=with_episode_alignment(self.state,alignment)
         self.terminal = False
         self.events, self.trajectory, self.metrics = [], [], []
         self.cancelled_requests = []
@@ -237,7 +242,9 @@ class PhysicalCollector:
                         state1 = self.env.step_physics(action)
                     target = (z.teacher_reference.read_current_future(z.tick+12, future_steps=0)[0]
                               if z.teacher_reference is not None else None)
-                    reward, metrics = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target)
+                    from .episode_objective import episode_alignment
+                    reward, metrics = self.rewards(state1, action, z.previous_action, ref1, teacher_reference=target,
+                        episode_alignment=episode_alignment(z,required=bool(self.rewards.config.get("episode_dance_weight",0.))))
                     failed = bool(self.adapter.runtime.termination(state1, ref1).any())
                     totals.add(reward, torch.zeros_like(reward) if failed else torch.ones_like(reward))
                     z = self.adapter.advance(z, state1, action, origin="real")
