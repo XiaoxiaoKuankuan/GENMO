@@ -47,7 +47,8 @@ def perturbation(prediction, name, window, actor):
         direction[:,p:] = tangent[:,p:]*phase[None,:,None]
     else:
         if name=='fastest_joint':
-            j = int((prediction[:,p+1:,9:]-prediction[:,p:-1,9:]).abs().mean((0,1)).argmax())
+            physical = actor.stage1.endecoder.denormalize(prediction.detach())
+            j = int((physical[:,p+1:,9:]-physical[:,p:-1,9:]).abs().mean((0,1)).argmax())
             indices = [9+j]
         else:
             indices = [9+i for i,n in enumerate(names) if
@@ -88,10 +89,11 @@ def audit(cfg, checkpoint, output, adapter, env, interface_probe=False):
         if not items:
             continue
         # 仅按真实离线类别与音乐时间选择，绝不读取学生预测或方向结果进行挑选。
-        selected, covered = [],set()
+        selected, covered, covered_profiles = [],set(),set()
         for item in sorted(items,key=lambda item:item['frame']):
-            if set(item['tags'])-covered:
-                selected.append(item);covered.update(item['tags'])
+            profile = '|'.join(item['tags'])
+            if profile not in covered_profiles:
+                selected.append(item);covered.update(item['tags']);covered_profiles.add(profile)
             if len(selected)>=cfg['audit']['anchors_per_source']:
                 break
         if len(selected)<cfg['audit']['anchors_per_source']:

@@ -59,3 +59,10 @@ def test_type_certification_and_action_boundary():
     assert len(error.value.details['components'])==21
     with pytest.raises(PhysicsRejected,match='nonfinite_sm_action'):
         guard.check_action(torch.full((1,21),float('nan')))
+    states = torch.zeros(33,55)
+    states[:,3] = 1.
+    guard.motion_tags = ['standing']
+    guard.check_motion(states,tuple(f'l_leg_{i}' for i in range(21)))
+    states[:,34:] = 3.
+    with pytest.raises(PhysicsRejected,match='predicted_motion_type_uncertified'):
+        guard.check_motion(states,tuple(f'l_leg_{i}' for i in range(21)))
