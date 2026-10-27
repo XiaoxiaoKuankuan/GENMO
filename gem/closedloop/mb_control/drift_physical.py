@@ -56,9 +56,11 @@ def candidate_objectives(trainer,sample,local):
         global_control_ticks=consumed_music_ticks(sample,engine.horizon_steps),
         global_reference_records=sample.transitions,global_reference_version=sample.generation.reference_version)
     t=interval.event['objective_terms']
-    values={'dance':t['dance_loss'].mean(),'track':t['current_reference_loss'].mean(),
-        'local':lp,'global':gp,'joint_limit':t['joint_limit_cost'].mean()}
-    if 'episode_dance_loss' in t:values['episode']=t['episode_dance_loss'].mean()
+    from .episode_objective import execution_mass
+    mass=execution_mass(engine,trainer.config)
+    values={'dance':t['dance_loss'].mean()/mass,'track':t['current_reference_loss'].mean()/mass,
+        'local':lp,'global':gp,'joint_limit':t['joint_limit_cost'].mean()/mass}
+    if engine.rewards.config.get('episode_dance_weight',0.):values['episode']=t['episode_dance_loss'].mean()/mass
     return values,interval,plan,noise
 
 
@@ -87,7 +89,7 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
     from .short_audit import phase_labels
     settings=cfg['diagnostic'];run=Path(settings['source_run']);version=settings['version']
     checkpoint=Path(settings['checkpoint']);ck=torch.load(checkpoint,map_location='cpu',weights_only=False,mmap=True)
-    actor.load_state_dict(ck['actor'],strict=True);actor.eval()
+    actor.load_state_dict(ck['actor'],strict=True);actor.eval();collector.actor_version=version
     trainer=Stage2Trainer(actor,critic,engine,build_stage1_losses(actor.stage1,original).to(device),cfg['training'])
     if 'genmo_optimizer' in ck:trainer.actor_optimizer.load_state_dict(ck['genmo_optimizer'])
     engine.support_guard=ModelSupport(json.loads((run/'state_support_contract.json').read_text()),device=device)
@@ -98,8 +100,18 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
     weights={'dance':1.,'track':cfg['rewards']['track_weight'],'local':cfg['training']['local_prior_weight'],
         'global':cfg['training']['global_prior_weight'],'bc':cfg['training']['bc_weight'],
         'joint_limit':cfg['rewards']['joint_limit_weight']}
+    if cfg['rewards'].get('episode_dance_weight',0.):weights['episode']=cfg['rewards']['episode_dance_weight']
     variants={'dance':['dance'],'dance_priors':['dance','local','global'],
         'dance_bc':['dance','bc'],'full':list(weights)}
+    if 'episode' in weights:
+        for k in variants:
+            if 'episode' not in variants[k]:variants[k].append('episode')
+    if settings.get('variants'):variants={k:v for k,v in variants.items() if k in settings['variants']}
+    from .episode_objective import execution_mass
+    mass=execution_mass(engine,cfg['training'])
+    def primary(interval):
+        t=interval.event['objective_terms']
+        return float((t['dance_loss']+cfg['rewards'].get('episode_dance_weight',0.)*t.get('episode_dance_loss',0.)).mean())/mass
     reports=[];failures=[]
     root=run/'evaluations/fixed_delay_replay'/('initial_genmo_baseline' if version==0 else f'actor_{version:06}')
     for task in tasks:
@@ -107,6 +119,7 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
         payload=torch.load(source,map_location='cpu',weights_only=False,mmap=True);memo={}
         controls=unpack_value(payload['controls'],engine.adapter,device,memo)
         generations=unpack_value(payload['generations'],engine.adapter,device,memo)
+        if cfg['rewards'].get('episode_dance_weight',0.):controls,generations=set_episode_context(controls,generations)
         _,initial=task_inputs(task,engine.adapter,device)
         samples=anchors_from_episode(controls,generations,engine.horizon_steps)
         seconds=settings.get('anchor_seconds',[2.0])
@@ -127,7 +140,7 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
                 gradients['bc']=[None if g is None else g.detach().clone() for g in torch.autograd.grad(bc,params,allow_unused=True)]
                 before_losses={k:float(v.detach()) for k,v in values.items()};before_losses['bc']=float(bc.detach())
                 before=replace(plan,world_qpos=plan.world_qpos.detach(),contact=plan.contact.detach())
-                model_before=float(interval.event['objective_terms']['dance_loss'].mean())
+                model_before=primary(interval)
                 module_metrics={m:{k:_norm([g for (n,_),g in zip(named,gs) if parameter_module(n)==m]) for k,gs in gradients.items()}
                     for m in ['stage1_backbone','history_prefix','future_encoder','diffusion_output']}
                 del values,interval,plan,noise,prediction,bc,execution_grad
@@ -137,18 +150,32 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
                     with torch.no_grad():
                         inter,_,_=engine.rollout_anchor(sample,plan_override=plan,transition_fn=collector.env.step_physics,
                             on_step=lambda z,_:(states.append(z.state.cpu()),contacts.append(collector.env.contact_events())))
-                    return float(inter.event['objective_terms']['dance_loss'].mean()),torch.cat(states),contacts,restore_error
+                    return primary(inter),torch.cat(states),contacts,restore_error
                 real_before,states_before,contacts_before,restore_error=physical(before)
                 real_repeat,_,_,_=physical(before);noise_floor=max(1e-8,2*abs(real_repeat-real_before))
                 rolling_before=rolling_two_requests(collector,controls,initial,sample)
                 for label,terms in variants.items():
-                    for scope in ['all','future_only']:
+                    for scope in settings.get('scopes',['all','future_only']):
                         actor.load_state_dict(base_actor);trainer.actor_optimizer.load_state_dict(copy.deepcopy(base_opt));restore_rng(rng)
                         trainer.actor_optimizer.zero_grad(set_to_none=True)
+                        composed={k:[None if g is None else weights[k]*g for g in gradients[k]] for k in terms}
+                        primary_grad=[sum([composed[k][i] for k in ('dance','episode') if k in composed and composed[k][i] is not None])
+                            if any(k in composed and composed[k][i] is not None for k in ('dance','episode')) else None for i in range(len(params))]
+                        primary_norm=_norm(primary_grad)
+                        for k,ratio in cfg['training'].get('soft_auxiliary_gradient_budget',{}).items():
+                            if k in composed:
+                                scale=min(1.,ratio*primary_norm/max(_norm(composed[k]),1e-20))
+                                composed[k]=[None if g is None else scale*g for g in composed[k]]
+                        if cfg['training'].get('auxiliary_gradient_projection',False) and primary_norm:
+                            for k in ('bc','local','global','track'):
+                                if k not in composed:continue
+                                dot=sum(float((g*p).sum()) for g,p in zip(composed[k],primary_grad) if g is not None and p is not None)
+                                if dot<0:composed[k]=[(g if g is not None else torch.zeros_like(p))-dot/primary_norm**2*p if p is not None else g for g,p in zip(composed[k],primary_grad)]
                         for i,(name,p) in enumerate(named):
                             if scope=='future_only' and not name.startswith('future_encoder.'):continue
-                            gs=[weights[k]*gradients[k][i] for k in terms if gradients[k][i] is not None]
+                            gs=[composed[k][i] for k in terms if composed[k][i] is not None]
                             p.grad=sum(gs[1:],gs[0].clone()) if gs else None
+                        del composed,primary_grad
                         norm=float(torch.nn.utils.clip_grad_norm_(params,1.,error_if_nonfinite=True));trainer.actor_optimizer.step()
                         delta=[p.detach()-base_actor[n] for n,p in named]
                         effects={m:{k:sum(float((g*d).sum()) for (n,_),g,d in zip(named,gs,delta) if g is not None and (m=='all' or parameter_module(n)==m)) for k,gs in gradients.items()}
@@ -156,7 +183,7 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
                         try:
                             with torch.no_grad():
                                 after_values,after_interval,after,_=candidate_objectives(trainer,sample,local)
-                                model_after=float(after_interval.event['objective_terms']['dance_loss'].mean())
+                                model_after=primary(after_interval)
                                 after_losses={k:float(v) for k,v in after_values.items()}
                                 restore_rng(bc_rng);prediction=actor.original_supervision(batch)
                                 bc,_=trainer.stage1_losses(batch,prediction['pred_x_start'],prediction['static_conf_logits'],global_step=595000);after_losses['bc']=float(bc)
@@ -172,7 +199,8 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
                             rolling_after=rolling_two_requests(collector,controls,initial,sample) if label=='full' and scope=='all' else None
                             row={'version':version,'task':task['id'],'anchor_tick':sample.state.tick,'request_tick':sample.generation.request.ticket.request_tick,
                                 'phases':phase_labels(sample,sample.transitions[0].event['contacts'],None,engine.adapter,16),
-                                'variant':label,'trainable':scope,'loss_before':before_losses,'loss_after':after_losses,
+                                'variant':label,'trainable':scope,'comparison_objective':'local_plus_episode' if 'episode' in weights else 'local_H16',
+                                'loss_before':before_losses,'loss_after':after_losses,
                                 'module_gradient_norms':module_metrics,'raw_gradient_dot_actual_parameter_delta':effects,
                                 'gradient_norm_before_clip':norm,'model_dance_before':model_before,'model_dance_after':model_after,
                                 'physical_dance_before':real_before,'physical_dance_after':real_after,'model_delta':md,'physical_delta':rd,
@@ -193,14 +221,14 @@ def run_candidates(collector,actor,critic,engine,original,cfg,tasks,output,devic
                             with (output/'candidates.jsonl').open('a') as f:f.write(json.dumps(row,ensure_ascii=False)+'\n')
                             print(json.dumps({k:row[k] for k in ['version','task','anchor_tick','variant','trainable','model_delta','physical_delta','same_descent_sign']},ensure_ascii=False),flush=True)
                         except (UnsupportedModelState,RuntimeError,ValueError) as error:
-                            failures.append({'version':version,'task':task['id'],'anchor':sample.state.tick,'variant':label,'scope':scope,'error':str(error)})
+                            failures.append({'version':version,'task':task['id'],'anchor':sample.state.tick,'variant':label,'scope':scope,'error':str(error),'support_details':getattr(error,'details',None)})
                         finally:
                             actor.load_state_dict(base_actor);trainer.actor_optimizer.load_state_dict(copy.deepcopy(base_opt));restore_rng(rng)
                             assert_equal(actor.state_dict(),base_actor);assert_equal(trainer.actor_optimizer.state_dict(),base_opt)
                             trainer.actor_optimizer.zero_grad(set_to_none=True)
                 del gradients
             except (UnsupportedModelState,RuntimeError,ValueError) as error:
-                failures.append({'version':version,'task':task['id'],'anchor':sample.state.tick,'error':str(error)})
+                failures.append({'version':version,'task':task['id'],'anchor':sample.state.tick,'error':str(error),'support_details':getattr(error,'details',None)})
             write_json(output/'summary.json',{'cases':reports,'failures':failures,'complete_rollback_verified':True,'newton_real_execution':True,'source_checkpoint':str(checkpoint)})
         del controls,generations,payload,memo,samples,selected;gc.collect()
     actor.load_state_dict(base_actor);engine.teacher.assert_frozen();engine.adapter.bundle.assert_unchanged(trainer.frozen_identity)
