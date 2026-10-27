@@ -277,6 +277,7 @@ def mechanism(args, engine, bank):
             physical_starts=len(z['state']), start_frames=z['frame'].tolist(), translation=translation,
             residual_saturation=float(saturation), logits_abs_max=float(logits.abs().max()),
             logits_abs_median=float(logits.abs().median()),
+            float32_tanh_derivative_zero_fraction=float((1-logits.tanh().square() == 0).float().mean()),
             action_change_from_zero_L2_median=float(action_difference.median()),
             action_change_over_tangent_radius_median=float(action_difference.median()/.02), horizons=[])
         def grad(value):
@@ -289,6 +290,17 @@ def mechanism(args, engine, bank):
                 tr = rollout(control, engine.dynamics, critic, z, horizon, terminal_value=True)
                 dense = tr['objective']-tr['terminal_contribution']
                 g_dense, g_terminal, g_track = grad(dense), grad(tr['terminal_contribution']), grad(tr['execution_objective'])
+                tracking_only = tr['execution_objective']-tr['weighted']['music']
+                g_tracking_only = grad(tracking_only)
+                live = z['state'].new_ones(len(z['state'])); rate = live*0; limit = live*0
+                previous = z['action']
+                for t, (action, state) in enumerate(zip(tr['actions'], tr['states'])):
+                    rate = rate-.002*.99**t*live*(action-previous).square().sum(-1)
+                    q = state[:, 13:34]
+                    limit = limit-.04*.99**t*live*(torch.relu(q-control.runtime.mdp.soft_hi)
+                                                    +torch.relu(control.runtime.mdp.soft_lo-q)).sum(-1)
+                    live = live*tr['continuation'][t]; previous = action
+                g_rate, g_limit = grad(rate), grad(limit)
                 end = tr['end']
                 physical = {k: v if k == 'state' else v.detach() for k, v in end.items()}
                 context = {k: v.detach() if k == 'state' else v for k, v in end.items()}
@@ -304,6 +316,11 @@ def mechanism(args, engine, bank):
                     terminal_physical_state_gradient_norm=float(g_physical.norm()),
                     terminal_context_gradient_norm=float(g_context.norm()),
                     terminal_vs_tracking_cosine=cos(g_terminal, g_track), dense_vs_tracking_cosine=cos(g_dense, g_track),
+                    full_objective_vs_tracking_cosine=cos(g_dense+g_terminal, g_tracking_only),
+                    tracking_gradient_norm=float(g_tracking_only.norm()), action_rate_gradient_norm=float(g_rate.norm()),
+                    joint_limit_gradient_norm=float(g_limit.norm()),
+                    action_rate_over_tracking_gradient=float(g_rate.norm()/g_tracking_only.norm().clamp_min(1e-20)),
+                    action_rate_vs_tracking_cosine=cos(g_rate, g_tracking_only),
                     values=values, weighted_gradient_norms=component_norms))
                 del tr, dense, g_dense, g_terminal, g_track, g_physical, g_context
         reports.append(report)

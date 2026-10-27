@@ -115,6 +115,22 @@ def main():
                     data.qpos[:]=a['qpos'][index];mujoco.mj_forward(model,data)
                     camera.lookat[:]=[data.qpos[0],data.qpos[1],.62]
                     renderer.update_scene(data,camera=camera)
+                    if adapter_diagnostic:
+                        # 仅渲染层添加z=0地面和米制网格，不改机器人MJCF或真实物理轨迹。
+                        scene=renderer.scene
+                        ground=scene.geoms[scene.ngeom]
+                        mujoco.mjv_initGeom(ground,mujoco.mjtGeom.mjGEOM_PLANE,
+                            np.array([25.,25.,.05]),np.zeros(3),np.eye(3).flatten(),np.array([.22,.26,.30,1.]))
+                        scene.ngeom+=1
+                        cx,cy=np.floor(data.qpos[:2]).astype(int)
+                        for offset in range(-4,6):
+                            for start,end in [([cx+offset,cy-5,.001],[cx+offset,cy+5,.001]),
+                                              ([cx-5,cy+offset,.001],[cx+5,cy+offset,.001])]:
+                                geom=scene.geoms[scene.ngeom]
+                                mujoco.mjv_initGeom(geom,mujoco.mjtGeom.mjGEOM_LINE,np.ones(3),np.zeros(3),
+                                    np.eye(3).flatten(),np.array([.43,.48,.53,1.]))
+                                mujoco.mjv_connector(geom,mujoco.mjtGeom.mjGEOM_LINE,1.,np.array(start),np.array(end))
+                                scene.ngeom+=1
                     canvas.paste(Image.fromarray(renderer.render()),(left,header))
                     safe=a['safe_limits'][0];hard=a['hard_limits'][0];q=a['actual_joint_gmt'][index]
                     near=int(np.sum((q<safe[:,0])|(q>safe[:,1])|
