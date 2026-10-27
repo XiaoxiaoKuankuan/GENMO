@@ -16,7 +16,7 @@ from gem.closedloop.joint_physics.config import build_adapter, read_config, ROOT
 from gem.closedloop.joint_physics.contracts import Window
 from gem.closedloop.joint_physics.execution import execute_window
 from gem.closedloop.joint_physics.losses import normalized_window
-from gem.closedloop.mb_control.contracts import ClosedLoopState, RequestTicket
+from gem.closedloop.mb_control.contracts import ClosedLoopState, RequestTicket, ForecastContext
 from gem.closedloop.mb_control.reference_buffer import ReferenceBuffer
 from supermimic.mdp import flatten_state
 
@@ -62,6 +62,16 @@ def test_real_frozen_weights_execution_gradient_and_fd(actor_factory):
     assert len(result["coverage"]["supported_source_ticks"]) < 60
     assert result["actions"].shape == (8, 1, 21)
     assert not torch.equal(result["actions"][0], result["actions"][-1])
+    # 不加任何BC：学生真实去噪输出的执行Loss必须单独到达GENMO和Future投影。
+    context = ForecastContext(torch.ones(1, 58), torch.ones(1, dtype=torch.bool), 0, first)
+    student = actor.denoise_supervised(batch, [context], torch.tensor([50]), torch.randn(1,60,30),
+                                      torch.zeros(1, dtype=torch.bool))
+    execution = execute_window(window, student["pred_x_start"], student["static_conf_logits"], actor, adapter, cfg["execution_loss"])
+    backbone, future = torch.autograd.grad(execution["loss"],
+        (base.denoiser.add_cond_linear.weight, actor.future_encoder.output.weight))
+    assert torch.isfinite(backbone).all() and backbone.norm() > 0
+    assert torch.isfinite(future).all() and future.norm() > 0
+    adapter.bundle.assert_unchanged(frozen)
 
 
 def test_horizon_normalization():
