@@ -26,7 +26,9 @@ def _solve(Y, L, U, A, INV, X, DUAL, ITERATIONS: tl.constexpr):
     ax = tl.sum(a*x[None, :], 1)
     z = tl.minimum(tl.maximum(ax, lower), upper)
     dual = z*0
-    for step in range(ITERATIONS):
+    step = 0
+    converged = False
+    while (step < ITERATIONS) & (~converged):
         rhs = y+10*tl.sum(a*(z-dual)[:, None], 0)
         previous = x
         x = tl.sum(inv*rhs[:, None], 0)
@@ -34,8 +36,8 @@ def _solve(Y, L, U, A, INV, X, DUAL, ITERATIONS: tl.constexpr):
         z = tl.minimum(tl.maximum(ax+dual, lower), upper)
         dual = dual+ax-z
         if step % 16 == 15:
-            if (tl.max(tl.abs(ax-z), 0) < 1e-7) & (tl.max(tl.abs(x-previous), 0) < 1e-7):
-                break
+            converged = (tl.max(tl.abs(ax-z), 0) < 1e-7) & (tl.max(tl.abs(x-previous), 0) < 1e-7)
+        step += 1
     tl.store(X+row*10+i, x, i < 10)
     tl.store(DUAL+row*30+j, dual, j < 30)
 
