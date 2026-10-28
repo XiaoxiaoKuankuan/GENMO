@@ -29,8 +29,8 @@ from gem.closedloop.awr.io import cpu_copy, read_tree, write_tree
 
 def test_original_physical_diagnostics_are_required(tmp_path):
     root = Path(__file__).resolve().parents[3]
-    original = yaml.safe_load((root / "configs/closedloop/stage2_full_chain.yaml").read_text())
-    awr = load_config(root / "configs/closedloop/stage2_awr.yaml")
+    original = yaml.safe_load((root / "tests/closedloop/fixtures/dppo_contract.yaml").read_text())
+    awr = load_config(root / "tests/closedloop/fixtures/awr_contract.yaml")
     assert physical_config(awr, run_id="contract")["diagnostics"] == original["diagnostics"]
     del awr["diagnostics"]["reward_substeps"]
     invalid = tmp_path / "invalid.yaml"

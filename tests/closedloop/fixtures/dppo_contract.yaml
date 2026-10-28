@@ -1,12 +1,10 @@
-# 基于真实非腿关节KL偏重的腿部输出行候选；其余输出行梯度与Adam矩保持零。
-# 仍计算完整四步全部自由坐标Gaussian概率，不删坐标、不改实际噪声。
-# 独立参数范围候选：leg_projection，保留真实全链PPO/联合KL/原奖励与噪声。
-# 最多200个接受轮次；须先固定真实数据比较和物理配对验证，显式CLI启动。
+# 仅用于CPU算法契约回归的固定夹具；不是训练或部署入口。
+# 禁止将本文件传入训练启动器；服务器资产路径只是测试身份字段，不访问真实资产。
 # 完整链联合PPO首个候选：8卡×128环境，8秒采集，0.5秒上层决策，60帧参考。
-# LR候选上限3e-6，真实chain clip=.10，epoch=1，全局2048链/更新；每步BC至少256样本。
+# LR=1e-6，真实chain clip=.10，epoch=1，全局2048链/更新；每步BC至少256样本。
 # 联合KL门槛是待真实rollout标定的实验候选，不继承旧坐标平均KL阈值。
 # 奖励、Critic结构/目标、15+4+1采样核与噪声调度、GMT权重及时钟保持原定义。
-# CLI默认仅运行有限迭代；本候选累计上限200轮，不自动启动长期训练。
+# CLI默认仅运行有限迭代；2000只是累计资源上限，不自动启动长期训练。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
@@ -52,7 +50,6 @@ runtime:
   num_envs: 128
   physics_device: cuda:0
   prefix_deadline_contract: available_reference_deadline_cap.v1
-  record_compact_execution_provenance: true
   reward_audit_interval_controls: 1000
   rpc_timeout_s: 600
   sysroot_library: /data0/user/liwei/closedloop_stage8_runtime/sysroot/usr/lib/x86_64-linux-gnu
@@ -191,7 +188,7 @@ stage10:
     chain_joint_max: 2.0
     maximum_active_clip: 0.95
   limits:
-    accepted_iterations: 200
+    accepted_iterations: 2000
     control_steps: 1100000000
     generations: 40000000
     optimizer_attempts: 640000
@@ -292,7 +289,7 @@ stage10:
         leg_joint_pos: 0.07936507936507936
     version: stage2.gmt8_reference_limits.v1
   run_control:
-    max_training_iterations: 200
+    max_training_iterations: 2000
   scale:
     actor_minibatch_chains: 2048
   seed: 42
@@ -308,11 +305,10 @@ stage10:
     tensor_cache_max_bytes: 4294967296
     checkpoint_interval_iterations: 100
   training:
-    actor_trainable_scope: leg_projection
-    actor_lr: 3.0e-06
+    actor_lr: 1.0e-06
     actor_lr_control: joint_kl_backtracking
     trust_region:
-      maximum_lr: 3.0e-06
+      maximum_lr: 1.0e-06
       growth: 1.25
       margin: 0.8
       max_attempts: 8

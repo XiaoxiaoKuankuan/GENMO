@@ -159,21 +159,6 @@ def test_cooperative_numerical_type_reaches_finite_backtracking():
         with _local_phase(collective,'fatal'):raise ValueError('device identity')
 
 
-def test_candidate_configurations_bind_scope_and_200_iteration_cap():
-    from gem.closedloop.dppo.training_config import configuration
-    from gem.closedloop.dppo.actor_optimization import optimization_binding
-    root=Path(__file__).resolve().parents[3]
-    candidates=[]
-    for scope in ('qpos_output','qpos_projection','denoiser_inputs','leg_projection'):
-        c=configuration(root/f'configs/closedloop/stage2_{scope}.yaml')
-        assert c['stage10']['run_control']['max_training_iterations']==200
-        assert c['stage10']['limits']['accepted_iterations']==200
-        assert c['stage9']['actor_trainable_scope']==scope
-        assert c['runtime']['record_compact_execution_provenance']
-        candidates.append(optimization_binding(c['stage10']))
-    assert len({str(value) for value in candidates})==4
-    subprocess.run([sys.executable,'-B',str(root/'tools/analyze_stage2_probability.py'),'--help'],check=True,capture_output=True,text=True,timeout=30)
-    subprocess.run([sys.executable,'-B',str(root/'tools/attribute_stage2_actor_change.py'),'--help'],check=True,capture_output=True,text=True,timeout=30)
 
 
 def test_real_rollout_metadata_coordinates_and_probe_pipeline(actor_factory):

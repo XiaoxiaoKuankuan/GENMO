@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=ROOT / 'configs/closedloop/stage2_full_chain.yaml')
+    parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--gmt-repo', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--case', action='append', help='训练来源/样本名/音乐起点秒数，可重复指定')

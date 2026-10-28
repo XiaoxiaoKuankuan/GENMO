@@ -64,7 +64,7 @@ def main():
     parser.add_argument("operation", choices=("train", "evaluate", "refit"))
     parser.add_argument("--source-run", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr.yaml")
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--deployment-profile", type=Path, help="复用已经SHA绑定的真实部署测量JSON；训练/评价须一致")
     parser.add_argument("--episodes-per-source", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=120)

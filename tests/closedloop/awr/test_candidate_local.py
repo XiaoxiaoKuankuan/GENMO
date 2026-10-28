@@ -101,19 +101,6 @@ def test_critic_failure_balance_and_fvi_selection_do_not_hide_failure_bias(episo
     assert not decision["accepted"] and "physical_failure_mse_increased" in decision["reasons"]
 
 
-def test_candidate_local_config_preserves_reward_bc_and_explicit_objective():
-    root = Path(__file__).resolve().parents[3]/"configs/closedloop"
-    old, new = [load_config(root/name) for name in ("stage2_awr_rewardstd_nobc.yaml", "stage2_awr_candidate_local.yaml")]
-    assert new["reward"] == old["reward"] and new["environment"] == old["environment"]
-    assert new["awr"]["actor"]["bc_enabled"] is False
-    assert new["awr"]["actor"]["reference_weight"] == 0
-    assert new["awr"]["actor"]["lr"] == 1e-5
-    assert new["awr"]["smoke"]["envs_per_rank"] == 1
-    assert new["awr"]["candidate_sampling"]["group_fraction"] == 1
-    nstep = load_config(root/"stage2_awr_candidate_nstep.yaml")
-    expected = copy.deepcopy(new)
-    expected["awr"]["advantage"]["mode"] = "nstep"
-    assert nstep == expected
 
 
 def test_readonly_candidate_audit_binds_snapshot_and_recomputes_weights(episode_factory, tmp_path):

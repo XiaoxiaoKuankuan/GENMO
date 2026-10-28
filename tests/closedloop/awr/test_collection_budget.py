@@ -129,16 +129,3 @@ def test_runtime_passes_shared_budget_and_records_reserved_attempts(tmp_path, mo
     monkeypatch.setattr(tool, "complete_collection", complete)
     assert AWRRun.complete_collection_with_budget(run) == "sealed_snapshot"
     assert json.loads((tmp_path/"collection_budget.json").read_text())["reserved_attempts_total"] == 8
-
-
-def test_formal_config_only_extends_explicit_budgets():
-    root = Path(__file__).resolve().parents[3]
-    base = load_config(root/"configs/closedloop/stage2_awr.yaml")
-    formal = load_config(root/"configs/closedloop/stage2_awr_formal5.yaml")
-    assert validate_formal_budget(formal)["max_training_collection_attempts"] == 1050
-    with pytest.raises(ValueError, match="five-macro"):
-        validate_formal_budget(base)
-    normalized = copy.deepcopy(formal)
-    normalized["awr"]["max_macro_iterations"] = 1
-    del normalized["awr"]["collection_completion"]
-    assert normalized == base

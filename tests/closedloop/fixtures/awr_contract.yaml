@@ -1,7 +1,8 @@
-# 自蒸馏保留修复的有限候选：新奖励、同采样CFG、冻结两分支约束。
-# 只允许64个预定Episode的一轮验证，每个Actor分支最多45次真实更新；不自动补采或进入长期训练。
-# 教师1000曾在32集通过，但在新64集新增失败；10000在同64集/时钟的45步复验通过有限保留。
-# AWR的成对收益尚未证实，执行时长仍缩短；此配置不是正式训练推荐值，每次必须重新通过门禁。
+# 仅用于CPU算法契约回归的固定夹具；不是训练或部署入口。
+# 禁止将本文件传入训练启动器；服务器资产路径只是测试身份字段，不访问真实资产。
+# 独立AWR配置：完整Episode回放、双Critic、单扩散时间监督及真实Stage1 BC。
+# 奖励/资产/物理合同从指定AWR基线逐项保留；部署延迟必须重新实测，默认仅1宏迭代。
+# 512/128为完整Episode数量；smoke独立64条，不混入正式Replay。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
@@ -38,13 +39,13 @@ runtime:
   allow_shared_gpu: false
   backend: gpu_vectorized.v1
   evidence_level: training
-  generation_batch: 2
+  generation_batch: 16
   genmo_device: cuda:0
   gmt_inference_contract: gmt.native_checkpoint_frozen_batch.v1
   headless: true
   isaaclab_root: /data0/user/liwei/closedloop_stage8_runtime/IsaacLab
   noise_namespace: stage2_awr_v1
-  num_envs: 2
+  num_envs: 16
   physics_device: cuda:0
   prefix_deadline_contract: available_reference_deadline_cap.v1
   reward_audit_interval_controls: 1000
@@ -208,14 +209,15 @@ awr:
     min_activity_ratio: 0.9
     max_motion_ratio: 1.1
     max_error_ratio: 1.1
-  initial_episodes: 64
+  initial_episodes: 512
   new_episodes: 128
-  replay_capacity: 64
+  replay_capacity: 512
   max_macro_iterations: 1
   collection_timeout_seconds: 43200
-  profile: smoke
+  profile: pilot
   source_commits: {}
   actor:
+    # 与部署采样同一CFG预测器；旧单分支只能由隔离诊断工具显式调用。
     denoising_guidance_scale: 2.5
     replay_eval_mode: true
     epochs: 5
@@ -223,17 +225,14 @@ awr:
     microbatch: 8
     bc_global_batch: 128
     bc_microbatch: 4
-    lr: 1.0e-07
-    weight_decay: 0.0
+    lr: 1.0e-05
+    weight_decay: 0.01
     warmup_steps: 100
     min_lr_ratio: 0.1
     gradient_clip: 1.0
     calibration_batches: 8
     bc_gradient_ratio: 0.1
     checkpoint_every_steps: 50
-    reference_weight: 10000.0
-    bc_fixed_weight: 0.01366578514366661
-    max_optimizer_steps: 45
   critic:
     mode: mc_fvi
     history_lr: 1.0e-05
@@ -266,7 +265,7 @@ awr:
     - 2718
     - 31415
     envs_per_rank: 2
-  final_all_unique: false
+  final_all_unique: true
   run_ablation: true
   calibration_samples: 8
   calibration_warmup: 2

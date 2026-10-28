@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("preflight", "run", "evaluate", "resume", "stop", "ablate"))
-    parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr_rewardstd_nobc.yaml")
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--profile", choices=("smoke", "pilot"))
     parser.add_argument("--genmo-repo", type=Path, default=ROOT)

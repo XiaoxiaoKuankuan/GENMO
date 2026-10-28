@@ -17,7 +17,7 @@ def test_saved_json_request_preserves_scientific_numbers(tmp_path):
     import json
     from pathlib import Path
     from gem.closedloop.awr.config import load_config
-    config = load_config(Path(__file__).resolve().parents[3]/"configs/closedloop/stage2_awr_retention.yaml")
+    config = load_config(Path(__file__).resolve().parents[3]/"configs/closedloop/stage2_awr_candidate_nstep.yaml")
     path = tmp_path/"request.json"
     path.write_text(json.dumps(config))
     assert load_config(path) == config

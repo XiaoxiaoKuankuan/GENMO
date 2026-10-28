@@ -22,7 +22,7 @@ from gem.closedloop.dppo.training import _sources
 from gem.closedloop.dppo.training_config import VERSION, configuration
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG = ROOT / 'configs/closedloop/stage2_full_chain.yaml'
+CONFIG = ROOT / 'tests/closedloop/fixtures/dppo_contract.yaml'
 
 
 def test_main_scale_is_16384_nominal_chains_with_eight_full_chain_updates():

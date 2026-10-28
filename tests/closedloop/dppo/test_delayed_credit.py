@@ -97,7 +97,7 @@ def test_fragment_bootstrap_uses_actual_control_discount_only_once():
 
 
 def test_formal_configuration_and_milestone_cumulative_restore():
-    c=configuration(ROOT/'configs/closedloop/stage2_full_chain.yaml');s=c['stage10']
+    c=configuration(ROOT/'tests/closedloop/fixtures/dppo_contract.yaml');s=c['stage10']
     assert s['derived']['maximum_actor_steps']==s['derived']['planned_actor_steps']==8
     assert s['derived']['real_chains']==16384 and s['derived']['bc_per_rollout']==2048
     assert s['training']['actor_lr']==1e-6 and s['generation_horizon']['frames']==60
@@ -111,7 +111,7 @@ def test_formal_configuration_and_milestone_cumulative_restore():
 
 
 def test_mc_reset_plan_is_independent_reproducible_and_complete():
-    c=yaml.safe_load((ROOT/'configs/closedloop/stage2_full_chain.yaml').read_text())
+    c=yaml.safe_load((ROOT/'tests/closedloop/fixtures/dppo_contract.yaml').read_text())
     tasks=[dict(task_id=str(i),dataset='Mine',sample_id=str(i),split='val',seed=i,
         full_music_frames=3000,music_start_frame=0,remaining_music_seconds=100.,initialization='standing') for i in range(200)]
     plan=dict(tasks=tasks,episode_seconds=None);before=copy.deepcopy(plan)

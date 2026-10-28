@@ -38,7 +38,7 @@ def validate_formal_budget(config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True, type=Path)
-    parser.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/stage2_awr_formal5.yaml")
+    parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args()
     from gem.closedloop.awr.config import load_config, git
     from gem.closedloop.awr.io import atomic_json, digest, file_sha256

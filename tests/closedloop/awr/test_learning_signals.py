@@ -208,15 +208,6 @@ def test_frozen_label_modes_components_scale_fallback_identity_and_statistics(ep
     torch.testing.assert_close(fallback.weights, plain.weights, atol=0, rtol=0)
 
 
-def test_new_experiment_configs_disable_teacher_gates_use_train_and_preserve_old_files():
-    root = Path(__file__).resolve().parents[3]/"configs/closedloop"
-    base = load_config(root/"stage2_awr_group_credit.yaml")
-    assert base["awr"]["actor"]["reference_weight"] == 0 and base["awr"]["actor"]["lr"] == 1e-5
-    assert base["awr"]["retention_gate"] is None and not base["awr"]["stop_on_physical_rejection"]
-    assert base["evaluation"]["split"] == "train" and base["evaluation"]["selection_policy"] == "reward_only"
-    for name in ("mc", "nstep4", "nstep8", "nstep16", "credit_current", "credit_lookahead", "hybrid0", "hybrid05", "hybrid07", "grouped"):
-        candidate = load_config(root/f"stage2_awr_signal_{name}.yaml")
-        assert candidate["awr"]["actor"] == base["awr"]["actor"]
 
 
 def test_reward_only_selection_keeps_failures_as_diagnostics():

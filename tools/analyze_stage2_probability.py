@@ -137,7 +137,7 @@ def export_actor(policy,config,learning,report,acceptance,case,output,*,allow_me
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_full_chain.yaml')
+    parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--scope',choices=SCOPES,default='all')
     parser.add_argument('--learning-rate',type=float,default=1e-6)

@@ -129,7 +129,7 @@ def test_new_run_rejects_training_cfg_mismatch(tmp_path):
     from pathlib import Path
     import yaml
     from gem.closedloop.awr.config import load_config
-    path = Path(__file__).resolve().parents[3]/"configs/closedloop/stage2_awr.yaml"
+    path = Path(__file__).resolve().parents[3]/"tests/closedloop/fixtures/awr_contract.yaml"
     config = load_config(path)
     config["awr"]["actor"]["denoising_guidance_scale"] = 1.
     wrong = tmp_path/"wrong.yaml"; wrong.write_text(yaml.safe_dump(config))
@@ -186,7 +186,7 @@ def test_reused_clock_must_match_original_measurement_assets_and_samples(tmp_pat
     from pathlib import Path
     from gem.closedloop.awr.config import load_config, validate_measured_deployment_profile
     from gem.closedloop.awr.io import file_sha256
-    config = load_config(Path(__file__).resolve().parents[3]/"configs/closedloop/stage2_awr.yaml")
+    config = load_config(Path(__file__).resolve().parents[3]/"tests/closedloop/fixtures/awr_contract.yaml")
     sampler = dict(schema="genmo.awr.stage1_ddim.v1", steps=20, eta=0., guidance_scale=2.5,
                    noise="initial_gaussian", actor="same_network_all_steps")
     evidence = tmp_path/"measurement.json"
