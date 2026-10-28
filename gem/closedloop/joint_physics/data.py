@@ -188,10 +188,17 @@ class SourceCatalog:
         if prepared:
             from .supervision_cache import read_manifest
             manifest = read_manifest(prepared, cfg, self)
+            dataset_sizes = {dataset.dataset_name:sum(manifest['sources'][source_key({
+                'dataset_id':dataset.dataset_name,'split':dataset.split,'sample_id':str(row['sample_id'])})]['bytes']
+                for row in dataset.rows if source_key({'dataset_id':dataset.dataset_name,'split':dataset.split,
+                    'sample_id':str(row['sample_id'])}) in manifest['sources']) for dataset in self.datasets}
+            total_bytes = max(1,sum(dataset_sizes.values()))
             for dataset in self.datasets:
                 if not isinstance(dataset, _CachedStage1Dataset):
                     raise ValueError('持久监督特征需要非零sequence_cache_mb预算')
                 dataset.reader.prepared = (prepared, manifest)
+                # 四来源大小极不均衡；按真实文件字节分预算，避免大来源持续被小来源闲置配额挤出。
+                dataset.reader.max_bytes = int(cache_bytes*dataset_sizes[dataset.dataset_name]/total_bytes)
 
     def sources(self):
         for dataset, indices in zip(self.datasets, self.rows):
