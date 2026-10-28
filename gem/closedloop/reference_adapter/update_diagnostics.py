@@ -9,7 +9,7 @@ Tanh未饱和解释为物理收益。真实物理误差由配对评价提供，�
 
 import hashlib
 import torch
-from supermimic.rotations import so3_log
+from supermimic.rotations import so3_log, so3_exp
 from .vector_control import select_state
 
 
@@ -87,6 +87,8 @@ def update_effect(control, probes, before, parameter_delta):
                                  ('joint_rad', slice(6, None), 1.),
                                  ('root_rotation_rad', slice(3, 6), 1.),
                                  ('root_translation_m', slice(0, 3), 1.)]}
+    result['proposal_projection_distance']['root_orientation_geodesic_rad'] = _distribution(so3_log(
+        so3_exp(after['raw_residual'][..., 3:6]).transpose(-1, -2)@so3_exp(after['residual'][..., 3:6])).norm(dim=-1))
     identifiable = raw_delta > 1e-9
     result['projection_update_transfer'] = dict(
         identifiable_count=int(identifiable.sum()),

@@ -96,9 +96,9 @@ class VectorControl:
         # 顺序仍取权威InputSpec，内部固定张量形状不重复逐字段GPU->CPU同步。
         return torch.cat([fields[f.name].flatten(1) for f in self.spec.fields], -1)
 
-    def reference(self, z, residual):
+    def reference(self, z, residual, nominal_pose=None):
         frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
-        p, R, q = self.bank.pose(z['song'][:, None], frames)
+        p, R, q = self.bank.pose(z['song'][:, None], frames) if nominal_pose is None else nominal_pose
         halo = 2*residual[:, -1:]-residual[:, -2:-1]
         d = torch.cat((z['left'][:, None], z['anchor'][:, None], residual, halo), 1)
         p = p+(z['heading'][:, None]@d[..., :3, None]).squeeze(-1)
@@ -113,9 +113,10 @@ class VectorControl:
         return current, future, goal_from_reference(current, future), halo[:, 0]
 
     def propose(self, z, *, zero=False, residual_offset=None, action_offset=None, latent=None, checkpoint_actor=False):
+        nominal_current, nominal_goal = self.nominal_goal(z)
         with scope('stage2.Adapter'):
             residual = (self.adapter.decode(latent) if latent is not None else
-                        z['state'].new_zeros(len(z['state']), 10, 27) if zero else self.adapter.forward_packed(self.packed(self.fields(z))))
+                        z['state'].new_zeros(len(z['state']), 10, 27) if zero else self.adapter.forward_packed(self.packed(self.fields(z, nominal_current, nominal_goal))))
         if residual_offset is not None:
             residual = (residual+residual_offset).clamp(-self.adapter.bounds, self.adapter.bounds)
         if self.adapter.disable_root_xy:
@@ -124,14 +125,15 @@ class VectorControl:
             # 独立根姿态消融只关闭三维输出通道，不改270维合同或Adapter观测。
             residual = torch.cat((residual[..., :3], residual[..., 3:6]*0, residual[..., 6:]), -1)
         raw_residual = residual
+        frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
+        nominal_pose = self.bank.pose(z['song'][:, None], frames)
         if self.projection is not None:
-            frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
-            rotation = self.bank.pose(z['song'][:, None], frames)[1]
+            rotation = nominal_pose[1]
             with scope('projection.total'):
                 residual = self.projection(residual, z['left'], z['anchor'], rotation)
         elif self.constraint_beta < 1:
             residual = constrain_plan(residual, z['left'], z['anchor'], self.constraint_beta)
-        current, future, goal, halo = self.reference(z, residual)
+        current, future, goal, halo = self.reference(z, residual, nominal_pose)
         def act(history, target):
             with scope('stage2.Actor'):
                 if checkpoint_actor and torch.is_grad_enabled():
@@ -141,17 +143,20 @@ class VectorControl:
         action = act(z['history'], goal)
         if action_offset is not None:
             action = action+action_offset
-        result = dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action)
+        result = dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action,
+                      nominal_rotation=nominal_pose[1])
         if self.precision is not None:
             # 对照动作在相同真实/想象状态及同一历史下使用原始Goal；保留其输入梯度。
-            result['zero_action'] = act(z['history'], self.nominal_goal(z)[1])
+            result['zero_action'] = act(z['history'], nominal_goal)
         return result
 
     def constraint_certificate(self, z, proposal):
         if self.projection is None:
             return None
         frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
-        rotation = self.bank.pose(z['song'][:, None], frames)[1]
+        rotation = proposal.get('nominal_rotation')
+        if rotation is None:
+            rotation = self.bank.pose(z['song'][:, None], frames)[1]
         return self.projection.certificate(proposal['residual'], z['left'], z['anchor'], rotation)
 
     def reference_diagnostics(self, z, proposal):

@@ -26,17 +26,17 @@ def build(projector, example, *, compile_kernels=False):
         corrected = nominal@so3_exp(d)
         value = so3_log(corrected[1]@corrected[0].T)/.02
         original = so3_log(nominal[1]@nominal[0].T)/.02
-        return (value-original).norm()/projector.rotation_velocity-1
+        return (value-original).norm(dim=-1)/projector.rotation_velocity-1
 
     def acceleration(local, nominal):
         d = local.reshape(3, 3)
         corrected = nominal@so3_exp(d)
         value = so3_log(corrected[1:]@corrected[:-1].transpose(-1, -2))/.02
         original = so3_log(nominal[1:]@nominal[:-1].transpose(-1, -2))/.02
-        return ((value-original).diff(dim=0)/.02).norm()/projector.rotation_acceleration-1
+        return ((value-original).diff(dim=0)/.02).norm(dim=-1)[0]/projector.rotation_acceleration-1
 
     def amplitude(local, nominal):
-        return local.norm()/.05-1
+        return local.norm(dim=-1)/.05-1
 
     functions = [velocity, acceleration, amplitude] if projector.constrain_root_angular_acceleration else [velocity, amplitude]
     mappings = [vmap, amap, pmap] if projector.constrain_root_angular_acceleration else [vmap, pmap]
@@ -46,26 +46,6 @@ def build(projector, example, *, compile_kernels=False):
         jac = torch.func.vmap(gradient)
         hess = torch.func.vmap(torch.func.jacrev(gradient, argnums=0))
         kernels.append([jac, hess])
-    if compile_kernels:
-        def compile_one(function):
-            compiled = torch.compile(function, dynamic=True, fullgraph=True, options={'triton.cudagraphs': False})
-            failed = False
-            def call(*values):
-                nonlocal failed
-                if failed:
-                    return function(*values)
-                for value in values:
-                    for dim in range(1, value.ndim):
-                        torch._dynamo.mark_static(value, dim)
-                try:
-                    return compiled(*values)
-                except (torch._dynamo.exc.Unsupported, torch._dynamo.exc.BackendCompilerFailed) as error:
-                    # 只降级编译能力，绝不吞掉求解器异常、OOM或非有限结果。
-                    failed = True
-                    projector.derivative_compile_fallback = str(error).splitlines()[0]
-                    return function(*values)
-            return call
-        kernels = [[compile_one(f) for f in row] for row in kernels]
 
     def local_inputs(x, past, anchor, rotation):
         plan = x.reshape(-1, 3, 10).transpose(1, 2)*unit
@@ -81,6 +61,7 @@ def build(projector, example, *, compile_kernels=False):
         output = []
         for (local, nominal), mapping, (jac, _) in zip(local_inputs(x, past, anchor, rotation), mappings, kernels):
             j = jac(local.flatten(0, 1), nominal.flatten(0, 1)).reshape(len(x), len(mapping), -1)
+            j = torch.where(mapping.abs().sum(-1)[None] != 0, j, torch.zeros_like(j))
             output.append(torch.einsum('bsa,sai->bsi', j, mapping))
         return torch.cat(output, 1)
 
@@ -90,7 +71,35 @@ def build(projector, example, *, compile_kernels=False):
         for (local, nominal), mapping, (_, hess) in zip(local_inputs(x, past, anchor, rotation), mappings, kernels):
             h = hess(local.flatten(0, 1), nominal.flatten(0, 1)).reshape(len(x), len(mapping), local.shape[-1], local.shape[-1])
             weight = multiplier[:, offset:offset+len(mapping)]
-            output = output+torch.einsum('sai,bsac,scj->bij', mapping, h*weight[..., None, None], mapping)
+            # 首段含只读历史，identity log对这些假想自由变量的二阶导数可奇异。
+            # 它们到30维变量的映射严格为零；先删去常量坐标，避免0*NaN污染真实链式法则。
+            variable = mapping.abs().sum(-1) != 0
+            support = variable[:, :, None] & variable[:, None, :]
+            weighted_h = torch.where((weight[..., None, None] != 0) & support[None],
+                                     h*weight[..., None, None], torch.zeros_like(h))
+            output = output+torch.einsum('sai,bsac,scj->bij', mapping, weighted_h, mapping)
             offset += len(mapping)
         return output
+    if compile_kernels:
+        def compile_one(function):
+            compiled = torch.compile(function, dynamic=True, fullgraph=True, options={'triton.cudagraphs': False})
+            failed = False
+            def call(*values):
+                nonlocal failed
+                if failed:
+                    return function(*values)
+                for value in values:
+                    for dim in range(1, value.ndim):
+                        torch._dynamo.mark_static(value, dim)
+                try:
+                    return compiled(*values)
+                except (torch._dynamo.exc.Unsupported, torch._dynamo.exc.BackendCompilerFailed,
+                        torch._dynamo.exc.FailOnRecompileLimitHit, torch._dynamo.exc.TorchRuntimeError) as error:
+                    if isinstance(getattr(error, 'inner_exception', None), torch.cuda.OutOfMemoryError):
+                        raise
+                    failed = True
+                    projector.derivative_compile_fallback = str(error).splitlines()[0]
+                    return function(*values)
+            return call
+        jacobian, hessian = compile_one(jacobian), compile_one(hessian)
     return torch.func.vmap(projector.angular_constraints), jacobian, hessian

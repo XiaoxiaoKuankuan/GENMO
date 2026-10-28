@@ -56,7 +56,9 @@ class PrecisionObjective:
         d = torch.cat((z['left'][:, None], z['anchor'][:, None], proposal['residual'], proposal['halo'][:, None]), 1)
         v = d.diff(dim=1)/.02
         frames = (z['frame'][:, None]+control.bank.offset13).clamp_min(0)
-        rotation = control.bank.pose(z['song'][:, None], frames)[1]
+        rotation = proposal.get('nominal_rotation')
+        if rotation is None:
+            rotation = control.bank.pose(z['song'][:, None], frames)[1]
         corrected = rotation@so3_exp(d[..., 3:6])
         angular = so3_log(corrected[:, 1:]@corrected[:, :-1].transpose(-1, -2))/.02
         nominal_angular = so3_log(rotation[:, 1:]@rotation[:, :-1].transpose(-1, -2))/.02

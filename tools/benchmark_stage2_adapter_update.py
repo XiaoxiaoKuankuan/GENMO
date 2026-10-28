@@ -40,6 +40,7 @@ def main():
     p.add_argument('--no-compile-derivatives', action='store_true')
     p.add_argument('--compile-components', action='store_true')
     p.add_argument('--aux-weight', type=float, default=0.)
+    p.add_argument('--profile', action='store_true', help='额外H1 Kineto算子分析，不计入吞吐墙钟')
     args = p.parse_args()
     repo = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo))
@@ -124,6 +125,18 @@ def main():
         (out/f'warmup_{implementation}.json').write_text(json.dumps(dict(seconds=time.perf_counter()-warm_begin,
             excluded_from_steady_measurement=True)))
         del warm_optimizer
+        if args.profile:
+            from torch.profiler import profile, ProfilerActivity
+            from gem.closedloop.reference_adapter.alternating_learning import imagine
+            with engine.dynamics.adapter_phase(), profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+                value = imagine(control, engine.dynamics, critic, select_state(z, slice(0, min(32, args.batch))),
+                                1, terminal_value=False)
+                (-value['objective'].mean()).backward()
+            torch.cuda.synchronize()
+            events = [dict(name=x.key, calls=x.count, cpu_ms=x.cpu_time_total/1000,
+                           cuda_ms=x.device_time_total/1000, self_cuda_ms=x.self_device_time_total/1000)
+                      for x in prof.key_averages()]
+            (out/f'kineto_{implementation}.json').write_text(json.dumps(events, indent=2))
         for horizon in args.horizons:
             for micro in args.microbatches:
                 control.adapter.load_state_dict(initial_adapter)
