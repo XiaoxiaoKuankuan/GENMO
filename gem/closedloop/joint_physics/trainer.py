@@ -301,6 +301,9 @@ class JointTrainer:
         data_terms = dict(zip(term_keys, (terms/self.world_size).cpu().tolist()))
         detail_every = self.cfg['training'].get('sample_log_every',1)
         details = bool(detail_every and (self.step % detail_every == 0))
+        if not details:
+            data_terms = {key:value for key,value in data_terms.items()
+                          if key.startswith('normalized_') or key.endswith('warmup_factor') or key == 'loss'}
         sample_details = ({'timesteps':timesteps.tolist(),
             'sample_ids':[(m['sample_id'],m['decision_frame']) for m in batch['meta']],
             'music_dropout_mask':drop.tolist(),'history_sources':[m['proprio_source'] for m in batch['meta']],
@@ -422,7 +425,13 @@ class JointTrainer:
                                 'physics_attempts','physics_valid_samples','physics_effective_updates','physics_update_fraction',
                                 'effective_horizon_counts','physics_rejections_total','wall_seconds','peak_memory_bytes',
                                 'precision','physics_source_count','future_source_count')
-                        print(json.dumps({**{k:result[k] for k in keys},'interval_max_physics_x0_gradient_norm':recent_physics_norm,
+                        brief = {k:result[k] for k in keys}
+                        brief['data_terms'] = {key:result['data_terms'][key] for key in (
+                            'normalized_repr_root_pos_loss','normalized_repr_root_rot_loss','normalized_repr_joint_loss',
+                            'normalized_contact_bce_loss','normalized_fk_body_pos_loss','normalized_joint_velocity_loss',
+                            'normalized_joint_acceleration_loss','normalized_joint_jerk_loss','normalized_foot_slide_loss',
+                            'normalized_penetration_loss','normalized_joint_limit_loss') if key in result['data_terms']}
+                        print(json.dumps({**brief,'interval_max_physics_x0_gradient_norm':recent_physics_norm,
                             'interval_wall_seconds':interval_seconds},ensure_ascii=False),flush=True)
                         recent_physics_norm = 0.
                         interval_seconds = 0.
