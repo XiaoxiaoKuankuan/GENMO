@@ -75,7 +75,7 @@ WM/Actor参数保持不变及Critic关闭；原投影检查点梯度一致、恢
 发送SIGINT，经已有异常保存路径分别保存u10和u13完整checkpoint；旧进程均退出，
 没有向其他PID发信号。旧状态文件记为`failed_runtime_protection/KeyboardInterrupt`，
 本次属于用户要求的主动任务替换，不能误报为训练数值故障。替换记录在旧正式根
-`reassignment_20261028_2005.json`，所有旧checkpoint/日志仍保留。
+`reassignment_20261028_2005.json`，原实验目录和日志保留，checkpoint沿用已有零模型/最近两份/best保留策略，未覆盖文件。
 
 正式启动命令（提交/push/Server-1 fast-forward同步后执行）：
 
@@ -89,3 +89,43 @@ cd /home/user/liwei/bumi-closedloop-worktrees/adapter/GENMO
 
 实际PID、完整命令、首个有限Adapter更新和显存证据在启动核验后追加；不能将
 配置提交、预热或WM监督当作Adapter已更新，也不能将首次更新当作物理收益。
+
+## 实际启动与首更新核验（20:07:57 +08）
+
+20:02:59已在Server-1执行上面的启动命令，GPU5/6均实际启动，无等待或跳过；
+固定运行GENMO源码`61eb9fb1558ae829e1ca1c07a294bb9fa040dc6a`，SM源码
+`a0911e4bbbffe96e1d6bc842b29f4b01c2ebe7a6`。GPU4继续原运行源码`9beed4a`；
+差异仅为允许H64的入口及配置/测试/文档，不热替换旧进程的训练实现。
+
+|GPU|H|PID|tmux|有效Adapter更新|WM更新|训练角色真实转移|当前整卡显存|
+|---|---:|---:|---|---:|---:|---:|---:|
+|4|16|2470756|smformal8_20261028_g4|17|1180|735232|9985MiB|
+|5|32|3180729|smhorizon_20261028_g5|2|1030|657408|8853MiB|
+|6|64|3180791|smhorizon_20261028_g6|1|1020|653312|8853MiB|
+
+每组2048真实环境。显存为此次nvidia-smi瞬时整卡读数，不冒充后期峰值；
+PyTorch allocated峰分别7360.99/7360.58/7360.14MiB，统计范围不同。
+两新组首次更新均使用1024有效Replay起点，拒样0，之前完成647168训练真实转移
+和1010次WM更新。H32参数变化范数0.00253250、梯度0.208478、首更新66.977秒；
+H64参数变化范数0.00253376、梯度0.464613、首更新128.442秒。首更新完整checkpoint
+均已落盘，当前继续下一轮。首更新速度不能外推后期活跃投影耗时。
+
+三组初始Adapter、WM、Actor、SM权重文件、64首任务和精度校准SHA一致；运行配置
+除BPTT长度、实验说明名及等价只读SM工作树路径外一致。共同随机种子固定，但随
+策略/时域分化后的独立Replay不共享，不声称后续真实轨迹逐位相同。
+
+原GPU5/6中断保存文件已通过只读CPU mmap解析，三网络、三个优化器、Replay、
+collector、音乐/残差状态、RNG、精度归一化及失败上下文齐全，错误明确为主动
+`KeyboardInterrupt()`；无需用旧Adapter初始化新的时域组。
+
+GPU0/1/2/3/7原PID均未变，分别有效更新181/182/100/100/82，GPU2/3正在固定物理
+评价，其余继续训练。当前八张卡各一个实际训练进程，布局为H8×4、H16×2、H32×1、
+H64×1，没有跨卡通信。没有新进程failure文件、OOM或非有限数值。
+
+新H32/H64完成的是零Adapter的256步validation/evaluation前缀及初始正式更新，
+尚没有训练后整歌收益证据；零前缀均无不可行参考。继续按固定20次及后续整歌评价
+报告效果。不能把首次Adam、WM loss或增加H64叫作方法成功。
+
+完整运行映射`comparison_manifest.json`、命令`launch_manifest.json`及实测快照
+`launch_verification_20261028_2008.json`位于新正式根，本地镜像为
+`/home/weili/bumi-closedloop-worktrees/adapter/formal_horizon_20261028_2005`。
