@@ -27,19 +27,6 @@ def test_dynamic_grid_is_not_fixed_three_tenths(arrival,expected):
     assert next_decision_tick(600,arrival,300)>=900
 
 
-def test_new_config_retains_exact_old_algorithm_and_ordinary_resume_is_distinct():
-    old=yaml.safe_load((ROOT/'configs/closedloop/stage2_random20s_gamma095_server2.yaml').read_text())
-    new=yaml.safe_load((ROOT/'configs/closedloop/stage2_continuous_rolling_server2.yaml').read_text())
-    assert new['runtime'].pop('generation_schedule')==SCHEDULE
-    assert new==old
-    new['runtime']['generation_schedule']=SCHEDULE
-    assert optimization_binding(new['stage10'])==optimization_binding(old['stage10'])
-    assert not same_execution(new,old)
-    resolved=configuration(ROOT/'configs/closedloop/stage2_continuous_rolling_server2.yaml')
-    assert resolved['stage10']['derived']['local_chains']==128*80
-    assert resolved['stage10']['derived']['maximum_actor_steps']==10
-    assert generation_capacity(old,8)==16 and generation_capacity(new,8)==80
-    assert decision_grid(old)==300
 
 @pytest.mark.parametrize('delay,controls',[(.20,10),(.26,15),(.32,20),(.44,25)])
 def test_real_step_flow_advances_all_waiting_controls_and_replans(delay,controls,tmp_path):

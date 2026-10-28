@@ -44,9 +44,6 @@ SOURCE_FILES = {
             "gem/closedloop/baseline_video.py", "tools/eval/audit_closedloop_baseline.py",
             "gem/runtime/closedloop_protocol.py", "tools/eval/run_closedloop_baseline.py",
             "configs/closedloop/stage8_frozen_isaac.yaml",
-            "configs/closedloop/stage8_grounded20_isaac.yaml",
-            "configs/closedloop/stage8_train200_latency_isaac.yaml",
-            "configs/closedloop/stage8_train200_latency_server1.yaml",
         ),
         "reused_actor_and_sampling": (
             "gem/closedloop/__init__.py", "gem/closedloop/actor.py", "gem/closedloop/contracts.py",

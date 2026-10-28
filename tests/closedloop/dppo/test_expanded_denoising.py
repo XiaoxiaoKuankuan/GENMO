@@ -18,20 +18,6 @@ from tests.closedloop.test_stage1_actor import actor_factory
 ROOT=Path(__file__).resolve().parents[3]
 
 
-@pytest.mark.parametrize('suffix,lr',[('base',3e-7),('lr10x',3e-6),('lr50x',1.5e-5)])
-def test_ten_step_configuration_keeps_full_chain_physics(suffix,lr):
-    config=configuration(ROOT/f'configs/closedloop/stage2_continuous_train10_{suffix}_server2.yaml',genmo_repo=ROOT)
-    t=config['stage10']['training']
-    assert t['frozen_prefix_steps']==9 and t['ppo_steps_per_chain']==10
-    assert t['denoising_steps']==20 and t['ppo_step_strategy']=='intermediate10'
-    assert t['actor_lr']==lr and t['trust_region']['maximum_lr']==lr
-    assert t['actor_objective']=='full_chain_clipped_ppo' and t['objective_logprob_reduction']=='joint_sum'
-    assert not t['bc_enabled'] and t['gamma_upper']==.95 and t['lambda_upper']==.98
-    assert config['stage10']['scale']['actor_minibatch_chains']==8192
-    reward=ExecutionReward(config['stage10']['reward']).config['tracking']
-    assert reward['reward_std']['anchor_pos']==.3 and reward['reward_std']['anchor_ori']==.4
-    assert reward['reward_std']['body_pos']==.15 and reward['reward_std']['body_ori']==.2
-    assert reward['source_std']['body_pos']==.3 and reward['source_std']['body_ori']==.4
 
 
 def fixture_payload():
@@ -122,8 +108,8 @@ def test_complete_configured_chain_adam_update_with_tail_batch(actor_factory,tmp
 
 def test_fixed_lr_accepts_lower_objective_when_kl_passes():
     from tools.validate_stage2_full_chain import candidate_update_checks
-    config=configuration(ROOT/'configs/closedloop/stage2_continuous_train10_base_server2.yaml',genmo_repo=ROOT)
-    kl=dict(chain_joint_kl=dict(mean=.05,p95=.08,p99=.1,max=.2),active_clip_fraction=.2,
+    config=dict(stage10=dict(kl={'denoising_step_mean': 1.}), stage9=dict(trust_region={'margin': .8}, kl_soft_stop_denoising_step=1., max_active_clip_fraction=.9))
+    kl=dict(denoising_step_kl={'mean': .05},chain_joint_kl=dict(mean=.05,p95=.08,p99=.1,max=.2),active_clip_fraction=.2,
         mean_coordinate_kl=0.,maximum_step_mean_coordinate_kl=0.,coordinate_kl={'p95':0.})
     report=dict(optimizer_steps=1,steps=[dict(optimizer_step=1,
         full_rollout_before={'objective_mean':0.},full_rollout_after=dict(kl,objective_mean=-.0795))])

@@ -98,12 +98,6 @@ def test_explicit_legacy_fragment_transfer_keeps_actual_kernel_reward_and_critic
         assert not _legacy_fragment_execution(old,bad)
 
 
-def test_disabled_bc_configuration_has_zero_real_samples_and_no_module_lr_transfer():
-    root=Path(__file__).resolve().parents[3]
-    config=configuration(root/'configs/closedloop/stage2_random20s_gamma095_server2.yaml')
-    assert config['stage9']['bc_samples_per_rollout']==config['stage9']['bc_batch']==0
-    assert config['stage10']['derived']['bc_per_rollout']==0
-    assert config['stage9'].get('actor_lr_multipliers') is None
 
 
 def test_readonly_advantage_decomposition_keeps_timeout_bootstrap_and_real_event_once():
@@ -178,22 +172,6 @@ def test_fragment_transfer_preserves_all_adam_groups_and_rejects_other_behavior_
         assert torch.equal(before,actor[0].weight)
 
 
-@pytest.mark.parametrize('gamma',[.95])
-def test_fragment_configuration_keeps_transformer_kernel_and_full_music_evaluation(gamma):
-    root=Path(__file__).resolve().parents[3]
-    import yaml
-    base=yaml.safe_load((root/'configs/closedloop/stage2_dppo_server2_formal.yaml').read_text())
-    config=configuration(root/'configs/closedloop/stage2_random20s_gamma095_server2.yaml')
-    stage=config['stage10']
-    assert stage['physical_episode']['safety_limit_seconds']==20.
-    assert stage['physical_episode']['time_limit_bootstrap']
-    assert stage['dataset']['standing_start_probability']==0.
-    assert stage['training']['gamma_upper']==gamma and stage['training']['lambda_upper']==.98
-    assert stage['training']['actor_trainable_scope']=='all' and not stage['training']['bc_enabled']
-    assert stage['training']['std_schedule']==base['stage10']['training']['std_schedule']
-    assert stage['reward']==base['stage10']['reward'] and config['timing']==base['timing']
-    assert stage['evaluation']['episode_seconds'] is None
-    assert stage['scale']['actor_minibatch_chains']==8192 and stage['ppo_rollout']['world_seconds']==8.
 
 
 def test_supervisor_uses_fragment_transfer_once_then_exact_resume(tmp_path):

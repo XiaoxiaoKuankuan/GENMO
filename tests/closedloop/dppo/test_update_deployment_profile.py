@@ -1,6 +1,6 @@
 """部署标定回写工具的纯CPU验证：只改 deployment_profile 段、摘要与训练入口一致、拒绝不一致标定。
 
-复制实际 stage2_credit_server2.yaml 到临时目录，构造八rank标定报告；检查回写后注释与其余配置
+复制固定 dppo_contract.yaml 测试夹具 到临时目录，构造八rank标定报告；检查回写后注释与其余配置
 逐字保留、样本按rank顺序拼接、kernel摘要能通过训练入口的同一校验，且rank间kernel不一致
 时在写文件前拒绝。不运行Isaac、不访问GPU。
 """
@@ -17,7 +17,7 @@ from gem.closedloop.dppo.training import _validate_calibrated_execution
 from tools.update_deployment_profile import update
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG = ROOT / 'configs/closedloop/stage2_credit_server2.yaml'
+CONFIG = ROOT / 'tests/closedloop/fixtures/dppo_contract.yaml'
 
 
 def _report(profile, kernel):

@@ -1,9 +1,9 @@
-# 两秒音乐、一秒动作的正式八卡配置：保留60帧音乐上下文，输出30帧/30Hz运动。
-# 数据流为最新本体历史/已知前缀/两秒音乐 -> 十步扩散 -> 一秒GMT参考；
-# 仅30帧运动抽扩散噪声并计概率，后30位置提供音乐上下文，不提交额外运动。
-# 4步冻结+5个随机步骤微调+1步冻结确定性收尾；完整PPO目标只诊断、不参与接受。
-# 沿用放宽50倍的联合KL、最高候选LR3e-6及BC关闭，其余奖励/物理/折扣保持。
-# 绑定同核两秒音乐的真实64样本部署标定；新目录从s595000重新采集和校准Critic。
+# 仅用于CPU算法契约回归的固定夹具；不是训练或部署入口。
+# 禁止将本文件传入训练启动器；服务器资产路径只是测试身份字段，不访问真实资产。
+# 服务器2正式延迟信用分配：用户明确授权最多2000个已接受迭代，每100轮保留完整checkpoint。
+# 8秒共享世界、lambda=.98、gamma=.99/0.5秒、按4096条链分批Clipped DPPO更新，统一LR=3e-7。
+# 四步KL是实际更新保护，不宣称完整歌曲收益已经通过；源码清理后新运行重新进行MC。
+# MC覆盖训练reset分布；固定32任务完整歌曲仍从开头评估。奖励只按真实执行归属。
 diagnostics:
   record_original_threshold_crossings: true
   reward_substeps: true
@@ -19,7 +19,7 @@ environment:
   reset_randomization: false
   terrain: plane
 model:
-  ddim_steps: 10
+  ddim_steps: 20
   guidance_scale: 2.5
   history_steps: 50
 paths:
@@ -37,12 +37,6 @@ paths:
   kinematics: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/bumi_kinematics_robot_retargeter_fe934_v1.json
   stats: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/qpos30_train_stats.json
 runtime:
-  generation_schedule:
-    schema: genmo.continuous_rolling.v1
-    mode: continuous_rolling
-    decision_grid_ticks: 60
-    reference_contract: gmt.executed_prefix_replaceable_lookahead.v1
-    minimum_prefix_frames: 6
   allow_shared_gpu: false
   backend: gpu_vectorized.v1
   evidence_level: training
@@ -51,7 +45,7 @@ runtime:
   gmt_inference_contract: gmt.native_checkpoint_frozen_batch.v1
   headless: true
   isaaclab_root: /data0/user/liwei/closedloop_stage8_runtime/IsaacLab
-  noise_namespace: stage2_dppo_rewardstd_nobc_noyaw_server2_20261021
+  noise_namespace: stage2_credit8_clipped_dppo_tracking90v2_20261019
   num_envs: 128
   physics_device: cuda:0
   prefix_deadline_contract: available_reference_deadline_cap.v1
@@ -71,10 +65,7 @@ runtime:
   vector_generation_contract: genmo.vector_generation_pipeline.v1
   vector_reward_contract: stage2.gmt8_gpu_reward.v1
   worker_start_timeout_s: 600
-  record_compact_execution_provenance: true
 stage10:
-  actor_optimization:
-    schema: genmo.stage2.full_chain_actor.v1
   assets:
     checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
     gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
@@ -82,14 +73,14 @@ stage10:
     kinematics: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
     stats: c7c0acb0e7a38797adb38ce0be41ee72820e34daed4e780275c64fb55c3e5326
   bc_gradient:
-    initial: 0.0
+    initial: 0.01
     max_change: 2.0
-    maximum: 0.0
-    minimum: 0.0
-    mode: fixed
+    maximum: 10000.0
+    minimum: 0.0001
+    mode: bounded_ratio
     smoothing: 0.9
     target_ratio: 0.1
-    initialize_from_gradient: false
+    initialize_from_gradient: true
   checks:
     actor_diagnostics_every: 100
     full_fingerprint_every: 100
@@ -122,9 +113,6 @@ stage10:
       - 31415
       every_actor_iterations: 100
       start_distribution: match_training_reset.v1
-      envs_per_rank: 32
-      enforce_quality_gate: false
-      retain_dataset: true
     dimension: 256
     epochs: 32
     global_batch: 2048
@@ -148,7 +136,7 @@ stage10:
     random_start: true
     sampling_contract: rank_shared_time_bins.v1
     time_bin_seconds: 1.0
-    standing_start_probability: 0.0
+    standing_start_probability: 0.2
     initialization: paired_motion_warmup.v1
     require_audio: true
     source_probabilities:
@@ -165,7 +153,7 @@ stage10:
     envs_per_rank: 4
     episode_seconds: null
     every_control_steps: 100000000
-    persistent_world: false
+    persistent_world: true
     samples_per_source:
       AIST++: 2
       AIOZ-GDANCE: 4
@@ -175,38 +163,31 @@ stage10:
     - 42
     - 1729
     selection_seed: 42
-    split: train
+    split: val
     start_mode: beginning
     unique_music: true
-    every_actor_iterations: 20
-    original_split: train
-    purpose: training_progress
-    selection_policy: reward_only
+    every_actor_iterations: 100
   generation_horizon:
-    frames: 30
     fps: 30
-    music_frames: 60
-    context_contract: music_only_tail.v1
+    frames: 60
   kl:
-    calibration:
-      optimization_sha256: auto
-      scope: five_trainable_steps_only
-      status: candidate_requires_joint_calibration
-    chain_joint_max: 100.0
-    chain_joint_mean: 10.0
-    chain_joint_p95: 30.0
-    chain_joint_p99: 45.0
-    maximum_active_clip: 0.95
-    maximum_step_mean_coordinate: null
-    mean_coordinate: null
+    maximum_step_mean_coordinate: 0.0018
+    mean_coordinate: 0.0009
     mean_joint: null
-    p95_coordinate: null
-    reduction: chain_joint
+    p95_coordinate: 0.0021
+    reduction: free_coordinate_mean
+    calibration:
+      status: not_physically_validated
+      scope: four_trainable_steps_only
+      optimization_sha256: 483c63a064f72b424647271738fc52591038754301a880c45ddefaea94eb0750
+    chain_joint_mean: null
+    chain_joint_p95: null
+    chain_joint_max: null
   limits:
     accepted_iterations: 2000
     control_steps: 1100000000
     generations: 40000000
-    optimizer_attempts: 200000
+    optimizer_attempts: 18000
     physics_steps: 4400000000
   performance:
     bc_batch_forward: true
@@ -214,13 +195,12 @@ stage10:
     profiler_every: 25
     tensor_cache_max_bytes: 4294967296
   physical_episode:
-    safety_limit_seconds: 20.0
-    termination: music_end_or_physical_failure_or_time_limit
-    time_limit_bootstrap: true
+    safety_limit_seconds: null
+    termination: music_end_or_physical_failure
   ppo_rollout:
     collection_contract: shared_world_sim_time.v1
-    credit_contract: genmo.reference_plan_credit.actual_clock.v1
     world_seconds: 8.0
+    credit_contract: genmo.reference_plan_credit.actual_clock.v1
   precision:
     attention: sdpa_math
     compile: false
@@ -285,6 +265,15 @@ stage10:
     track_weight: 2.5
     tracking:
       objective: gmt.motion_tracking.eight_terms.v1
+      std:
+        anchor_pos: 0.3
+        anchor_ori: 0.4
+        body_pos: 0.3
+        body_ori: 0.4
+        body_lin_vel: 1.0
+        body_ang_vel: 3.14
+        foot_height: 0.07
+        leg_joint_pos: 0.25
       weights:
         anchor_pos: 0.07936507936507936
         anchor_ori: 0.07936507936507936
@@ -294,29 +283,11 @@ stage10:
         body_ang_vel: 0.15873015873015872
         foot_height: 0.126984126984127
         leg_joint_pos: 0.07936507936507936
-      source_std:
-        anchor_pos: 0.3
-        anchor_ori: 0.4
-        body_pos: 0.3
-        body_ori: 0.4
-        body_lin_vel: 1.0
-        body_ang_vel: 3.14
-        foot_height: 0.07
-        leg_joint_pos: 0.25
-      reward_std:
-        anchor_pos: 0.3
-        anchor_ori: 0.4
-        body_pos: 0.15
-        body_ori: 0.2
-        body_lin_vel: 1.0
-        body_ang_vel: 3.14
-        foot_height: 0.07
-        leg_joint_pos: 0.25
-    version: stage2.gmt8_reward_root_std.v4
+    version: stage2.gmt8_reference_limits.v1
   run_control:
     max_training_iterations: 200
   scale:
-    actor_minibatch_chains: 8192
+    actor_minibatch_chains: 4096
   seed: 42
   storage:
     checkpoint_interval_seconds: 1800
@@ -328,74 +299,86 @@ stage10:
     mode: daily
     retain_best_and_evaluated: true
     tensor_cache_max_bytes: 4294967296
-    checkpoint_interval_iterations: 1
+    checkpoint_interval_iterations: 20
   training:
-    actor_lr: 3.0e-06
-    actor_lr_control: joint_kl_backtracking
-    actor_objective: full_chain_clipped_ppo
-    actor_trainable_scope: all
-    audit_full_rollout_objective: true
-    bc_enabled: false
-    bc_min_global_batch: 256
+    actor_lr: 3.0e-07
+    actor_lr_control: adaptive_step_kl
+    actor_lr_adaptation:
+      minimum: 5.0e-08
+      maximum: 1.0e-06
+      decrease_factor: 0.6666666666666666
+      increase_factor: 1.2
+      low_utilization: 0.4
+      high_utilization: 0.8
+      low_rounds: 3
     bc_prefix:
       max_frames: 30
       min_frames: 6
       zero_probability: 0.15
-    bc_samples_per_rollout: 0
-    bc_weight: 0.0
+    bc_samples_per_rollout: 1024
+    bc_weight: 0.01
     cfg_batch: true
     critic_grad_clip_norm: 1.0
     critic_lr: 0.0001
     denoising_microbatch: 128
-    denoising_steps: 10
+    denoising_steps: 20
     eta: 0.1
     execution_mode: latency
-    frozen_prefix_steps: 4
-    gamma_denoising: 1.0
-    gamma_upper: 0.95
+    frozen_prefix_steps: 15
+    gamma_denoising: 0.99
+    gamma_upper: 0.99
     grad_clip_norm: 1.0
     gradient_snr_diagnostic: false
     guidance_scale: 2.5
     kl_microbatch: 128
-    kl_rejection: rollback_abort
-    kl_soft_stop_chain_joint: 5.0
+    kl_rejection: retain_accepted_steps
     lambda_upper: 0.98
     latency_budget_s: 0.5
     log_probability_reduction: joint_sum
-    max_active_clip_fraction: 0.95
-    objective_logprob_reduction: joint_sum
-    ppo_clip: 0.1
+    objective_logprob_reduction: free_coordinate_mean
+    ppo_clip: 0.01
     ppo_epochs: 1
-    ppo_step_strategy: intermediate5
-    ppo_steps_per_chain: 5
+    ppo_step_strategy: intermediate4
+    ppo_steps_per_chain: 4
     std_floor: 0.001
     std_schedule:
     - 0.001
     - 0.001
     - 0.001
     - 0.001
-    - 0.02
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
     - 0.04
     - 0.06
     - 0.08
     - 0.1
     - 0.0
-    trust_region:
-      growth: 1.25
-      margin: 0.8
-      max_attempts: 10
-      maximum_lr: 3.0e-06
-      minimum_trial_lr_ratio: 0.001953125
     x0_diagnostic_every: 0
-  version: genmo.closedloop.stage2.full_chain_joint.v1
+    actor_objective: clipped_dppo
+    # 每步完整四步KL回溯；只撤销当前步，跨轮缓慢调整统一学习率。
+    optimizer_backtracking:
+      max_attempts: 3
+      factor: 0.5
+  version: genmo.closedloop.stage2.continuous_tracking.v2
+  actor_optimization:
+    schema: genmo.stage2.continuous_actor.v3
 termination:
   end_effector_relative_height_error_m: 0.15
   non_yaw_orientation_error_rad: 0.6
   orientation_mode: separated_yaw
   root_height_error_m: 0.2
-  yaw_error_rad: null
+  yaw_error_rad: 1.5
 timing:
-  calibration_reservation_seconds: 0.2
+  calibration_reservation_seconds: 0.5
   calibration_samples: 8
   calibration_warmup: 2
   clock_hz: 600
@@ -403,77 +386,76 @@ timing:
   decision_ticks: 300
   deployment_profile:
     schema: genmo.deployment_delay_profile.v1
-    behavior_kernel_sha256: 0c4d652291421c170972016f18cfb0978e66efa583780e5f1f4013893c700a33
     target: single_robot_single_request
-    prefix_budget_seconds: 0.2
     samples_seconds:
-    - 0.1316512180492282
-    - 0.13137125875800848
-    - 0.13139500748366117
-    - 0.13172060810029507
-    - 0.13107301946729422
-    - 0.13102191966027021
-    - 0.13142058718949556
-    - 0.13282746635377407
-    - 0.13900605402886868
-    - 0.14155893493443727
-    - 0.1396692581474781
-    - 0.13875600509345531
-    - 0.1382955890148878
-    - 0.13838126510381699
-    - 0.13941868767142296
-    - 0.13925209175795317
-    - 0.1375012043863535
-    - 0.1385781466960907
-    - 0.13923203200101852
-    - 0.13794444128870964
-    - 0.13952737115323544
-    - 0.13910041190683842
-    - 0.14095591753721237
-    - 0.1413035448640585
-    - 0.1352477204054594
-    - 0.13480981439352036
-    - 0.13790070079267025
-    - 0.13732067588716745
-    - 0.1358464751392603
-    - 0.13543913699686527
-    - 0.13607297278940678
-    - 0.1368940155953169
-    - 0.13449753634631634
-    - 0.134177690371871
-    - 0.13706940785050392
-    - 0.13338537700474262
-    - 0.13321850635111332
-    - 0.13370702136307955
-    - 0.13406379520893097
-    - 0.13381666876375675
-    - 0.13949844241142273
-    - 0.139666261151433
-    - 0.13963656034320593
-    - 0.13998287729918957
-    - 0.13950193766504526
-    - 0.1396363377571106
-    - 0.1395557662472129
-    - 0.13942585792392492
-    - 0.13838797807693481
-    - 0.13771660439670086
-    - 0.1377304643392563
-    - 0.1327694682404399
-    - 0.1315325377508998
-    - 0.1306316638365388
-    - 0.12990054674446583
-    - 0.1306588901206851
-    - 0.13373718969523907
-    - 0.13320623617619276
-    - 0.1348082246258855
-    - 0.13368407357484102
-    - 0.13410143926739693
-    - 0.13414840772747993
-    - 0.1359248012304306
-    - 0.1334443399682641
+    - 0.26094565354287624
+    - 0.26231176778674126
+    - 0.2600226001814008
+    - 0.26059039682149887
+    - 0.26057666074484587
+    - 0.2627587616443634
+    - 0.26163737941533327
+    - 0.2597906142473221
+    - 0.2520998353138566
+    - 0.2520544854924083
+    - 0.25204230565577745
+    - 0.2517268331721425
+    - 0.2520964555442333
+    - 0.25143239088356495
+    - 0.25154851470142603
+    - 0.25218326319009066
+    - 0.24845256097614765
+    - 0.2500178003683686
+    - 0.24826053343713284
+    - 0.24780398327857256
+    - 0.248760805465281
+    - 0.24897975008934736
+    - 0.2489914484322071
+    - 0.25190886948257685
+    - 0.27311278134584427
+    - 0.273892636410892
+    - 0.27206969913095236
+    - 0.27480508107692003
+    - 0.2728550862520933
+    - 0.2709999792277813
+    - 0.27178404573351145
+    - 0.27299065329134464
+    - 0.25192431919276714
+    - 0.2516257343813777
+    - 0.2537991423159838
+    - 0.2512370105832815
+    - 0.25472880713641644
+    - 0.2508502583950758
+    - 0.2511930810287595
+    - 0.2511252835392952
+    - 0.26179016660898924
+    - 0.2621700195595622
+    - 0.2623240975663066
+    - 0.26110984198749065
+    - 0.26103815250098705
+    - 0.2593208830803633
+    - 0.25929596181958914
+    - 0.2595410095527768
+    - 0.2567042289301753
+    - 0.2549970904365182
+    - 0.24964015185832977
+    - 0.2499112132936716
+    - 0.2494520414620638
+    - 0.25803317688405514
+    - 0.2528076199814677
+    - 0.24938847590237856
+    - 0.2645701877772808
+    - 0.26202437467873096
+    - 0.2610095404088497
+    - 0.26176923885941505
+    - 0.2627083035185933
+    - 0.2625328730791807
+    - 0.2608034163713455
+    - 0.26525696739554405
+    prefix_budget_seconds: 0.32
     provenance:
-    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_ddim10_short_window_20261023/calibration30_v4/deployment_calibration.json
-      sha256: 10f3bb0693490192fd8dad469ac2b476aabe1bf44c711dd3f4059d6052b92afc
+    - path: /data1/user/liwei/GENMO_outputs/closedloop_stage10/stage2_asymmetric_20261015/deployment_pass2/deployment_calibration.json
+      sha256: 6b64e6b882610b1a0e585190952d4256e25f91058e1885174393ce3422c7cac7
     measured_assets:
       checkpoint: 51b522fbdeb0ec289e5ffc24e2fccca9888df90495f57f96714c1bb43c05f8e2
       gmt_checkpoint: 79d1a99e54db42342927ec178329dab88772bafbc05df1b0dbe310bc6dd0b319
@@ -498,6 +480,7 @@ timing:
       network_rows: actual_batch_cfg_expanded
       torch_version: 2.7.1+cu128
       compiler: null
+    behavior_kernel_sha256: 9e2a93cf3626748eb6d8cc38d00a02600861148c4cc150bdaeae641a70bd7926
   latency_guard_s: 0.04
   lookahead_control_steps: 10
   min_prefix_frames: 12

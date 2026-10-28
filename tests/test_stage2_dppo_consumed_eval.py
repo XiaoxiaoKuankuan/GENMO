@@ -14,8 +14,16 @@ import numpy as np
 from tools.evaluate_stage2_dppo_consumed import validate_arguments
 from tools.report_stage2_dppo_suspicions import current_consumption_delta
 
-FORMAL=Path('configs/closedloop/stage2_dppo_server2_formal.yaml')
-EVALUATION=Path('configs/closedloop/stage2_dppo_server2_diagnostic_eval.yaml')
+FORMAL = EVALUATION = None
+
+
+@pytest.fixture(autouse=True)
+def evaluation_configs(tmp_path, monkeypatch):
+    formal, evaluation = tmp_path/'formal.yaml', tmp_path/'evaluation.yaml'
+    formal.write_text(yaml.safe_dump({'stage10': {'actor_initialization': {'mode': 'actor_adam_new_reward'}}}))
+    evaluation.write_text(yaml.safe_dump({'stage10': {'actor_initialization': None}}))
+    monkeypatch.setitem(globals(), 'FORMAL', formal)
+    monkeypatch.setitem(globals(), 'EVALUATION', evaluation)
 
 
 def test_evaluation_configuration_changes_only_parent_initialization():

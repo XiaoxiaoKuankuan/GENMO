@@ -28,24 +28,6 @@ from tests.closedloop.test_stage1_actor import actor_factory
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_formal_original_dppo_and_new_reward_configuration():
-    c = configuration(ROOT/'configs/closedloop/stage2_dppo_server2_formal.yaml')
-    s, t = c['stage10'], c['stage9']
-    assert s['derived']['planned_actor_steps'] == 4
-    assert t['actor_objective'] == 'clipped_dppo'
-    assert t['objective_logprob_reduction'] == 'free_coordinate_mean'
-    assert not t['bc_enabled'] and t['bc_batch'] == t['bc_samples_per_rollout'] == t['bc_weight'] == 0
-    assert t['reward']['tracking']['source_std']['body_pos'] == .3
-    assert t['reward']['tracking']['reward_std']['body_pos'] == .15
-    assert c['termination']['yaw_error_rad'] is None
-    assert c['termination']['non_yaw_orientation_error_rad'] == .6
-    assert s['evaluation']['split'] == s['evaluation']['original_split'] == 'train'
-    assert s['evaluation']['selection_policy'] == 'reward_only'
-    assert not s['critic']['complete_mc']['enforce_quality_gate']
-    assert s['run_control']['max_training_iterations'] == 200
-    old = configuration(ROOT/'configs/closedloop/stage2_credit_server2.yaml')
-    assert old['stage9']['reward']['version'].endswith('.v1')
-    assert old['stage9']['bc_batch'] == 256
 
 
 def test_disabled_bc_real_four_step_ppo_has_no_supervision(actor_factory, tmp_path):
@@ -77,7 +59,7 @@ def test_parent_actor_adam_preserved_and_bad_asset_rejected(tmp_path):
     actor = torch.nn.Linear(2, 1)
     opt = torch.optim.AdamW(actor.parameters(), lr=3e-7, weight_decay=0.)
     actor(torch.ones(1, 2)).sum().backward(); opt.step(); opt.zero_grad(set_to_none=True)
-    cfg = configuration(ROOT/'configs/closedloop/stage2_dppo_server2_formal.yaml')
+    cfg = {'stage9': {'actor_lr_adaptation': {'minimum': 5e-08, 'maximum': 1e-06, 'decrease_factor': 0.6666666666666666, 'increase_factor': 1.2, 'low_utilization': 0.4, 'high_utilization': 0.8, 'low_rounds': 3}}}
     lr = ActorLRController(3e-7, cfg['stage9']['actor_lr_adaptation'])
     assets, kernel = {'actor': 'fixture'}, {'kernel': '15+4+1'}
     state = dict(iteration=22, rollouts_completed=22, actor_updates=87, policy_version=22)

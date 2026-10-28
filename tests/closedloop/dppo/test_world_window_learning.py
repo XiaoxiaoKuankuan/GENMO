@@ -25,21 +25,6 @@ def test_empty_local_world_buffer_has_no_virtual_transition_or_critic_call():
     cache.close();buffer.clear()
 
 
-def test_current_config_accepts_nondivisible_bc_total_without_environment_quota(tmp_path):
-    root=Path(__file__).resolve().parents[3]
-    config=yaml.safe_load((root/'configs/closedloop/stage2_ddim10_last5_motion30_music30_klrelaxed_server2.yaml').read_text())
-    config['stage10']['training']['bc_enabled']=True
-    config['stage10']['training']['bc_samples_per_rollout']=517
-    # 单个优化步确保517不被每步BC下限扩成多个批次；检验非整除配额而非关闭BC。
-    config['stage10']['scale']['actor_minibatch_chains']=81920
-    config['stage10']['kl']['calibration']['optimization_sha256']='auto'
-    path=tmp_path/'candidate.yaml';path.write_text(yaml.safe_dump(config))
-    resolved=configuration(path)
-    assert 'decisions_per_environment' not in resolved['stage10']['scale']
-    assert resolved['stage10']['training']['bc_samples_per_rollout']==517
-    config['stage10']['scale']['decisions_per_environment']=8
-    path.write_text(yaml.safe_dump(config))
-    with pytest.raises(ValueError,match='quotas'):configuration(path)
 
 
 

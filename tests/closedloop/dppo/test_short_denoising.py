@@ -121,15 +121,6 @@ def test_aligned_one_second_enters_transformer_as_thirty_positions(actor_factory
     adapted=policy.actor.adapt_conditions(c)
     mask=adapted['known_mask']
     torch.testing.assert_close(trace['chain'][:,-1][mask],adapted['known_x'][mask],rtol=0,atol=0)
-    from gem.closedloop.dppo.training_config import configuration
-    from gem.closedloop.dppo.actor_optimization import optimization_binding
-    root=Path(__file__).resolve().parents[3]
-    config=configuration(root/'configs/closedloop/stage2_ddim10_last5_motion30_music30_klrelaxed_server2.yaml')
-    stage=config['stage10'];t=stage['training']
-    assert t['music_context_frames']==t['generation_frames']==30
-    assert stage['kl']['chain_joint_mean']==10. and t['kl_soft_stop_chain_joint']==5.
-    assert optimization_binding(stage)['candidate_acceptance']=='finite_KL_only_first_qualified.v1'
-    assert set(t['trust_region'])=={'maximum_lr','growth','margin','max_attempts','minimum_trial_lr_ratio'}
 
 
 @pytest.mark.parametrize('prefix',[9,15])
@@ -176,15 +167,3 @@ def test_production_ratio_check_distinguishes_finite_range_from_corruption(logra
         ppo_surrogate(statistics,torch.tensor([1.,-1.]),clip=.1)
     assert type(error.value) is expected
     torch.testing.assert_close(statistics['joint_log_ratio'],original,equal_nan=True)
-
-
-@pytest.mark.parametrize('frames',[15,30,60])
-def test_new_config_and_old_config_remain_distinct(frames):
-    from gem.closedloop.dppo.training_config import configuration
-    root=Path(__file__).resolve().parents[3]
-    c=configuration(root/f'configs/closedloop/stage2_ddim10_last5_motion{frames}_server2.yaml')
-    assert c['stage10']['training']['denoising_steps']==10
-    assert c['stage10']['training']['ppo_steps_per_chain']==5
-    assert c['stage10']['training']['actor_lr']==3e-6
-    assert c['stage10']['generation_horizon']['frames']==frames
-    assert configuration(root/'configs/closedloop/stage2_continuous_train10_lr10x_server2.yaml')['model']['ddim_steps']==20
