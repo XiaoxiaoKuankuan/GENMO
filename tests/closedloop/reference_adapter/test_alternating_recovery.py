@@ -171,6 +171,35 @@ def test_old_checkpoint_extra_fields_keep_counters_and_add_only_metadata():
     assert 'zero_evaluations' not in old
 
 
+def test_full_validation_best_includes_real_zero_checkpoint_without_relabeling_trained_weights():
+    from gem.closedloop.reference_adapter.alternating_entry import select_validation_best
+    zero = dict(completion_rate=1., mean_root_position_rmse_m=.1,
+                mean_full_horizon_tracking=.09, mean_jerk_rms=700., constraint_failure_count=0)
+    pointer = dict(path='/fixture/full_000000_zero_update.pt', adapter_updates=0)
+    worse = dict(zero, mean_root_position_rmse_m=.12)
+    best = select_validation_best(None, zero, worse, pointer, adapter_updates=20, scope='full_song')
+    assert best['adapter_updates'] == 0 and best['path'] == pointer['path']
+    assert best['model_identity'] == 'initial_zero_Adapter' and best['checkpoint_available']
+    better = dict(zero, mean_root_position_rmse_m=.09)
+    updated = select_validation_best(best, zero, better, pointer, adapter_updates=40, scope='full_song')
+    assert updated['adapter_updates'] == 40 and updated['model_identity'] == 'trained_Adapter'
+    assert not updated['checkpoint_available'] and 'path' not in updated
+    failed = dict(better, constraint_failure_count=1)
+    assert select_validation_best(best, zero, failed, pointer, adapter_updates=40, scope='full_song') == best
+    # 历史恢复缺初始文件时只保留零模型更优的结论，不伪造训练模型是零模型。
+    missing = select_validation_best(None, zero, worse, None, adapter_updates=20, scope='full_song')
+    assert missing['adapter_updates'] == 0 and missing['path'] is None and not missing['checkpoint_available']
+
+
+def test_zero_checkpoint_survives_latest_two_and_different_validation_best():
+    from gem.closedloop.reference_adapter.alternating_entry import checkpoint_keep_paths
+    paths = [f'/fixture/full_{n:06d}.pt' for n in (0, 5, 10, 20, 30, 40, 50)]
+    extra = dict(completed_checkpoints=paths, zero_checkpoint={'path': paths[0]},
+                 best={'path': paths[3]})
+    assert checkpoint_keep_paths(extra) == {paths[0], paths[3], paths[-2], paths[-1]}
+    assert paths[1] not in checkpoint_keep_paths(extra)
+
+
 def test_complete_checkpoint_preserves_new_rng_replay_and_disabled_critic(system, tmp_path, monkeypatch):
     from gem.closedloop.reference_adapter.vector_checkpoint import save_vector, load_vector
     from gem.closedloop.reference_adapter.vector_learning import TangentReplay

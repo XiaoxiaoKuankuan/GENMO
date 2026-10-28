@@ -9,11 +9,13 @@ H16或H32及动作探索消融；未经真实回报校准的Critic暂不参与�
 20更新起执行无探索整歌validation和evaluation，只有validation选择best。评价下降只
 报告。运行异常保存三个网络/优化器、Replay、RNG及约束现场；恢复保留学习状态，
 真实求解器从新episode开始，不伪装隐藏物理状态续接。完整checkpoint保留最近两份
-及best，所有编号小模型和报告永久保留，避免八卡完整Replay耗尽服务器磁盘。
+及best和真实零更新初始模型，所有编号小模型和报告永久保留。零Adapter也是best
+候选，不能把比零Adapter退化的首个整歌评价模型标为最佳。
 """
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -27,10 +29,46 @@ def normalize_extra_state(value=None):
     """补齐新增运行元数据，保留旧checkpoint的模型/优化器/计数与历史评价原值。"""
     result = dict(value or {})
     defaults = dict(step_acc=0., best=None, best_short=None, evaluations=[], completed_checkpoints=[],
-                    precision_scales=None, zero_evaluations={}, consecutive_projection_rejections=0)
+                    precision_scales=None, zero_evaluations={}, zero_checkpoint=None,
+                    consecutive_projection_rejections=0)
     for name, default in defaults.items():
         result.setdefault(name, default)
     return result
+
+
+def validation_ranking(report):
+    """只对有限且没有参考拒绝的同一评价预算比较，评价歌曲不能进入best排序。"""
+    values = [report.get(k) for k in ('completion_rate', 'mean_root_position_rmse_m',
+                                     'mean_full_horizon_tracking', 'mean_jerk_rms')]
+    if report.get('constraint_failure_count', 0) or any(v is None or not math.isfinite(v) for v in values):
+        return None
+    return values[0], -values[1], values[2], -values[3]
+
+
+def select_validation_best(previous, zero, candidate, zero_checkpoint, *, adapter_updates, scope):
+    """先将真实零模型纳入同预算候选；相同分数保留零模型或此前best，不误标当前权重。"""
+    best = previous
+    zero_rank = validation_ranking(zero)
+    if zero_rank is not None and (best is None or zero_rank >= tuple(best['ranking'])):
+        best = dict(adapter_updates=0, ranking=zero_rank, selection_split='validation_only',
+                    evaluation_scope=scope, model_identity='initial_zero_Adapter',
+                    checkpoint_available=zero_checkpoint is not None,
+                    path=zero_checkpoint['path'] if zero_checkpoint else None)
+    ranking = validation_ranking(candidate)
+    if adapter_updates > 0 and ranking is not None and (best is None or ranking > tuple(best['ranking'])):
+        best = dict(adapter_updates=adapter_updates, ranking=ranking,
+                    selection_split='validation_only', evaluation_scope=scope,
+                    model_identity='trained_Adapter', checkpoint_available=False)
+    return best
+
+
+def checkpoint_keep_paths(extra):
+    """零更新文件始终保留；最近两份和validation best另行保留，外部resume从不删除。"""
+    keep = set(extra['completed_checkpoints'][-2:])
+    for candidate in (extra.get('best'), extra.get('zero_checkpoint')):
+        if candidate and candidate.get('path'):
+            keep.add(candidate['path'])
+    return keep
 
 
 def main():
@@ -88,7 +126,7 @@ def main():
         initialization='full_resume_same_experiment' if args.resume else 'zero_Adapter_original_pretrained_WM_no_old_policy', communication='none',
         acceptance='finite_Adam_step_not_a_physical_improvement_certificate',
         critic_status='disabled_unqualified_real_MC_anchor_and_independent_calibration_required',
-        full_checkpoint_retention='latest_two_and_validation_best_all_numbered_weights_kept'))
+        full_checkpoint_retention='initial_zero_latest_two_and_validation_best_all_numbered_weights_kept'))
     (output/'pid').write_text(str(os.getpid())+'\n')
     engine = critic = collector = replay = tangent = None
     optimizers = {}
@@ -110,8 +148,20 @@ def main():
         publish('saving_complete_checkpoint')
         path = output/f'full_{state["accepted_updates"]:06d}_{label}_{time.time_ns()}.pt'
         extra['completed_checkpoints'].append(str(path))
-        if extra['best'] is not None and extra['best']['adapter_updates'] == state['accepted_updates']:
+        initial_zero = label == 'zero_update' and state['accepted_updates'] == 0 and extra['zero_checkpoint'] is None
+        if initial_zero:
+            # 先写进完整checkpoint本身，使后续restore仍能找到原始零权重文件。
+            extra['zero_checkpoint'] = dict(path=str(path), adapter_updates=0, wm_updates=state['wm_updates'],
+                physics_resume='new_episode_with_preserved_replay', adapter_sha256=parameter_identity(control.adapter))
+            for key in ('best', 'best_short'):
+                if extra[key] and extra[key].get('model_identity') == 'initial_zero_Adapter':
+                    extra[key].update(path=str(path), checkpoint_available=True)
+        current_is_best = (extra['best'] is not None and
+            extra['best']['adapter_updates'] == state['accepted_updates'] and
+            extra['best'].get('model_identity') != 'initial_zero_Adapter')
+        if current_is_best:
             extra['best']['path'] = str(path)
+            extra['best']['checkpoint_available'] = True
         extra['action_noise_rng'] = collector.action_generator.get_state()
         extra['projection_recovery_events'] = collector.projection_recovery_events
         save_vector(path, engine, critic, optimizers, replay, tangent, collector, state.copy(), cfg,
@@ -119,12 +169,15 @@ def main():
         pointer = dict(path=str(path), adapter_updates=state['accepted_updates'], wm_updates=state['wm_updates'],
                        bytes=path.stat().st_size, physics_resume='new_episode_with_preserved_replay')
         json_write(output/'latest_checkpoint.json', pointer, replace=True)
-        if extra['best'] is not None and extra['best']['adapter_updates'] == state['accepted_updates']:
+        if initial_zero:
+            extra['zero_checkpoint'].update(bytes=path.stat().st_size)
+            json_write(output/'zero_checkpoint.json', extra['zero_checkpoint'])
+        if current_is_best:
             json_write(output/'best_checkpoint.json', dict(pointer, validation=extra['best']), replace=True)
+        elif initial_zero and extra['best']:
+            json_write(output/'best_checkpoint.json', dict(extra['zero_checkpoint'], validation=extra['best']), replace=True)
         # 仅清理本运行自己已原子保存、且有新完整替代的文件；不删除旧实验/外部resume。
-        keep = set(extra['completed_checkpoints'][-2:])
-        if extra['best'] and extra['best'].get('path'):
-            keep.add(extra['best']['path'])
+        keep = checkpoint_keep_paths(extra)
         for old in list(extra['completed_checkpoints']):
             old_path = Path(old)
             if old not in keep and old_path.parent == output and old_path.name.startswith('full_'):
@@ -195,16 +248,17 @@ def main():
                 report['paired_zero'] = paired_comparison(zero, report)
                 json_write(output/f'{split}_{state["accepted_updates"]:06d}.json', report)
                 reports[split] = report
-            val = reports['validation']
-            rankable = (val.get('constraint_failure_count', 0) == 0 and
-                        val['mean_root_position_rmse_m'] is not None and val['mean_jerk_rms'] is not None)
-            ranking = ((val['completion_rate'], -val['mean_root_position_rmse_m'],
-                       val['mean_full_horizon_tracking'], -val['mean_jerk_rms']) if rankable else None)
             # 前缀评价不能与整歌混排；best_checkpoint仅由完整歌曲validation选择。
             key = 'best' if full else 'best_short'
-            if rankable and (extra[key] is None or ranking > tuple(extra[key]['ranking'])):
-                extra[key] = dict(adapter_updates=state['accepted_updates'], ranking=ranking,
-                                 selection_split='validation_only', evaluation_scope=scope)
+            extra[key] = select_validation_best(extra[key], extra['zero_evaluations']['validation_'+scope],
+                reports['validation'], extra['zero_checkpoint'], adapter_updates=state['accepted_updates'], scope=scope)
+            if full and extra['best'] and extra['best'].get('model_identity') == 'initial_zero_Adapter':
+                if extra['zero_checkpoint'] is not None:
+                    pointer = dict(extra['zero_checkpoint'], validation=extra['best'])
+                    json_write(output/'best_checkpoint.json', pointer, replace=True)
+                else:
+                    # 历史恢复可能没有保存初始模型；保留评价结论，绝不把当前权重伪称零模型。
+                    extra['best_unavailable_reason'] = 'legacy_resume_has_no_original_zero_checkpoint'
             extra['evaluations'].append(state['accepted_updates'])
         finally:
             random.setstate(rng[0]); np.random.set_state(rng[1]); torch.set_rng_state(rng[2])
@@ -283,7 +337,7 @@ def main():
                     publish('zero_update_fixed_physics')
                     summary = evaluate()
                     print(json.dumps(dict(adapter_updates=0, physical_evaluation=summary), ensure_ascii=False), flush=True)
-                    checkpoint('zero_update')
+                checkpoint('zero_update')
                 publish('initial_real_collection')
                 collect(settings['warmup_vector_steps'])
             torch.cuda.reset_peak_memory_stats()
