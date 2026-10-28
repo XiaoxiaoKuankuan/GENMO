@@ -141,6 +141,30 @@ def training_rows(path):
     return rows
 
 
+def summarize_evaluation(report, path, split):
+    """保留实际评价合同和逐歌配对原值，不将256步前缀当作整歌效果。"""
+    episodes = report.get('episodes', [])
+    means = {}
+    for name in METRICS:
+        values = [metric(row, name) for row in episodes]
+        valid = [value for value in values if value is not None]
+        means[name] = dict(mean=statistics.mean(valid) if valid else None,
+                          measured_songs=len(valid), total_songs=len(episodes))
+    return dict(path=str(path), split=split,
+        updates=report.get('adapter_updates'), zero=report.get('zero_adapter'),
+        full_song=report.get('full_song_evaluation'), evaluation_scope=report.get('evaluation_scope'),
+        max_steps=report.get('max_steps'), measured_transitions=report.get('measured_transitions'),
+        total_scene_physics_transitions=report.get('physics_transitions'),
+        measured_environments=report.get('measured_evaluation_envs'), scene_environments=report.get('num_envs'),
+        completion_rate=report.get('completion_rate'), tracking=report.get('mean_full_horizon_tracking'),
+        constraint_failure_count=report.get('constraint_failure_count'),
+        constraint_failures=report.get('constraint_failures'),
+        metric_means=means, episodes=episodes,
+        paired_difference=report.get('paired_zero_difference'), paired_zero=report.get('paired_zero'),
+        zero_baseline_key=report.get('zero_baseline_key'), wall_seconds=report.get('wall_seconds'),
+        evidence=report.get('evidence'))
+
+
 def formal_status(root):
     launch = read(root/'launch_manifest.json')
     if launch is None:
@@ -157,12 +181,7 @@ def formal_status(root):
         for split in ('validation', 'evaluation'):
             for path in sorted(output.glob(split+'_*.json')):
                 report = read(path)
-                evaluation.append(dict(path=str(path), split=split,
-                    updates=report.get('adapter_updates'), zero=report.get('zero_adapter'),
-                    full_song=report.get('full_song_evaluation'), measured_transitions=report.get('measured_transitions'),
-                    total_scene_physics_transitions=report.get('physics_transitions'),
-                    completion_rate=report.get('completion_rate'), tracking=report.get('mean_full_horizon_tracking'),
-                    paired_difference=report.get('paired_zero_difference')))
+                evaluation.append(summarize_evaluation(report, path, split))
         pid = status.get('pid')
         process = Path(f'/proc/{pid}') if pid else None
         live = bool(process is not None and process.exists())
@@ -183,10 +202,12 @@ def formal_status(root):
             last_parameter_delta=latest.get('parameter_delta'), last_projection_gradient=latest.get('projection_gradient'),
             last_update_effect=latest.get('update_effect'), last_projection_solver=latest.get('projection_solver'),
             first_own_Adam_update=updated[0].get('adapter_updates') if updated else None,
+            first_own_Adam_record=updated[0] if updated else None,
             policy_seconds_first=timing[0] if timing else None,
             policy_seconds_last=timing[-1] if timing else None,
             policy_seconds_median=statistics.median(timing) if timing else None,
             latest_checkpoint=read(output/'latest_checkpoint.json'), best_checkpoint=read(output/'best_checkpoint.json'),
+            zero_checkpoint=read(output/'zero_checkpoint.json'),
             evaluations=evaluation, failure_files=[str(path) for path in output.glob('failure_*.json')]))
     return dict(root=str(root), launched=True, source=launch['source'], groups=groups, skipped=launch.get('skipped', []),
                 counter_boundary='effective_train_transitions excludes evaluation and unused scene environments')
