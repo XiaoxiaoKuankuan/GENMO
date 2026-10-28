@@ -19,6 +19,8 @@ class VectorCollector:
         self.env, self.control, self.bank = env, control, control.bank
         self.device, self.num_envs = self.bank.device, env.N
         self.generator = torch.Generator(device=self.device).manual_seed(seed)
+        # 探索噪声独立随机流，使不同噪声消融仍可使用同一歌曲/起点采样流。
+        self.action_generator = torch.Generator(device=self.device).manual_seed(seed+1489)
         self.state = None
         self.episode_serial = self.real_transitions = self.reset_count = 0
         self.vector_steps = 0
@@ -27,6 +29,9 @@ class VectorCollector:
         self.timing = {}
         self.uniform_start = False
         self.high_error_starts = None
+        self.projection_recovery_attempts = 0
+        self.projection_recoveries = 0
+        self.projection_recovery_events = []
 
     def random(self, shape):
         return torch.rand(shape, device=self.device, generator=self.generator)
@@ -105,7 +110,7 @@ class VectorCollector:
     @torch.no_grad()
     def step(self, replay=None, *, zero=False, auto_reset=True, split='train', perturb=True,
              residual_offset=None, action_offset=None, replay_ids=None, contact_count=0, latent=None,
-             reset_split=None, action_noise=0.):
+             reset_split=None, action_noise=0., exploration_fraction=0., exploration_std=.1):
         z = self.state
         if z is None:
             raise RuntimeError('采集前必须reset')
@@ -113,19 +118,48 @@ class VectorCollector:
         if cuda:
             torch.cuda.synchronize(self.device)
         t0 = time.perf_counter()
-        proposal = self.control.propose(z, zero=zero, residual_offset=residual_offset, action_offset=action_offset, latent=latent)
-        if action_noise:
+        recovery_limit = (self.projection_recovery_attempts if split == 'train' and auto_reset and
+            residual_offset is None and action_offset is None and latent is None else 0)
+        for attempt in range(recovery_limit+1):
+            proposal = {}
+            try:
+                proposal = self.control.propose(z, zero=zero, residual_offset=residual_offset, action_offset=action_offset, latent=latent)
+                certificate = self.control.constraint_certificate(z, proposal)
+                if certificate is not None and not bool(certificate['feasible'].all()):
+                    error = RuntimeError('有限时域参考未通过实际输出精度证书；禁止发送异常Goal')
+                    error.bad_mask = ~certificate['feasible']
+                    error.certificate = certificate
+                    raise error
+                break
+            except RuntimeError as error:
+                if not hasattr(error, 'bad_mask'):
+                    raise
+                certificate = getattr(error, 'certificate', {})
+                self.last_constraint_failure = {k: v.detach().cpu() for k, v in certificate.items()}
+                self.last_constraint_state = {k: v.detach().clone() for k, v in z.items()}
+                self.last_constraint_proposal = {k: v.detach().cpu() for k, v in proposal.items()
+                    if isinstance(v, torch.Tensor)}
+                ids = error.bad_mask.to(device=self.device).nonzero().flatten()
+                event = dict(vector_step=self.vector_steps, attempt=attempt, rejected_environments=len(ids),
+                    episode_ids=z['episode'][ids].detach().cpu().tolist(), error=str(error),
+                    action_sent=False, replay_transition_written=False)
+                self.projection_recovery_events.append(event)
+                if attempt >= recovery_limit or not len(ids):
+                    raise
+                # 未推进物理，不写入假转移；只重置有问题的环境，使用新episode_id。
+                # 旧episode行政终止，不伪装成真实失败或完整MC；Replay窗口由id阻断。
+                self.reset(ids, split=reset_split or split, random_start=True, perturb=perturb)
+                self.projection_recoveries += len(ids)
+                z = self.state
+        if action_noise or exploration_fraction:
             # 与SM collect相同：探索施加在Actor输出之后，Replay、奖励及下一观测
             # 都读取这份实际执行动作；评价调用默认0，不改变冻结Actor/normalizer。
             proposal['policy_action'] = proposal['action']
-            noise = torch.randn(proposal['action'].shape, device=self.device, generator=self.generator)
-            proposal['action'] = (proposal['action']+action_noise*noise).clamp(-20, 20)
-        certificate = self.control.constraint_certificate(z, proposal)
-        if certificate is not None and not bool(certificate['feasible'].all()):
-            self.last_constraint_failure = {k: v.detach().cpu() for k, v in certificate.items()}
-            self.last_constraint_state = detach_state(z)
-            self.last_constraint_proposal = {k: v.detach().cpu() for k, v in proposal.items() if isinstance(v, torch.Tensor)}
-            raise RuntimeError('有限时域参考未通过导数/SO(3)可执行性检查；保存现场，禁止发送异常Goal')
+            noise = torch.randn(proposal['action'].shape, device=self.device, generator=self.action_generator)
+            large = torch.rand((len(noise), 1), device=self.device, generator=self.action_generator) < exploration_fraction
+            std = torch.where(large, exploration_std, action_noise)
+            proposal['action'] = (proposal['action']+std*noise).clamp(-20, 20)
+            proposal['exploration_std'] = std[:, 0]
         if cuda:
             torch.cuda.synchronize(self.device)
         t1 = time.perf_counter()

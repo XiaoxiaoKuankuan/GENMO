@@ -3,7 +3,8 @@
 启动器在Server-1读取实时GPU计算占用，只启动空闲卡；每卡独立配置、tmux、日志、
 PID、Replay和checkpoint。先创建唯一时间戳根目录和固定提交的只读运行工作树，
 旧实验不覆盖、其他进程不终止。完整命令及跳过资源原因写入launch_manifest.json，
-训练进程从零Adapter/原WM开始100个WM-only循环后直接正式BPTT更新。
+训练进程从零Adapter/原WM开始，先记录零更新配对物理评价，再执行100个WM-only
+循环和50次有界正式BPTT更新。八组分别比较时域、探索和根姿态通道，Critic全关。
 """
 import argparse
 import json
@@ -19,11 +20,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', required=True)
     p.add_argument('--session-prefix', required=True)
+    p.add_argument('--gpus', default='0,1,2,3,4,5,6,7', help='本次明确启动的GPU索引；已有计算任务仍跳过')
     p.add_argument('--resume-root', help='逐GPU读取同组latest_checkpoint，不共享模型或Replay；输出仍须新目录')
     p.add_argument('--python', default='/data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python')
     p.add_argument('--isaaclab', default='/data0/user/liwei/GENMO_assets/adapter_20261026/IsaacLab')
     p.add_argument('--inductor-cache', default='/data0/user/liwei/GENMO_assets/adapter_20261026/inductor_cache')
     args = p.parse_args()
+    requested_gpus = [int(value) for value in args.gpus.split(',')]
+    if not requested_gpus or len(set(requested_gpus)) != len(requested_gpus) or any(gpu not in range(8) for gpu in requested_gpus):
+        raise ValueError('GPU列表必须是0到7的不重复索引')
     repo = Path(__file__).resolve().parents[1]
     source = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
     root = Path(args.root).resolve()
@@ -40,7 +45,7 @@ def main():
     manifest = dict(source=source, supermimic_source=sm_source, runtime_genmo=str(runtime),
                     runtime_supermimic=str(runtime_sm), created_unix=time.time(), launches=[], skipped=[],
                     independent=True, ddp=False, nccl=False, formal=True)
-    for gpu in range(8):
+    for gpu in requested_gpus:
         config = yaml.safe_load((repo/f'configs/closedloop/stage2_alternating/gpu{gpu}.yaml').read_text())
         config['supermimic']['repo'] = str(runtime_sm)
         path = root/f'config_gpu{gpu}.yaml'
@@ -70,7 +75,10 @@ def main():
             'training_exit=$?\nprintf "%s\\n" "$training_exit" > '+shlex.quote(str(root/f'gpu{gpu}.exit'))+'\nexit "$training_exit"\n')
         subprocess.run(['tmux', 'new-session', '-d', '-s', session, 'bash', str(runner)], check=True)
         manifest['launches'].append(dict(gpu=gpu, uuid=uuids[gpu], session=session, command=command,
-            output=str(root/f'gpu{gpu}'), config=str(path), runner=str(runner), num_envs=config['vector']['num_envs']))
+            output=str(root/f'gpu{gpu}'), config=str(path), runner=str(runner), num_envs=config['vector']['num_envs'],
+            horizon=config['bptt_steps'], critic_enabled=config['alternating']['critic_enabled'],
+            action_noise=config['alternating']['action_noise'], root_orientation=config['alternating'].get('root_orientation', True),
+            experiment=config['alternating'].get('experiment_label'), target_updates=config['vector']['target_accepted_updates']))
         temp = root/'launch_manifest.tmp'
         temp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
         os.replace(temp, root/'launch_manifest.json')

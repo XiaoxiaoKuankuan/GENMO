@@ -3,10 +3,10 @@
 数据流是当前Adapter真实采集(含实际动作探索)→原SM H8世界模型十次更新→冻结
 Actor/WM后的逐步BPTT→可选想象GAE Critic。100个WM-only交替循环后直接策略
 更新，不加载旧Adapter，不运行Oracle/方向审计/物理候选回滚。GPU配置决定H8、
-H16或H32及Critic开关；参数合同、冻结资产、投影与奖励在八组间完全一致。
+H16或H32及动作探索消融；未经真实回报校准的Critic暂不参与训练或终端梯度。
 
-每次有限Adam完成立即计数，每10次记录诊断，每50次保存完整恢复状态；固定更新
-点执行无探索整歌validation和evaluation，只有validation选择best。评价下降只
+每次有限Adam完成立即计数并记录修正传播及投影梯度；0/5/10更新固定短时对照，
+20更新起执行无探索整歌validation和evaluation，只有validation选择best。评价下降只
 报告。运行异常保存三个网络/优化器、Replay、RNG及约束现场；恢复保留学习状态，
 真实求解器从新episode开始，不伪装隐藏物理状态续接。完整checkpoint保留最近两份
 及best，所有编号小模型和报告永久保留，避免八卡完整Replay耗尽服务器磁盘。
@@ -53,7 +53,8 @@ def main():
     from .reference_constraints import ReferenceProjection
     from .precision import PrecisionObjective
     from .update_diagnostics import parameter_identity
-    from .alternating_learning import enable_wm_normalization, update_wm_normalization, wm_update, policy_update, critic_update
+    from .alternating_learning import (enable_wm_normalization, update_wm_normalization, wm_update,
+                                      policy_update, critic_update, PolicyProjectionRejected)
 
     cfg = read_config(args.config)
     settings, train, vector = cfg['alternating'], cfg['training'], cfg['vector']
@@ -61,6 +62,8 @@ def main():
         raise ValueError('正式入口只允许原SM H8监督交替算法')
     if cfg['bptt_steps'] not in (8, 16, 32):
         raise ValueError('本次正式BPTT配置只使用H8/H16/H32')
+    if settings['critic_enabled']:
+        raise ValueError('10月28日修复实验暂时关闭未经独立真实回报校准的Critic；不能使用旧想象EV放行')
     if torch.cuda.device_count() != 1 or int(os.environ.get('WORLD_SIZE', '1')) != 1:
         raise ValueError('每组必须仅可见一张GPU；禁止DDP/跨GPU通信')
     output = Path(args.output).resolve()
@@ -73,18 +76,21 @@ def main():
     json_write(output/'manifest.json', dict(config=cfg, command=[sys.executable, *sys.argv], state=state.copy(),
         initialization='full_resume_same_experiment' if args.resume else 'zero_Adapter_original_pretrained_WM_no_old_policy', communication='none',
         acceptance='finite_Adam_step_not_a_physical_improvement_certificate',
+        critic_status='disabled_unqualified_real_MC_anchor_and_independent_calibration_required',
         full_checkpoint_retention='latest_two_and_validation_best_all_numbered_weights_kept'))
     (output/'pid').write_text(str(os.getpid())+'\n')
     engine = critic = collector = replay = tangent = None
     optimizers = {}
-    extra = dict(step_acc=0., best=None, evaluations=[], completed_checkpoints=[], precision_scales=None)
+    extra = dict(step_acc=0., best=None, best_short=None, evaluations=[], completed_checkpoints=[],
+                 precision_scales=None, zero_evaluations={}, consecutive_projection_rejections=0)
     frozen = None
 
     def publish(phase, **fields):
         state.update(phase=phase, updated_unix=time.time(), **fields)
         if collector is not None:
             state.update(real_transitions=collector.real_transitions, real_by_role=collector.real_by_role,
-                         vector_steps=collector.vector_steps, resets=collector.reset_count)
+                         vector_steps=collector.vector_steps, resets=collector.reset_count,
+                         projection_recovered_environments=collector.projection_recoveries)
         if engine is not None:
             state['wm_updates'] = engine.dynamics.model_version
         state['peak_cuda_allocated_mib'] = torch.cuda.max_memory_allocated()/2**20
@@ -96,6 +102,8 @@ def main():
         extra['completed_checkpoints'].append(str(path))
         if extra['best'] is not None and extra['best']['adapter_updates'] == state['accepted_updates']:
             extra['best']['path'] = str(path)
+        extra['action_noise_rng'] = collector.action_generator.get_state()
+        extra['projection_recovery_events'] = collector.projection_recovery_events
         save_vector(path, engine, critic, optimizers, replay, tangent, collector, state.copy(), cfg,
                     extra_state=extra)
         pointer = dict(path=str(path), adapter_updates=state['accepted_updates'], wm_updates=state['wm_updates'],
@@ -121,16 +129,30 @@ def main():
         begin = time.perf_counter()
         collector.policy_version = state['accepted_updates']
         for _ in range(n):
-            row = collector.step(replay, action_noise=settings['action_noise'], split='train', perturb=True)
+            row = collector.step(replay, action_noise=settings['action_noise'], split='train', perturb=True,
+                exploration_fraction=settings.get('exploration_fraction', 0.),
+                exploration_std=settings.get('exploration_std', .1))
             update_wm_normalization(engine.dynamics, row)
             values = dict(real_reward=row['reward'].mean(), real_tracking=row['raw']['track'].mean(),
                 real_reference_rms=row['proposal']['residual'].square().mean().sqrt(),
                 real_action_vs_zero_rms=(row['proposal']['action']-row['proposal']['zero_action']).square().mean().sqrt(),
                 policy_action_vs_zero_rms=(row['proposal'].get('policy_action', row['proposal']['action'])-
                                           row['proposal']['zero_action']).square().mean().sqrt())
+            values.update({'real_'+k: value.mean() for k, value in row['raw'].items()
+                if isinstance(value, torch.Tensor) and value.ndim == 1 and
+                (k in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori',
+                       'action_rate', 'action_deviation') or k.startswith(('absolute_', 'error_')))})
+            if 'exploration_std' in row['proposal']:
+                values['executed_noise_rms'] = (row['proposal']['action']-row['proposal']['policy_action']).square().mean().sqrt()
+                values['large_exploration_fraction'] = (row['proposal']['exploration_std'] >= .099).float().mean()
             for key, value in values.items():
                 totals[key] = totals.get(key, 0.)+float(value)/n
-        totals.update(collection_seconds=time.perf_counter()-begin, collection_vector_steps=n)
+        totals.update(collection_seconds=time.perf_counter()-begin, collection_vector_steps=n,
+                      physical_metrics_scope='training_distribution_not_paired_policy_improvement')
+        if collector.projection_recovery_events:
+            append_json(output/'projection_recovery.jsonl', dict(
+                adapter_updates=state['accepted_updates'], events=collector.projection_recovery_events))
+            collector.projection_recovery_events.clear()
         return totals
 
     def evaluate():
@@ -138,25 +160,44 @@ def main():
         rng = (random.getstate(), np.random.get_state(), torch.get_rng_state(), torch.cuda.get_rng_state_all(),
                collector.generator.get_state())
         reports = {}
-        for split in ('validation', 'evaluation'):
-            publish('fixed_real_'+split)
-            seed_all(42); collector.generator.manual_seed(42)
-            report = evaluate_physical(collector, zero=False, split=split)
-            report.update(adapter_updates=state['accepted_updates'], exploration_noise=0.)
-            json_write(output/f'{split}_{state["accepted_updates"]:06d}.json', report)
-            reports[split] = report
-        val = reports['validation']
-        ranking = (val['completion_rate'], -val['mean_root_position_rmse_m'],
-                   val['mean_full_horizon_tracking'], -val['mean_jerk_rms'])
-        if extra['best'] is None or ranking > tuple(extra['best']['ranking']):
-            extra['best'] = dict(adapter_updates=state['accepted_updates'], ranking=ranking,
-                                 selection_split='validation_only')
-        extra['evaluations'].append(state['accepted_updates'])
-        random.setstate(rng[0]); np.random.set_state(rng[1]); torch.set_rng_state(rng[2])
-        torch.cuda.set_rng_state_all(rng[3]); collector.generator.set_state(rng[4])
-        collector.reset(split='train', random_start=True, perturb=True)
+        full = state['accepted_updates'] >= settings.get('full_song_from_update', 20)
+        budget = None if full else settings.get('early_evaluation_steps', 256)
+        scope = 'full_song' if full else f'prefix_{budget}'
+        try:
+            for split in ('validation', 'evaluation'):
+                publish('fixed_real_'+split, evaluation_scope=scope)
+                baseline_key = split+'_'+scope
+                if baseline_key not in extra['zero_evaluations']:
+                    seed_all(42); collector.generator.manual_seed(42)
+                    zero = evaluate_physical(collector, zero=True, split=split, max_steps=budget)
+                    zero.update(adapter_updates=0, exploration_noise=0., evaluation_scope=scope)
+                    extra['zero_evaluations'][baseline_key] = zero
+                    json_write(output/f'{baseline_key}_zero.json', zero)
+                seed_all(42); collector.generator.manual_seed(42)
+                report = evaluate_physical(collector, zero=False, split=split, max_steps=budget)
+                report.update(adapter_updates=state['accepted_updates'], exploration_noise=0.,
+                              evaluation_scope=scope, zero_baseline_key=baseline_key)
+                zero = extra['zero_evaluations'][baseline_key]
+                report['paired_zero_difference'] = {k: report[k]-zero[k] for k in
+                    ('completion_rate', 'mean_tracking', 'mean_full_horizon_tracking',
+                     'mean_root_position_rmse_m', 'mean_jerk_rms', 'mean_beat_f1')}
+                json_write(output/f'{split}_{state["accepted_updates"]:06d}.json', report)
+                reports[split] = report
+            val = reports['validation']
+            ranking = (val['completion_rate'], -val['mean_root_position_rmse_m'],
+                       val['mean_full_horizon_tracking'], -val['mean_jerk_rms'])
+            # 前缀评价不能与整歌混排；best_checkpoint仅由完整歌曲validation选择。
+            key = 'best' if full else 'best_short'
+            if extra[key] is None or ranking > tuple(extra[key]['ranking']):
+                extra[key] = dict(adapter_updates=state['accepted_updates'], ranking=ranking,
+                                 selection_split='validation_only', evaluation_scope=scope)
+            extra['evaluations'].append(state['accepted_updates'])
+        finally:
+            random.setstate(rng[0]); np.random.set_state(rng[1]); torch.set_rng_state(rng[2])
+            torch.cuda.set_rng_state_all(rng[3]); collector.generator.set_state(rng[4])
+            collector.reset(split='train', random_start=True, perturb=True)
         return {split: {k: r[k] for k in ('completion_rate', 'mean_tracking', 'mean_root_position_rmse_m',
-                                        'mean_jerk_rms', 'mean_beat_f1')} for split, r in reports.items()}
+                                        'mean_jerk_rms', 'mean_beat_f1', 'paired_zero_difference')} for split, r in reports.items()}
 
     try:
         publish('loading_frozen_assets')
@@ -171,6 +212,7 @@ def main():
             raise ValueError('正式配置必须加载既有64首GENMO生成训练缓存')
         control = VectorControl(engine, bank)
         control.adapter.disable_root_xy = True
+        control.disable_root_orientation = not settings.get('root_orientation', True)
         control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds,
                                                  **settings['projection']).cuda()
         calibration = json.loads(Path(settings['calibration']).read_text())
@@ -201,6 +243,7 @@ def main():
             env = StreamingPhysicalEnv(sim_cfg, vector['num_envs'], engine.step.bundle)
             collector = VectorCollector(env, control, seed=vector['sampling_seed'])
             collector.uniform_start = True
+            collector.projection_recovery_attempts = settings.get('projection_recovery_attempts', 2)
             collector.reset(split='train', perturb=True)
             if args.resume:
                 ck = torch.load(args.resume, map_location='cpu', weights_only=False, mmap=True)
@@ -209,6 +252,8 @@ def main():
                         raise ValueError('恢复算法/时域/优化合同不符；不能加载旧审计或退化Adapter')
                 state.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg))
                 extra = ck['extra_state']
+                if 'action_noise_rng' in extra:
+                    collector.action_generator.set_state(extra['action_noise_rng'])
                 state.update(pid=os.getpid(), gpu=os.environ['CUDA_VISIBLE_DEVICES'], resumed_from=args.resume)
                 state.pop('error', None)
                 json_write(output/'resume_info.json', dict(source_checkpoint=args.resume,
@@ -217,6 +262,11 @@ def main():
                     replay_transitions=len(replay), physics_resume='new_real_episode_no_cross_reset_windows', tf32=False))
                 del ck
             else:
+                if 0 in settings['evaluation_updates']:
+                    publish('zero_update_fixed_physics')
+                    summary = evaluate()
+                    print(json.dumps(dict(adapter_updates=0, physical_evaluation=summary), ensure_ascii=False), flush=True)
+                    checkpoint('zero_update')
                 publish('initial_real_collection')
                 collect(settings['warmup_vector_steps'])
             torch.cuda.reset_peak_memory_stats()
@@ -242,10 +292,24 @@ def main():
                         publish('Adapter_Adam_completed', last_adapter_gradient_norm=metrics['adapter_gradient_norm'],
                                 last_parameter_delta=metrics['parameter_delta'])
                     pi_begin = time.perf_counter()
-                    pi, imagined = policy_update(control, engine.dynamics, critic, optimizers['adapter'], starts,
-                        cfg['bptt_steps'], terminal_value=settings['critic_enabled'], microbatch=train['backward_microbatch'],
-                        gamma=train['gamma_per_control'], diagnostics=(state['accepted_updates'] == 0 or
-                            (state['accepted_updates']+1) % settings['log_every'] == 0), on_step=completed)
+                    try:
+                        pi, imagined = policy_update(control, engine.dynamics, critic, optimizers['adapter'], starts,
+                            cfg['bptt_steps'], terminal_value=False, microbatch=train['backward_microbatch'],
+                            gamma=train['gamma_per_control'], diagnostics=True, on_step=completed)
+                    except PolicyProjectionRejected as error:
+                        optimizers['adapter'].zero_grad(set_to_none=True)
+                        extra['consecutive_projection_rejections'] += 1
+                        state['rejected_adapter_iterations'] = state.get('rejected_adapter_iterations', 0)+1
+                        append_json(output/'rejected_updates.jsonl', dict(error.report,
+                            consecutive=extra['consecutive_projection_rejections'],
+                            adapter_updates=state['accepted_updates'], wm_updates=engine.dynamics.model_version,
+                            iteration=state['iterations'], timestamp=time.time()))
+                        if extra['consecutive_projection_rejections'] >= settings.get('max_consecutive_projection_rejections', 5):
+                            raise RuntimeError('连续全部投影失败达到有限修复预算；保存现场，停止本组无效WM循环') from error
+                        publish('projection_batch_rejected_no_Adam')
+                        del starts
+                        continue
+                    extra['consecutive_projection_rejections'] = 0
                     row.update(pi, policy_seconds=time.perf_counter()-pi_begin)
                     publish('imagined_GAE_Critic' if settings['critic_enabled'] else 'Critic_disabled')
                     v = critic_update(critic, optimizers['critic'], imagined, gamma=train['gamma_per_control'],
@@ -266,18 +330,20 @@ def main():
                 append_json(output/'training.jsonl', row)
                 if warmup and state['iterations'] % 10 == 0 or not warmup and (update == 1 or update % settings['log_every'] == 0):
                     print(json.dumps(row, ensure_ascii=False, allow_nan=False), flush=True)
+                evaluated = False
                 if not warmup and update in settings['evaluation_updates'] and update not in extra['evaluations']:
                     summary = evaluate()
+                    evaluated = True
                     print(json.dumps(dict(adapter_updates=update, physical_evaluation=summary), ensure_ascii=False), flush=True)
                 if (warmup and state['iterations'] == settings['wm_only_iterations']) or (not warmup and
-                        (update == 1 or update % vector['checkpoint_every'] == 0)):
+                        (update == 1 or update % vector['checkpoint_every'] == 0 or evaluated)):
                     if not warmup:
                         atomic_save(dict(adapter=control.adapter.state_dict(), dynamics=engine.dynamics.state_dict(),
                             critic=critic.state_dict(), config=cfg, state=state.copy(), continuation='weights_only'),
                             output/f'weights_{update:06d}_{time.time_ns()}.pt')
                     checkpoint('warmup' if warmup else 'periodic')
                 publish('WM_only_warmup' if warmup else 'formal_alternating', gpu_process_mib=gpu_usage())
-            publish('completed_1000_Adapter_updates')
+            publish('completed_configured_Adapter_updates', target_updates=vector['target_accepted_updates'])
             return 0
     except BaseException as error:
         failure = dict(error=repr(error), traceback=traceback.format_exc(), state=state.copy(), timestamp=time.time())

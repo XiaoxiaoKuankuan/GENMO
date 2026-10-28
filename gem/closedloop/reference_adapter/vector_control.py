@@ -112,25 +112,31 @@ class VectorControl:
         return current, future, goal_from_reference(current, future), halo[:, 0]
 
     def propose(self, z, *, zero=False, residual_offset=None, action_offset=None, latent=None, checkpoint_actor=False):
-        residual = (self.adapter.decode(latent) if latent is not None else
-                    z['state'].new_zeros(len(z['state']), 10, 27) if zero else self.adapter.forward_packed(self.packed(self.fields(z))))
+        with torch.profiler.record_function('stage2.Adapter'):
+            residual = (self.adapter.decode(latent) if latent is not None else
+                        z['state'].new_zeros(len(z['state']), 10, 27) if zero else self.adapter.forward_packed(self.packed(self.fields(z))))
         if residual_offset is not None:
             residual = (residual+residual_offset).clamp(-self.adapter.bounds, self.adapter.bounds)
         if self.adapter.disable_root_xy:
             residual = torch.cat((residual[..., :2]*0, residual[..., 2:]), -1)
+        if getattr(self, 'disable_root_orientation', False):
+            # 独立根姿态消融只关闭三维输出通道，不改270维合同或Adapter观测。
+            residual = torch.cat((residual[..., :3], residual[..., 3:6]*0, residual[..., 6:]), -1)
         raw_residual = residual
         if self.projection is not None:
             frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
             rotation = self.bank.pose(z['song'][:, None], frames)[1]
-            residual = self.projection(residual, z['left'], z['anchor'], rotation)
+            with torch.profiler.record_function('projection.total'):
+                residual = self.projection(residual, z['left'], z['anchor'], rotation)
         elif self.constraint_beta < 1:
             residual = constrain_plan(residual, z['left'], z['anchor'], self.constraint_beta)
         current, future, goal, halo = self.reference(z, residual)
         def act(history, target):
-            if checkpoint_actor and torch.is_grad_enabled():
-                from torch.utils.checkpoint import checkpoint
-                return checkpoint(self.bundle.act, history, target, use_reentrant=False)
-            return self.bundle.act(history, target)
+            with torch.profiler.record_function('stage2.Actor'):
+                if checkpoint_actor and torch.is_grad_enabled():
+                    from torch.utils.checkpoint import checkpoint
+                    return checkpoint(self.bundle.act, history, target, use_reentrant=False)
+                return self.bundle.act(history, target)
         action = act(z['history'], goal)
         if action_offset is not None:
             action = action+action_offset

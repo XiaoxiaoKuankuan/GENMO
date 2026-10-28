@@ -9,7 +9,9 @@
 Adapter/Actor/WM，完整内部计算图通过梯度检查点保留。只执行一次有限Adam更新，
 输出变化只报告，不作物理门禁。开启Critic时使用H+1想象输入、更新归一化后重新
 计算GAE(lambda)标签，再训练Critic；Critic关闭时不产生价值损失或终端梯度。
-NaN/Inf、不可执行投影和异常仍抛出，由正式入口保存现场并停止对应独立实验。
+不可执行投影在物理发送前拒绝；想象中的孤立数值失败只拒绝对应microbatch，不计
+该批梯度及有效样本。全部样本失败由入口有限重试后保存退出，不能无限训练WM。
+NaN/Inf等硬故障仍抛出并保存现场。正式修复配置关闭未经真实校准的Critic终端梯度。
 """
 
 import copy
@@ -21,6 +23,45 @@ from .critic import lambda_returns
 from .dynamics import frozen_parameters
 from .vector_control import detach_state, select_state
 from .update_diagnostics import fixed_probes, update_effect
+
+
+class PolicyProjectionRejected(RuntimeError):
+    """本轮没有任何可行想象样本，未执行Adam；入口记录并按有限预算重试。"""
+    def __init__(self, report):
+        self.report = report
+        super().__init__('本轮全部想象样本的参考投影被拒绝，Adapter未更新')
+
+
+def _projection_failure(error):
+    # 只识别投影器明确携带失败环境mask的异常，不能把OOM/NaN/程序错误吞成样本拒绝。
+    return isinstance(error, RuntimeError) and hasattr(error, 'bad_mask')
+
+
+def _accumulate_projection_statistics(target, source):
+    """只累计已分离的GPU标量，统一在更新结束转CPU，避免每个控制步逐字段同步。"""
+    for name in ('qp_active_count', 'qp_channel_count', 'sqp_active_count', 'sqp_batch_count'):
+        if name in source:
+            target[name] = target.get(name, 0)+source[name].detach()
+    iterations = source.get('sqp_iterations')
+    if iterations is not None and iterations.numel():
+        target['sqp_iterations_sum'] = target.get('sqp_iterations_sum', 0)+iterations.detach().sum()
+        target['sqp_iterations_count'] = target.get('sqp_iterations_count', 0)+iterations.new_tensor(iterations.numel())
+        previous = target.get('sqp_iterations_max')
+        target['sqp_iterations_max'] = iterations.max().detach() if previous is None else torch.maximum(previous, iterations.max().detach())
+    for name in ('sqp_stationarity_residual64', 'sqp_constraint_residual64', 'sqp_step_residual64',
+                 'so3_float64_excess', 'so3_float32_excess'):
+        if name in source and source[name].numel():
+            value = source[name].detach().amax()
+            key = name+'_max'
+            target[key] = value if key not in target else torch.maximum(target[key], value)
+
+
+def _merge_projection_statistics(target, source):
+    for name, value in source.items():
+        if name.endswith('_max'):
+            target[name] = value if name not in target else torch.maximum(target[name], value)
+        else:
+            target[name] = target.get(name, 0)+value
 
 
 def enable_wm_normalization(dynamics):
@@ -78,27 +119,43 @@ def wm_update(dynamics, optimizer, windows):
                 wm_error8=float(last.detach()), wm_gradient_norm=float(norm))
 
 
-def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=.99, checkpoint_steps=True):
+def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=.99, checkpoint_steps=True,
+            gradient_diagnostics=False):
     def step(z, proposal):
-        state = dynamics.step(z['state'], proposal['action'], z['xi'])
-        end, reward, _, terms, continuation, _, _ = control.advance(z, proposal, state)
+        with torch.profiler.record_function('stage2_WM_step'):
+            state = dynamics.step(z['state'], proposal['action'], z['xi'])
+        with torch.profiler.record_function('stage2_reward_and_history'):
+            end, reward, _, terms, continuation, _, _ = control.advance(z, proposal, state)
         return end, reward, continuation, terms
 
     z = start
     alive = z['state'].new_ones(len(z['state']))
     score = alive*0
     features, rewards, continuations, terms_sum = [], [], [], {}
+    gradient_probe = None
+    projection_statistics = {}
     for t in range(horizon):
         # 活跃SO(3)投影使用torch.func.jacrev，不允许放进checkpoint的saved_tensor
         # hooks。投影原图保留；Actor及WM/奖励各自检查点，既不detach也不缩短H。
-        proposal = control.propose(z, checkpoint_actor=checkpoint_steps)
+        with torch.profiler.record_function('stage2_Adapter_projection_Actor'):
+            proposal = control.propose(z, checkpoint_actor=checkpoint_steps)
+        if control.projection is not None:
+            _accumulate_projection_statistics(projection_statistics, control.projection.last_statistics)
         with torch.no_grad():
             certificate = control.constraint_certificate(z, proposal)
             if certificate is not None and not bool(certificate['feasible'].all()):
                 control.last_imagination_failure = dict(state=detach_state(z),
                     certificate={k: v.detach() for k, v in certificate.items()},
                     residual=proposal['residual'].detach())
-                raise RuntimeError('想象参考投影不可执行；不降低约束')
+                error = RuntimeError('想象参考投影不可执行；拒绝该批样本，不降低约束')
+                error.bad_mask = ~certificate['feasible']
+                error.certificate = certificate
+                raise error
+        if gradient_diagnostics and t == 0:
+            gradient_probe = {key: proposal[key] for key in ('raw_residual', 'residual', 'goal', 'action')}
+            for tensor in gradient_probe.values():
+                if tensor.requires_grad:
+                    tensor.retain_grad()
         if terminal_value:
             # 中间Critic特征只供后续MSE，终端特征另外保留完整输入梯度。
             with torch.no_grad():
@@ -119,7 +176,8 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
         features.append(x.detach())
     return dict(objective=score, terms=terms_sum, terminal=terminal, survival=alive.detach(),
                 features=torch.stack(features) if terminal_value else None,
-                rewards=torch.stack(rewards), continuation=torch.stack(continuations))
+                rewards=torch.stack(rewards), continuation=torch.stack(continuations), gradient_probe=gradient_probe,
+                projection_statistics=projection_statistics)
 
 
 def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, terminal_value,
@@ -127,9 +185,20 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
     optimizer.zero_grad(set_to_none=True)
     count = len(starts['state'])
     report, features, rewards, continuations = {}, [], [], []
-    probes = fixed_probes(starts, per_song=2) if diagnostics else None
+    accepted, rejected, rejection_rows = 0, 0, []
+    gradient_square = dict(raw_residual=0., residual=0., goal=0., action=0.)
+    projection_gradient_dot = projection_inactive_coordinates = projection_coordinates = 0.
+    projection_statistics = {}
+    probes = fixed_probes(starts, per_song=1) if diagnostics else None
     with torch.no_grad():
-        before_proposal = control.propose(probes) if diagnostics else None
+        try:
+            before_proposal = control.propose(probes) if diagnostics else None
+        except RuntimeError as error:
+            if not _projection_failure(error):
+                raise
+            # 诊断探针失败不能误作Adam失败；真实训练样本继续逐批独立检查。
+            before_proposal = None
+            report['probe_failure_before'] = str(error)
     params = tuple(control.adapter.parameters())
     before = [p.detach().clone() for p in params]
     # 仅为非有限Adam写入恢复，绝不用于真实物理收益回滚。
@@ -137,18 +206,55 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
     with dynamics.adapter_phase(), frozen_parameters(critic):
         for offset in range(0, count, microbatch):
             start = detach_state(select_state(starts, slice(offset, offset+microbatch)))
-            trajectory = imagine(control, dynamics, critic, start, horizon,
-                terminal_value=terminal_value, gamma=gamma)
+            try:
+                trajectory = imagine(control, dynamics, critic, start, horizon,
+                    terminal_value=terminal_value, gamma=gamma, gradient_diagnostics=diagnostics)
+            except RuntimeError as error:
+                if not _projection_failure(error):
+                    raise
+                rejected += len(start['state'])
+                rejection_rows.append(dict(offset=offset, samples=len(start['state']),
+                    infeasible_samples=int(error.bad_mask.sum()), reason=str(error)))
+                control.last_imagination_failure = dict(state=detach_state(start),
+                    certificate={k: v.detach() for k, v in getattr(error, 'certificate', {}).items()},
+                    diagnostic=getattr(error, 'diagnostic', {}), error=str(error))
+                continue
             loss = -trajectory['objective'].sum()/count
             if not torch.isfinite(loss):
                 raise FloatingPointError('Adapter想象累计目标非有限')
-            loss.backward()
+            with torch.profiler.record_function('stage2_BPTT_backward'):
+                loss.backward()
+            accepted += len(start['state'])
+            _merge_projection_statistics(projection_statistics, trajectory['projection_statistics'])
+            gp = trajectory['gradient_probe']
+            if gp is not None:
+                for key, value in gp.items():
+                    if value.grad is not None:
+                        gradient_square[key] += float(value.grad.detach().square().sum())
+                raw_grad, projected_grad = gp['raw_residual'].grad, gp['residual'].grad
+                if raw_grad is not None and projected_grad is not None:
+                    raw_grad, projected_grad = raw_grad.detach(), projected_grad.detach()
+                    projection_gradient_dot += float((raw_grad*projected_grad).sum())
+                    nonzero = projected_grad.abs() > 1e-12
+                    projection_inactive_coordinates += int(((raw_grad.abs() <= 1e-12) & nonzero).sum())
+                    projection_coordinates += int(nonzero.sum())
             for key, value in dict(trajectory['terms'], objective=trajectory['objective'],
                                   terminal=trajectory['terminal'], survival=trajectory['survival']).items():
                 report[key] = report.get(key, 0.)+float(value.detach().sum())/count
             if terminal_value:
                 features.append(trajectory['features'])
                 rewards.append(trajectory['rewards']); continuations.append(trajectory['continuation'])
+    if accepted == 0:
+        optimizer.zero_grad(set_to_none=True)
+        raise PolicyProjectionRejected(dict(accepted_samples=0, rejected_samples=rejected,
+            rejected_microbatches=rejection_rows, optimizer_step_completed=False))
+    # 仅对实际有效样本取均值；被拒绝批没有backward，不能稀释有效梯度。
+    normalization = count/accepted
+    if accepted != count:
+        for param in params:
+            if param.grad is not None:
+                param.grad.mul_(normalization)
+        report = {k: v*normalization if isinstance(v, (float, int)) else v for k, v in report.items()}
     norm = nn.utils.clip_grad_norm_(params, 1., error_if_nonfinite=True)
     nn.utils.clip_grad_value_(params, .1)  # 原SuperMimic policy_update的第二层数值裁剪。
     optimizer.step()
@@ -161,12 +267,33 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
     optimizer.zero_grad(set_to_none=True)
     delta = sum((p.detach()-old).square().sum() for p, old in zip(params, before)).sqrt()
     report.update(adapter_gradient_norm=float(norm), parameter_delta=float(delta),
-                  optimizer_step_completed=True, horizon=horizon, critic_enabled=terminal_value)
+                  optimizer_step_completed=True, horizon=horizon, critic_enabled=terminal_value,
+                  accepted_samples=accepted, rejected_samples=rejected, rejected_microbatches=rejection_rows)
+    if projection_statistics:
+        values = {k: float(v) for k, v in projection_statistics.items()}
+        values.update(qp_active_fraction=values.get('qp_active_count', 0)/max(values.get('qp_channel_count', 0), 1),
+            sqp_active_fraction=values.get('sqp_active_count', 0)/max(values.get('sqp_batch_count', 0), 1),
+            sqp_iterations_mean=values.get('sqp_iterations_sum', 0)/max(values.get('sqp_iterations_count', 0), 1))
+        report['projection_solver'] = values
+    if diagnostics:
+        raw_norm, projected_norm = gradient_square['raw_residual']**.5, gradient_square['residual']**.5
+        report['projection_gradient'] = dict(
+            **{k+'_norm': v**.5*normalization for k, v in gradient_square.items()},
+            raw_over_projected_norm=raw_norm/max(projected_norm, 1e-30),
+            raw_projected_cosine=projection_gradient_dot/max(raw_norm*projected_norm, 1e-30),
+            nonzero_projected_gradient_blocked_fraction=projection_inactive_coordinates/max(projection_coordinates, 1),
+            scope='full_objective_initial_imagination_step_all_accepted_samples',
+            physical_gain_proven=False)
     if on_step is not None:
         on_step(report)
     # 只有Adam完成才由入口增加计数；探针仅诊断，不将零输出变化当物理门禁。
-    if diagnostics:
-        report['update_effect'] = update_effect(control, probes, before_proposal, delta)
+    if diagnostics and before_proposal is not None:
+        try:
+            report['update_effect'] = update_effect(control, probes, before_proposal, delta)
+        except RuntimeError as error:
+            if not _projection_failure(error):
+                raise
+            report['probe_failure_after'] = str(error)
     dataset = (dict(features=torch.cat(features, 1), rewards=torch.cat(rewards, 1),
                     continuation=torch.cat(continuations, 1)) if terminal_value else None)
     return report, dataset

@@ -1,5 +1,5 @@
-# 正式单GPU SuperMimic交替训练；H8真实WM监督、逐步BPTT、可选想象GAE Critic。
-# 全新零Adapter/原WM；不调用方向审计或信任域；保留有限数值和投影运行时保护。
+# 2026-10-28修复后的独立有界正式训练：冻结GENMO/Actor，原SM H8 WM+BPTT。
+# 50次Adapter预算；0/5/10短物理对照，20/40/50整歌；未经校准Critic始终关闭。
 algorithm: genmo_supermimic_reference_adapter10
 physics_backend: isaaclab3_newton_mujoco_warp
 supermimic:
@@ -57,13 +57,13 @@ training:
   actor_batch: 1024
 vector:
   num_envs: 2048
-  target_accepted_updates: 1000
-  checkpoint_every: 50
+  target_accepted_updates: 50
+  checkpoint_every: 10
   sampling_seed: 42
 alternating:
   method: supermimic_alternating_WM_BPTT
   critic_enabled: false
-  action_noise: 0.1
+  action_noise: 0.0
   utd: 0.4
   warmup_vector_steps: 64
   wm_only_iterations: 100
@@ -71,12 +71,12 @@ alternating:
   critic_epochs: 5
   critic_minibatches: 4
   evaluation_updates:
+  - 0
+  - 5
+  - 10
+  - 20
+  - 40
   - 50
-  - 100
-  - 200
-  - 400
-  - 700
-  - 1000
   projection:
     joint_velocity: 1.0
     joint_acceleration: 10.0
@@ -85,13 +85,23 @@ alternating:
     height_velocity: 0.12
     height_acceleration: 1.2
     rotation_velocity: 0.3
-    constrain_root_angular_acceleration: false
+    constrain_root_angular_acceleration: true
+    rotation_acceleration: 3.0
   precision:
     weight: 0.446714796317961
     action_weight: 0.01
     velocity_weight: 0.002
     acceleration_weight: 0.0002
   calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle64_flexible03/zero_train_calibration.json
-  objective_version: q_qd_body_R_local_root_no_root_angular_acceleration_v3
+  objective_version: q_qd_body_R_local_root_strict_root_alpha3_v4
   root_xy: false
   soft_joint_limit: false
+  exploration_fraction: 0.0
+  exploration_std: 0.1
+  root_orientation: true
+  full_song_from_update: 20
+  early_evaluation_steps: 256
+  projection_recovery_attempts: 2
+  max_consecutive_projection_rejections: 5
+  experiment_label: H16_noise0_large0_rootR1
+  stage_budget: 50_finite_Adam_updates_with_paired_real_evaluation_not_quality_certificate

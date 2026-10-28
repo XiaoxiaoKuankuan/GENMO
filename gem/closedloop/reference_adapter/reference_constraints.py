@@ -7,7 +7,8 @@
 使用该活跃面的隐式导数，对提案和历史锚点均保留梯度。没有逐环境Python循环。
 
 根旋转还必须检查复合SO(3)后的真实角速度/角加速度，不能把旋转向量导数冒充它。
-数值不收敛或SO(3)预算不满足时返回明确不可执行证据，调用方不得发送该动作。
+SO(3)数值求解与非线性KKT隐式反向分离，不保留SQP逐轮计算图；内部数值余量
+及输出精度重解不放宽对外预算。仍不满足时抛出带样本mask的明确异常，调用方不得发送。
 正式配置可关闭根角加速度：同时移除旋转向量二阶差分与SO(3)角加速度约束，
 只保留根角速度和幅值；其余平移/关节约束不变。旧研究默认行为保持以便复现。
 零提案、零已提交历史严格保持零；非零历史下零提案仍须遵守接缝，不承诺数学上
@@ -150,6 +151,8 @@ class ReferenceProjection(torch.nn.Module):
         self.coupled_iterations = coupled_iterations
         self.rotation_velocity, self.rotation_acceleration = rotation_velocity, rotation_acceleration
         self.constrain_root_angular_acceleration = constrain_root_angular_acceleration
+        self.last_statistics = {}
+        self.profile_enabled = False
         # 旋转三个分量分配欧氏球预算；最终角速度始终以SO(3)复合后结果核验。
         velocity = [.12, .12, height_velocity]+[rotation_velocity/(3**.5)]*3
         acceleration = [1.2, 1.2, height_acceleration]+[rotation_acceleration/(3**.5)]*3
@@ -190,12 +193,15 @@ class ReferenceProjection(torch.nn.Module):
         # 已可行的提案原样通过，零严格为零，未激活约束时输入梯度严格为单位矩阵。
         feasible = ((y@self.matrix.T >= lower) & (y@self.matrix.T <= upper)).all(-1)
         indices = (~feasible).flatten().nonzero().flatten()
+        self.last_statistics = dict(qp_active_count=(~feasible).sum().detach(),
+                                    qp_channel_count=feasible.new_tensor(feasible.numel(), dtype=torch.long))
         if len(indices) == 0:
             result = proposal
         else:
             flat_y, flat_l, flat_u = y.reshape(-1, 10), lower.reshape(-1, 30), upper.reshape(-1, 30)
-            solved = _EuclideanProjection.apply(flat_y[indices], flat_l[indices], flat_u[indices],
-                                                self.matrix, self.inverse, self.iterations)
+            with torch.profiler.record_function("projection.affine_QP"):
+                solved = _EuclideanProjection.apply(flat_y[indices], flat_l[indices], flat_u[indices],
+                                                    self.matrix, self.inverse, self.iterations)
             # 融合ADMM用于正常控制；极少量近活跃面通道尚未收敛时，精确求解同一
             # 10变量QP，不把残差当可执行结果，也不改变速度/加速度预算。
             ax = solved@self.matrix.T
@@ -228,48 +234,8 @@ class ReferenceProjection(torch.nn.Module):
         return torch.cat(constraints)
 
     def project_rotation(self, proposal, projected, left, anchor, nominal_rotation, lower, upper):
-        unit = self.velocity[3:6]*.02
-        x = (projected[..., 3:6]/unit).transpose(1, 2).flatten(1)
-        fn = torch.func.vmap(self.angular_constraints)
-        values = fn(x, left[:, 3:6], anchor[:, 3:6], nominal_rotation)
-        selected = (values.amax(-1) > 1e-5).nonzero().flatten()
-        if not len(selected):
-            return projected
-        # 角加速度要两次除以20ms；仅内部QP使用double仍不足，float32的SO(3)
-        # 线性化/merit会在真实样本停滞。仅需修正的旋转子问题全程double，输出和
-        # Actor仍是原float32；类型转换保留梯度，不降低最终执行证书精度。
-        x = x[selected].double()
-        target = (proposal[selected, :, 3:6].double()/unit.double()).transpose(1, 2).flatten(1)
-        past, current, rotation = left[selected, 3:6].double(), anchor[selected, 3:6].double(), nominal_rotation[selected].double()
-        base = torch.block_diag(self.matrix, self.matrix, self.matrix).double().expand(len(selected), -1, -1)
-        lo, hi = lower[selected, 3:6].double().flatten(1), upper[selected, 3:6].double().flatten(1)
-        jacobian = torch.func.vmap(torch.func.jacrev(self.angular_constraints, argnums=0))
-        # SQP只修正真实SO(3)约束不满足的旋转通道；每次仍最小化与原提案的距离。
-        for iteration in range(60):
-            value = fn(x, past, current, rotation)
-            finished = value.amax(-1) <= 1e-5 if iteration >= 4 else torch.zeros(len(x), device=x.device, dtype=torch.bool)
-            if bool(finished.all()):
-                break
-            jac = jacobian(x, past, current, rotation)
-            bound = (jac@x[..., None]).squeeze(-1)-value
-            matrix = torch.cat((base, jac), 1)
-            # 同一半空间按法向长度缩放，避免角加速度Jacobian把ADMM条件数放大；
-            # 可行集合及最近点目标严格不变，缩放仍参与autograd。
-            scale = matrix.norm(dim=-1).clamp_min(1.)
-            candidate = _CoupledProjection.apply(target, torch.cat((lo, torch.full_like(bound, -1e4)), -1)/scale,
-                torch.cat((hi, bound), -1)/scale, matrix/scale[..., None], self.coupled_iterations)
-            # 非线性SQP采用本次优化内部的merit回溯，不对跨控制周期的参考做滤波。
-            # 原线性约束在凸组合下保持可行，实际SO(3)约束逐候选重新计算。
-            fractions = x.new_tensor([1., .5, .25, .125, .0625, .03125, .015625, 0.])
-            trial = x[:, None]+fractions[None, :, None]*(candidate-x)[:, None]
-            g = fn(trial.flatten(0, 1), past.repeat_interleave(len(fractions), 0),
-                   current.repeat_interleave(len(fractions), 0), rotation.repeat_interleave(len(fractions), 0))
-            merit = .5*(trial-target[:, None]).square().sum(-1)+1000*torch.relu(g).sum(-1).reshape(len(x), -1)
-            chosen = merit.argmin(-1)
-            x = torch.where(finished[:, None], x, trial[torch.arange(len(x), device=x.device), chosen])
-        corrected = projected.clone()
-        corrected[selected, :, 3:6] = (x.reshape(-1, 3, 10).transpose(1, 2)*unit).to(projected)
-        return corrected
+        from .so3_projection import project_rotation_implicit
+        return project_rotation_implicit(self, proposal, projected, left, anchor, nominal_rotation, lower, upper)
 
     def certificate(self, proposal, left, anchor, nominal_rotation):
         halo = 2*proposal[:, -1:]-proposal[:, -2:-1]
