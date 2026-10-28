@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--batch',type=int,default=4)
     parser.add_argument('--horizons',type=int,nargs='+',default=[8,16,32])
     parser.add_argument('--implementations',nargs='+',default=['old','new'])
+    parser.add_argument('--check-gradients', action='store_true', help='失败夹具同时检查真实隐式KKT反向有限性')
     parser.add_argument('--kineto-horizon',type=int,default=0,help='可选代表性短轨迹CUDA profiler；完整时域仅CUDA event和墙钟，避免旧SQP海量事件扭曲耗时')
     args=parser.parse_args()
     root=Path(args.root);out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
@@ -88,6 +89,7 @@ def main():
     control.propose=diagnosed_propose
     if args.mode=='failures':
         reports=[];fixtures=[]
+        shared_projection=projection('new')
         for gpu in range(8):
             path,data=load(gpu);engine.step.adapter.load_state_dict(data['adapter'])
             state,previous,old_certificate=saved(data)
@@ -97,15 +99,20 @@ def main():
             rotation=bank.pose(z['song'][:,None],frames)[1]
             with torch.no_grad():raw=control.adapter.forward_packed(control.packed(control.fields(z)))
             raw[...,:2]=0
-            control.projection=projection('new')
+            # 八份夹具预算相同，复用一个求解器和已编译数值核，不按模型重建静态缓存。
+            control.projection=shared_projection
             torch.cuda.synchronize();start=time.perf_counter()
             try:
-                with torch.no_grad():result=control.projection(raw,z['left'],z['anchor'],rotation)
+                raw=raw.detach().requires_grad_(args.check_gradients)
+                with torch.set_grad_enabled(args.check_gradients):
+                    result=control.projection(raw,z['left'],z['anchor'],rotation)
+                    gradient=torch.autograd.grad(result.square().sum(),raw)[0] if args.check_gradients else None
                 torch.cuda.synchronize()
                 certificate=control.projection.certificate(result,z['left'],z['anchor'],rotation)
                 row=dict(gpu=gpu,checkpoint=str(path),failed_indices=bad.tolist(),seconds=time.perf_counter()-start,
                     old_certificate=small({k:v[bad] for k,v in old_certificate.items()}),
-                    new_certificate=small(certificate),solver=small(control.projection.last_statistics))
+                    new_certificate=small(certificate),solver=small(control.projection.last_statistics),
+                    implicit_gradient_finite=bool(gradient.isfinite().all()) if gradient is not None else None)
             except Exception as error:
                 row=dict(gpu=gpu,checkpoint=str(path),error=repr(error),solver=small(control.projection.last_statistics))
                 result=previous[bad].to('cuda:0')
