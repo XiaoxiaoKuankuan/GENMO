@@ -3,7 +3,7 @@
 先用Gloo在任何CUDA/Isaac上下文创建前核验八张卡空闲、模型SHA和独立输出目录，
 再为每rank启动一个Isaac App和对应GPU世界，NCCL同步显式配置选择的 Actor/Critic 梯度。
 RoboFFT 配置使用紧凑动作、固定 MC 代理与独立恢复格式，不要求 Gaussian PPO/KL。
-正式 RoboFFT 使用 stage2_continuous_rolling_robofft.yaml 的已标定副本；旧 DPPO
+运行配置必须与所选算法及部署标定一致；旧 DPPO
 只能显式选择它自己的配置与独立实验目录。省略 --config 会在加载 Torch/Isaac 前报错。
 Actor初始化s595000，冻结原生GMT140500；本入口直接维护当前训练实现和恢复格式。
 训练配置的累计轮次预算不会自动开启，必须显式指定stop-after-iteration。正常结束
@@ -32,7 +32,7 @@ sys.path.insert(0,str(ROOT))
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True,
-        help='显式算法配置；正式 RoboFFT 使用 stage2_continuous_rolling_robofft.yaml 的已标定副本，DPPO 仅独立对照')
+        help='显式算法配置；运行配置必须与所选算法及部署标定一致，DPPO 仅独立对照')
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--stop-after-iteration',type=int,default=2)
     parser.add_argument('--warmup-rollouts',type=int)

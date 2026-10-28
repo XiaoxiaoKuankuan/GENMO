@@ -45,7 +45,7 @@ from gem.closedloop.dppo.reference_credit import ReferenceCreditLedger, validate
 
 
 def test_fake_world_config_to_resume(actor_factory,tmp_path,monkeypatch):
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_continuous_rolling_robofft.yaml')
+    config=configuration(Path(__file__).resolve().parents[3]/'tests/closedloop/fixtures/robofft_contract.yaml')
     actor,batch=actor_factory(starts=(45,),motion_frames=60);_activate_branches(actor)
     # CPU 仅替换数值执行后端，真实生产配置仍严格要求 stable_tf32x3/GPU。
     policy=build_policy(actor,config['stage9'],dict(config['stage10']['precision'],linear_execution='native_gemm'))

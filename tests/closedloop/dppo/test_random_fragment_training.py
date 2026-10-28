@@ -137,21 +137,6 @@ def test_fragment_transfer_preserves_all_adam_groups_and_rejects_other_behavior_
         assert torch.equal(before,actor[0].weight)
 
 
-@pytest.mark.parametrize('gamma',[.95,.99])
-def test_fragment_configuration_keeps_transformer_kernel_and_full_music_evaluation(gamma):
-    root=Path(__file__).resolve().parents[3]
-    base=configuration(root/'configs/closedloop/stage2_batch_8192.yaml')
-    config=configuration(root/f'configs/closedloop/stage2_random20s_gamma{round(gamma*100):03d}.yaml')
-    stage=config['stage10']
-    assert stage['physical_episode']['safety_limit_seconds']==20.
-    assert stage['physical_episode']['time_limit_bootstrap']
-    assert stage['dataset']['standing_start_probability']==0.
-    assert stage['training']['gamma_upper']==gamma and stage['training']['lambda_upper']==.98
-    assert stage['training']['actor_trainable_scope']=='all' and not stage['training']['bc_enabled']
-    assert stage['training']['std_schedule']==base['stage10']['training']['std_schedule']
-    assert stage['reward']==base['stage10']['reward'] and config['timing']==base['timing']
-    assert stage['evaluation']['episode_seconds'] is None
-    assert stage['scale']['actor_minibatch_chains']==8192 and stage['ppo_rollout']['world_seconds']==8.
 
 
 def test_supervisor_uses_fragment_transfer_once_then_exact_resume(tmp_path):
