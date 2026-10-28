@@ -175,6 +175,7 @@ def formal_status(root):
         status = read(output/'status.json') or {}
         rows = training_rows(output/'training.jsonl')
         updated = [row for row in rows if row.get('optimizer_step_completed')]
+        partial = [row for row in updated if row.get('rejected_samples', 0)]
         timing = [row['policy_seconds'] for row in updated if 'policy_seconds' in row]
         latest = updated[-1] if updated else {}
         evaluation = []
@@ -201,6 +202,14 @@ def formal_status(root):
             environment_count=status.get('num_envs'), peak_cuda_allocated_mib=status.get('peak_cuda_allocated_mib'),
             last_parameter_delta=latest.get('parameter_delta'), last_projection_gradient=latest.get('projection_gradient'),
             last_update_effect=latest.get('update_effect'), last_projection_solver=latest.get('projection_solver'),
+            completed_Adam_records=len(updated),
+            cumulative_accepted_BPTT_samples=sum(row.get('accepted_samples', 0) for row in updated),
+            cumulative_rejected_BPTT_samples=sum(row.get('rejected_samples', 0) for row in updated),
+            partial_batch_updates=[dict(adapter_updates=row.get('adapter_updates'),
+                accepted_samples=row.get('accepted_samples'), rejected_samples=row.get('rejected_samples'),
+                rejected_microbatches=row.get('rejected_microbatches'),
+                parameter_delta=row.get('parameter_delta')) for row in partial],
+            whole_batch_rejections=training_rows(output/'rejected_updates.jsonl'),
             first_own_Adam_update=updated[0].get('adapter_updates') if updated else None,
             first_own_Adam_record=updated[0] if updated else None,
             policy_seconds_first=timing[0] if timing else None,

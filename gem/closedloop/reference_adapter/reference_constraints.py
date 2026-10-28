@@ -151,6 +151,7 @@ class ReferenceProjection(torch.nn.Module):
         self.coupled_iterations = coupled_iterations
         self.rotation_velocity, self.rotation_acceleration = rotation_velocity, rotation_acceleration
         self.constrain_root_angular_acceleration = constrain_root_angular_acceleration
+        self.joint_names = tuple(spec.joint_names)
         self.last_statistics = {}
         self.profile_enabled = False
         # 旋转三个分量分配欧氏球预算；最终角速度始终以SO(3)复合后结果核验。
@@ -234,8 +235,13 @@ class ReferenceProjection(torch.nn.Module):
         return torch.cat(constraints)
 
     def project_rotation(self, proposal, projected, left, anchor, nominal_rotation, lower, upper):
-        from .so3_projection import project_rotation_implicit
-        return project_rotation_implicit(self, proposal, projected, left, anchor, nominal_rotation, lower, upper)
+        from .so3_projection import project_rotation_implicit, ProjectionNumericalFailure
+        try:
+            return project_rotation_implicit(self, proposal, projected, left, anchor, nominal_rotation, lower, upper)
+        except ProjectionNumericalFailure as error:
+            from .projection_evidence import projection_snapshot
+            error.projection_inputs = projection_snapshot(self, proposal, left, anchor, nominal_rotation)
+            raise
 
     def certificate(self, proposal, left, anchor, nominal_rotation):
         halo = 2*proposal[:, -1:]-proposal[:, -2:-1]

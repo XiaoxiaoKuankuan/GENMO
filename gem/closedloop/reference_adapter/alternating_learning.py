@@ -23,6 +23,7 @@ from .critic import lambda_returns
 from .dynamics import frozen_parameters
 from .vector_control import detach_state, select_state
 from .update_diagnostics import fixed_probes, update_effect
+from .projection_evidence import cpu_snapshot, projection_snapshot, retain_partial_failure
 
 
 class PolicyProjectionRejected(RuntimeError):
@@ -42,12 +43,13 @@ def _accumulate_projection_statistics(target, source):
     for name in ('qp_active_count', 'qp_channel_count', 'sqp_active_count', 'sqp_batch_count'):
         if name in source:
             target[name] = target.get(name, 0)+source[name].detach()
-    iterations = source.get('sqp_iterations')
-    if iterations is not None and iterations.numel():
-        target['sqp_iterations_sum'] = target.get('sqp_iterations_sum', 0)+iterations.detach().sum()
-        target['sqp_iterations_count'] = target.get('sqp_iterations_count', 0)+iterations.new_tensor(iterations.numel())
-        previous = target.get('sqp_iterations_max')
-        target['sqp_iterations_max'] = iterations.max().detach() if previous is None else torch.maximum(previous, iterations.max().detach())
+    for name in ('sqp_iterations', 'sqp_kkt_polish_iterations'):
+        iterations = source.get(name)
+        if iterations is not None and iterations.numel():
+            target[name+'_sum'] = target.get(name+'_sum', 0)+iterations.detach().sum()
+            target[name+'_count'] = target.get(name+'_count', 0)+iterations.new_tensor(iterations.numel())
+            previous = target.get(name+'_max')
+            target[name+'_max'] = iterations.max().detach() if previous is None else torch.maximum(previous, iterations.max().detach())
     for name in ('sqp_stationarity_residual64', 'sqp_constraint_residual64', 'sqp_step_residual64',
                  'so3_float64_excess', 'so3_float32_excess'):
         if name in source and source[name].numel():
@@ -138,9 +140,16 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
         # 活跃SO(3)投影使用torch.func.jacrev，不允许放进checkpoint的saved_tensor
         # hooks。投影原图保留；Actor及WM/奖励各自检查点，既不detach也不缩短H。
         with torch.profiler.record_function('stage2_Adapter_projection_Actor'):
-            proposal = control.propose(z, checkpoint_actor=checkpoint_steps)
+            try:
+                proposal = control.propose(z, checkpoint_actor=checkpoint_steps)
+            except RuntimeError as error:
+                if _projection_failure(error):
+                    error.imagination_step = t
+                    error.imagination_state = cpu_snapshot(z)
+                raise
         if control.projection is not None:
             _accumulate_projection_statistics(projection_statistics, control.projection.last_statistics)
+        projection_gradient_enabled = torch.is_grad_enabled()
         with torch.no_grad():
             certificate = control.constraint_certificate(z, proposal)
             if certificate is not None and not bool(certificate['feasible'].all()):
@@ -150,6 +159,13 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
                 error = RuntimeError('想象参考投影不可执行；拒绝该批样本，不降低约束')
                 error.bad_mask = ~certificate['feasible']
                 error.certificate = certificate
+                error.imagination_step = t
+                error.imagination_state = cpu_snapshot(z)
+                frames = (z['frame'][:, None]+control.bank.offset13).clamp_min(0)
+                rotation = control.bank.pose(z['song'][:, None], frames)[1]
+                error.projection_inputs = projection_snapshot(control.projection,
+                    proposal['raw_residual'], z['left'], z['anchor'], rotation)
+                error.projection_inputs['gradient_enabled'] = projection_gradient_enabled
                 raise error
         if gradient_diagnostics and t == 0:
             gradient_probe = {key: proposal[key] for key in ('raw_residual', 'residual', 'goal', 'action')}
@@ -181,11 +197,12 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
 
 
 def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, terminal_value,
-                  microbatch=32, gamma=.99, diagnostics=False, on_step=None):
+                  microbatch=32, gamma=.99, diagnostics=False, on_step=None, failure_context=None):
     optimizer.zero_grad(set_to_none=True)
     count = len(starts['state'])
     report, features, rewards, continuations = {}, [], [], []
     accepted, rejected, rejection_rows = 0, 0, []
+    failure_identity = None
     gradient_square = dict(raw_residual=0., residual=0., goal=0., action=0.)
     projection_gradient_dot = projection_inactive_coordinates = projection_coordinates = 0.
     projection_statistics = {}
@@ -215,9 +232,12 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
                 rejected += len(start['state'])
                 rejection_rows.append(dict(offset=offset, samples=len(start['state']),
                     infeasible_samples=int(error.bad_mask.sum()), reason=str(error)))
-                control.last_imagination_failure = dict(state=detach_state(start),
-                    certificate={k: v.detach() for k, v in getattr(error, 'certificate', {}).items()},
-                    diagnostic=getattr(error, 'diagnostic', {}), error=str(error))
+                if failure_identity is None:
+                    from .update_diagnostics import parameter_identity
+                    failure_identity = dict(failure_context or {}, wm_version=dynamics.model_version,
+                        adapter_sha256=parameter_identity(control.adapter), wm_sha256=parameter_identity(dynamics))
+                retain_partial_failure(control, error, start, starts, offset=offset, horizon=horizon,
+                                       context=failure_identity)
                 continue
             loss = -trajectory['objective'].sum()/count
             if not torch.isfinite(loss):
@@ -244,6 +264,11 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
             if terminal_value:
                 features.append(trajectory['features'])
                 rewards.append(trajectory['rewards']); continuations.append(trajectory['continuation'])
+    if rejected:
+        excluded = {i for row in rejection_rows for i in range(row['offset'], row['offset']+row['samples'])}
+        control.last_imagination_failure.update(accepted_samples=accepted, rejected_samples=rejected,
+            rejected_microbatches=rejection_rows,
+            accepted_sample_indices=[i for i in range(count) if i not in excluded])
     if accepted == 0:
         optimizer.zero_grad(set_to_none=True)
         raise PolicyProjectionRejected(dict(accepted_samples=0, rejected_samples=rejected,
@@ -273,7 +298,8 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
         values = {k: float(v) for k, v in projection_statistics.items()}
         values.update(qp_active_fraction=values.get('qp_active_count', 0)/max(values.get('qp_channel_count', 0), 1),
             sqp_active_fraction=values.get('sqp_active_count', 0)/max(values.get('sqp_batch_count', 0), 1),
-            sqp_iterations_mean=values.get('sqp_iterations_sum', 0)/max(values.get('sqp_iterations_count', 0), 1))
+            sqp_iterations_mean=values.get('sqp_iterations_sum', 0)/max(values.get('sqp_iterations_count', 0), 1),
+            sqp_kkt_polish_iterations_mean=values.get('sqp_kkt_polish_iterations_sum', 0)/max(values.get('sqp_kkt_polish_iterations_count', 0), 1))
         report['projection_solver'] = values
     if diagnostics:
         raw_norm, projected_norm = gradient_square['raw_residual']**.5, gradient_square['residual']**.5

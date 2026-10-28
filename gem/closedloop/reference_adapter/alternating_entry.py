@@ -122,6 +122,7 @@ def main():
         iterations=0, real_transitions=0, num_envs=vector['num_envs'], started_unix=time.time(),
         horizon=cfg['bptt_steps'], critic_enabled=settings['critic_enabled'], method=settings['method'],
         source=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), formal=True)
+    runtime_source = state['source']  # 恢复旧实验后仍记录这次实际执行源码，而非覆盖历史身份。
     json_write(output/'manifest.json', dict(config=cfg, command=[sys.executable, *sys.argv], state=state.copy(),
         initialization='full_resume_same_experiment' if args.resume else 'zero_Adapter_original_pretrained_WM_no_old_policy', communication='none',
         acceptance='finite_Adam_step_not_a_physical_improvement_certificate',
@@ -145,6 +146,7 @@ def main():
         json_write(output/'status.json', state, replace=True)
 
     def checkpoint(label):
+        from .projection_evidence import checkpoint_projection_evidence
         publish('saving_complete_checkpoint')
         path = output/f'full_{state["accepted_updates"]:06d}_{label}_{time.time_ns()}.pt'
         extra['completed_checkpoints'].append(str(path))
@@ -164,6 +166,7 @@ def main():
             extra['best']['checkpoint_available'] = True
         extra['action_noise_rng'] = collector.action_generator.get_state()
         extra['projection_recovery_events'] = collector.projection_recovery_events
+        checkpoint_projection_evidence(extra, control)
         save_vector(path, engine, critic, optimizers, replay, tangent, collector, state.copy(), cfg,
                     extra_state=extra)
         pointer = dict(path=str(path), adapter_updates=state['accepted_updates'], wm_updates=state['wm_updates'],
@@ -320,6 +323,7 @@ def main():
                         raise ValueError('恢复算法/时域/优化合同不符；不能加载旧审计或退化Adapter')
                 state.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg))
                 extra = normalize_extra_state(ck.get('extra_state'))
+                control.last_imagination_failure = extra.get('imagination_failure')
                 if 'action_noise_rng' in extra:
                     collector.action_generator.set_state(extra['action_noise_rng'])
                 collector.projection_recoveries = state.get('projection_recovered_environments', 0)
@@ -366,7 +370,11 @@ def main():
                     try:
                         pi, imagined = policy_update(control, engine.dynamics, critic, optimizers['adapter'], starts,
                             cfg['bptt_steps'], terminal_value=False, microbatch=train['backward_microbatch'],
-                            gamma=train['gamma_per_control'], diagnostics=True, on_step=completed)
+                            gamma=train['gamma_per_control'], diagnostics=True, on_step=completed,
+                            failure_context=dict(source=runtime_source, experiment_source=state['source'],
+                                iteration=state['iterations'],
+                                adapter_updates_before=state['accepted_updates'],
+                                candidate_adapter_update=state['accepted_updates']+1))
                     except PolicyProjectionRejected as error:
                         optimizers['adapter'].zero_grad(set_to_none=True)
                         extra['consecutive_projection_rejections'] += 1
