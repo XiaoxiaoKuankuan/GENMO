@@ -158,6 +158,26 @@ def test_root_orientation_ablation_preserves_270_shape_and_other_channels(system
     assert proposal['raw_residual'][..., 6:].count_nonzero() > 0
 
 
+def test_proposal_feasibility_cost_preserves_nonzero_feasible_compensation_and_dt(system):
+    """辅助项惩罚投影距离，不惩罚非零本身，且不改变主Tracking的梯度路径。"""
+    _, control, z = setup(system)
+    with torch.no_grad():
+        control.adapter.net[-1].bias.fill_(.01)
+    proposal = control.propose(z)
+    control.proposal_feasibility_weight = .001
+    _, _, raw, terms, *_ = control.advance(z, proposal, z['state'])
+    assert proposal['residual'].abs().max() > 0
+    assert terms['proposal_feasibility'].count_nonzero() == 0
+    displaced = dict(proposal, raw_residual=proposal['raw_residual']+.002)
+    _, _, raw, terms, *_ = control.advance(z, displaced, z['state'])
+    cost = ((displaced['raw_residual']-displaced['residual'])/control.adapter.bounds).square().mean((1, 2))
+    torch.testing.assert_close(terms['proposal_feasibility'], -.02*.001*cost)
+    assert raw['proposal_projection_distance'].min() > 0
+    gradient = torch.autograd.grad(terms['proposal_feasibility'].sum(), displaced['raw_residual'], retain_graph=True)[0]
+    assert gradient.isfinite().all() and gradient.norm() > 0
+    assert torch.autograd.grad(terms['sm'].sum(), proposal['action'], retain_graph=True)[0].isfinite().all()
+
+
 def test_old_checkpoint_extra_fields_keep_counters_and_add_only_metadata():
     from gem.closedloop.reference_adapter.alternating_entry import normalize_extra_state
     old = dict(step_acc=.5, best=dict(adapter_updates=20), evaluations=[20],

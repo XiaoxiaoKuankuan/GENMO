@@ -8,6 +8,7 @@ SO(3)约束只在内部留小幅安全余量，外部角速度/角加速度预�
 样本mask的异常交给采集器；调用方不得发送不满足证书的参考。
 """
 
+from .timing import scope, phase
 import torch
 
 
@@ -29,7 +30,8 @@ def _derivatives(projector, x):
     cache = getattr(projector, '_so3_derivatives', None)
     if cache is None:
         cache = projector._so3_derivatives = {}
-    compiled = x.is_cuda and getattr(projector, 'compile_derivatives', True)
+    # KKT参数VJP需要真实二阶autograd，不能经不支持double-backward的AOT封装。
+    compiled = x.is_cuda and not torch.is_grad_enabled() and getattr(projector, 'compile_derivatives', True)
     key = (x.device, x.dtype, compiled)
     if key not in cache:
         fn = torch.func.vmap(projector.angular_constraints)
@@ -39,8 +41,17 @@ def _derivatives(projector, x):
         hess = torch.func.vmap(torch.func.jacrev(torch.func.grad(curvature, argnums=0), argnums=0))
         if compiled:
             # 不编译循环、活跃集选择或KKT反向；不同有效批量共用动态batch内核。
-            fn, jac, hess = [torch.compile(f, dynamic=True, fullgraph=True,
-                options={'triton.cudagraphs': False}) for f in (fn, jac, hess)]
+            def compile_kernel(function):
+                kernel = torch.compile(function, dynamic=True, fullgraph=True,
+                    options={'triton.cudagraphs': False})
+                def fixed_tail(*values):
+                    # Functorch内部matmul目前不支持符号13/3维；只让batch动态。
+                    for value in values:
+                        for dim in range(1, value.ndim):
+                            torch._dynamo.mark_static(value, dim)
+                    return kernel(*values)
+                return fixed_tail
+            fn, jac, hess = [compile_kernel(f) for f in (fn, jac, hess)]
         cache[key] = fn, jac, hess
     return cache[key]
 
@@ -148,14 +159,14 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
     step_error = x.new_full((len(x),), float('inf'))
     for iteration in range(20):
         value = fn(x, past, anchor, rotation) + margin
-        with torch.profiler.record_function('projection.SO3_Jacobian'):
+        with scope('projection.SO3_Jacobian'):
             jac = jac_fn(x, past, anchor, rotation)
         boundary = (jac @ x[..., None]).squeeze(-1) - value
         matrix = torch.cat((base, jac), 1)
         # 使用真实拉格朗日曲率的SQP：原单位Hessian在角加速度范数活跃面上会
         # 产生来回振荡，固定最小1/64步长最终选择零步。SPD修正只服务数值搜索；
         # 收敛后的隐式反向仍使用未修正的真实拉格朗日Hessian。
-        with torch.profiler.record_function('projection.SO3_Hessian'):
+        with scope('projection.SO3_Hessian'):
             # 首轮lambda严格为零，拉格朗日Hessian精确为I，不必构建二阶导数。
             hessian = (eye.expand(len(x), -1, -1) if iteration == 0 else
                        eye+hessian_fn(x, past, anchor, rotation, nonlinear_multiplier))
@@ -172,7 +183,7 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
         scale = whitened_matrix.norm(dim=-1).clamp_min(1.)
         qp_lower = torch.cat((lower, torch.full_like(boundary, -1e4)), -1)
         qp_upper = torch.cat((upper, boundary), -1)
-        with torch.profiler.record_function("projection.SO3_QP"):
+        with scope("projection.SO3_QP"):
             whitened = _numerical_qp(whitened_target, qp_lower/scale,
                 qp_upper/scale, whitened_matrix/scale[..., None], projector.coupled_iterations)
             candidate = (inv_t@whitened[..., None]).squeeze(-1)
@@ -265,7 +276,7 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
 class _ImplicitSO3(torch.autograd.Function):
     @staticmethod
     def forward(ctx, initial, target, past, anchor, rotation, lower, upper, margin, projector):
-        with torch.profiler.record_function('projection.SO3_SQP_numeric_forward'):
+        with scope('projection.SO3_SQP_numeric_forward'):
             x, multiplier, active, diagnostic = _solve(projector, initial, target, past, anchor, rotation, lower, upper, margin)
         ctx.projector = projector
         ctx.save_for_backward(x, target, past, anchor, rotation, lower, upper, margin, multiplier, active)
@@ -277,7 +288,7 @@ class _ImplicitSO3(torch.autograd.Function):
     def backward(ctx, gradient):
         x, target, past, anchor, rotation, lower, upper, margin, multiplier, active = ctx.saved_tensors
         projector = ctx.projector
-        with torch.profiler.record_function('projection.SO3_KKT_implicit_backward'), torch.no_grad():
+        with scope('projection.SO3_KKT_implicit_backward'), torch.no_grad():
             # 最终非线性KKT导数含Hessian，不能用末次线性QP切空间近似替代。
             def lagrangian(value, old, current, nominal, lam):
                 angular = projector.angular_constraints(value, old, current, nominal)

@@ -15,6 +15,7 @@ NaN/Inf等硬故障仍抛出并保存现场。正式修复配置关闭未经真�
 """
 
 import copy
+from .timing import scope, phase
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
@@ -124,9 +125,9 @@ def wm_update(dynamics, optimizer, windows):
 def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=.99, checkpoint_steps=True,
             gradient_diagnostics=False):
     def step(z, proposal):
-        with torch.profiler.record_function('stage2_WM_step'):
+        with scope('stage2_WM_step'):
             state = dynamics.step(z['state'], proposal['action'], z['xi'])
-        with torch.profiler.record_function('stage2_reward_and_history'):
+        with scope('stage2_reward_and_history'):
             end, reward, _, terms, continuation, _, _ = control.advance(z, proposal, state)
         return end, reward, continuation, terms
 
@@ -139,7 +140,7 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
     for t in range(horizon):
         # 活跃SO(3)投影使用torch.func.jacrev，不允许放进checkpoint的saved_tensor
         # hooks。投影原图保留；Actor及WM/奖励各自检查点，既不detach也不缩短H。
-        with torch.profiler.record_function('stage2_Adapter_projection_Actor'):
+        with scope('stage2_Adapter_projection_Actor'):
             try:
                 proposal = control.propose(z, checkpoint_actor=checkpoint_steps)
             except RuntimeError as error:
@@ -196,7 +197,7 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
                 projection_statistics=projection_statistics)
 
 
-def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, terminal_value,
+def _policy_update(control, dynamics, critic, optimizer, starts, horizon, *, terminal_value,
                   microbatch=32, gamma=.99, diagnostics=False, on_step=None, failure_context=None):
     optimizer.zero_grad(set_to_none=True)
     count = len(starts['state'])
@@ -204,7 +205,9 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
     accepted, rejected, rejection_rows = 0, 0, []
     failure_identity = None
     gradient_square = dict(raw_residual=0., residual=0., goal=0., action=0.)
-    projection_gradient_dot = projection_inactive_coordinates = projection_coordinates = 0.
+    projection_gradient_dot = starts['state'].new_zeros(())
+    projection_inactive_coordinates = starts['state'].new_zeros(())
+    projection_coordinates = starts['state'].new_zeros(())
     projection_statistics = {}
     probes = fixed_probes(starts, per_song=1) if diagnostics else None
     with torch.no_grad():
@@ -242,7 +245,7 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
             loss = -trajectory['objective'].sum()/count
             if not torch.isfinite(loss):
                 raise FloatingPointError('Adapter想象累计目标非有限')
-            with torch.profiler.record_function('stage2_BPTT_backward'):
+            with phase('backward'), scope('stage2_BPTT_backward'):
                 loss.backward()
             accepted += len(start['state'])
             _merge_projection_statistics(projection_statistics, trajectory['projection_statistics'])
@@ -250,20 +253,30 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
             if gp is not None:
                 for key, value in gp.items():
                     if value.grad is not None:
-                        gradient_square[key] += float(value.grad.detach().square().sum())
+                        gradient_square[key] = gradient_square[key]+value.grad.detach().square().sum()
                 raw_grad, projected_grad = gp['raw_residual'].grad, gp['residual'].grad
                 if raw_grad is not None and projected_grad is not None:
                     raw_grad, projected_grad = raw_grad.detach(), projected_grad.detach()
-                    projection_gradient_dot += float((raw_grad*projected_grad).sum())
+                    projection_gradient_dot += (raw_grad*projected_grad).sum()
                     nonzero = projected_grad.abs() > 1e-12
-                    projection_inactive_coordinates += int(((raw_grad.abs() <= 1e-12) & nonzero).sum())
-                    projection_coordinates += int(nonzero.sum())
+                    projection_inactive_coordinates += ((raw_grad.abs() <= 1e-12) & nonzero).sum()
+                    projection_coordinates += nonzero.sum()
             for key, value in dict(trajectory['terms'], objective=trajectory['objective'],
                                   terminal=trajectory['terminal'], survival=trajectory['survival']).items():
-                report[key] = report.get(key, 0.)+float(value.detach().sum())/count
+                report[key] = report.get(key, 0.)+value.detach().sum()/count
             if terminal_value:
                 features.append(trajectory['features'])
                 rewards.append(trajectory['rewards']); continuations.append(trajectory['continuation'])
+    scalar_names = list(report)
+    scalar_names = [k for k in scalar_names if isinstance(report[k], torch.Tensor) and report[k].ndim == 0]
+    if scalar_names:
+        scalar_values = torch.stack([report[k] for k in scalar_names]).cpu().tolist()
+        report.update(zip(scalar_names, scalar_values))
+    if diagnostics:
+        names = list(gradient_square)
+        values = torch.stack([torch.as_tensor(gradient_square[k], device=starts['state'].device) for k in names]+[projection_gradient_dot, projection_inactive_coordinates, projection_coordinates]).cpu().tolist()
+        gradient_square = dict(zip(names, values[:len(names)]))
+        projection_gradient_dot, projection_inactive_coordinates, projection_coordinates = values[-3:]
     if rejected:
         excluded = {i for row in rejection_rows for i in range(row['offset'], row['offset']+row['samples'])}
         control.last_imagination_failure.update(accepted_samples=accepted, rejected_samples=rejected,
@@ -282,7 +295,8 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
         report = {k: v*normalization if isinstance(v, (float, int)) else v for k, v in report.items()}
     norm = nn.utils.clip_grad_norm_(params, 1., error_if_nonfinite=True)
     nn.utils.clip_grad_value_(params, .1)  # 原SuperMimic policy_update的第二层数值裁剪。
-    optimizer.step()
+    with scope('stage2.optimizer_step'):
+        optimizer.step()
     if not bool(torch.stack([torch.isfinite(p).all() for p in params]).all()):
         with torch.no_grad():
             for p, old in zip(params, before):
@@ -295,7 +309,7 @@ def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, term
                   optimizer_step_completed=True, horizon=horizon, critic_enabled=terminal_value,
                   accepted_samples=accepted, rejected_samples=rejected, rejected_microbatches=rejection_rows)
     if projection_statistics:
-        values = {k: float(v) for k, v in projection_statistics.items()}
+        values = dict(zip(projection_statistics, torch.stack(list(projection_statistics.values())).double().cpu().tolist()))
         values.update(qp_active_fraction=values.get('qp_active_count', 0)/max(values.get('qp_channel_count', 0), 1),
             sqp_active_fraction=values.get('sqp_active_count', 0)/max(values.get('sqp_batch_count', 0), 1),
             sqp_iterations_mean=values.get('sqp_iterations_sum', 0)/max(values.get('sqp_iterations_count', 0), 1),
@@ -357,3 +371,14 @@ def critic_update(critic, optimizer, trajectory, *, gamma=.99, lam=.95, epochs=5
                 critic_imagined_mse=float(error.square().mean()),
                 critic_imagined_ev=float(1-error.var(unbiased=False)/variance) if variance > 1e-12 else None,
                 critic_norm_count=float(critic.norm.count), critic_target_source='imagined_GAE_lambda_not_real_MC')
+
+
+def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, timing=False, **kwargs):
+    """可选分段CUDA事件，外层同步墙钟包括诊断和真实Adam，不改变更新逻辑。"""
+    if not timing:
+        return _policy_update(control, dynamics, critic, optimizer, starts, horizon, **kwargs)
+    from .timing import Timeline
+    with Timeline(starts['state'].device) as timeline:
+        result = _policy_update(control, dynamics, critic, optimizer, starts, horizon, **kwargs)
+    result[0]['timing'] = timeline.report()
+    return result

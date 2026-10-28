@@ -81,6 +81,12 @@ def update_effect(control, probes, before, parameter_delta):
         for name, old, new in [('raw', raw_before, raw_after),
                               ('projected', before['residual'], after['residual']),
                               ('next_committed_first', before['residual'][:, 0], after['residual'][:, 0])]}
+    result['proposal_projection_distance'] = {
+        name: _distribution(_rms_by_sample((after['raw_residual'][..., ids]-after['residual'][..., ids])/scale))
+        for name, ids, scale in [('normalized_all', slice(None), control.adapter.bounds),
+                                 ('joint_rad', slice(6, None), 1.),
+                                 ('root_rotation_rad', slice(3, 6), 1.),
+                                 ('root_translation_m', slice(0, 3), 1.)]}
     identifiable = raw_delta > 1e-9
     result['projection_update_transfer'] = dict(
         identifiable_count=int(identifiable.sum()),

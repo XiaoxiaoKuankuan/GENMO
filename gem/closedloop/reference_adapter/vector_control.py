@@ -6,6 +6,7 @@
 通过权威SM MDP计算一次实际状态FK。所有函数保留输入梯度，真实采集外层才no_grad。
 """
 
+from .timing import scope, phase
 import torch
 
 from supermimic.mdp import unflatten_state, normalize_xi
@@ -112,7 +113,7 @@ class VectorControl:
         return current, future, goal_from_reference(current, future), halo[:, 0]
 
     def propose(self, z, *, zero=False, residual_offset=None, action_offset=None, latent=None, checkpoint_actor=False):
-        with torch.profiler.record_function('stage2.Adapter'):
+        with scope('stage2.Adapter'):
             residual = (self.adapter.decode(latent) if latent is not None else
                         z['state'].new_zeros(len(z['state']), 10, 27) if zero else self.adapter.forward_packed(self.packed(self.fields(z))))
         if residual_offset is not None:
@@ -126,13 +127,13 @@ class VectorControl:
         if self.projection is not None:
             frames = (z['frame'][:, None]+self.bank.offset13).clamp_min(0)
             rotation = self.bank.pose(z['song'][:, None], frames)[1]
-            with torch.profiler.record_function('projection.total'):
+            with scope('projection.total'):
                 residual = self.projection(residual, z['left'], z['anchor'], rotation)
         elif self.constraint_beta < 1:
             residual = constrain_plan(residual, z['left'], z['anchor'], self.constraint_beta)
         current, future, goal, halo = self.reference(z, residual)
         def act(history, target):
-            with torch.profiler.record_function('stage2.Actor'):
+            with scope('stage2.Actor'):
                 if checkpoint_actor and torch.is_grad_enabled():
                     from torch.utils.checkpoint import checkpoint
                     return checkpoint(self.bundle.act, history, target, use_reentrant=False)
@@ -186,6 +187,11 @@ class VectorControl:
             activity=activity)
         weighted = dict(sm=r_sm, music=.02*self.weights['music']*r_music,
                         **{k: -.02*self.weights[k]*v for k, v in costs.items()})
+        # 辅助项只鼓励原始提案接近同一可微可行投影，不把补偿本身拉向零。
+        # 主奖励仍完整穿过投影；历史锚点和投影结果均保留原计算图，dt仅乘一次。
+        proposal_gap = (proposal['raw_residual']-proposal['residual'])/self.adapter.bounds
+        feasibility = proposal_gap.square().mean((1, 2))
+        weighted['proposal_feasibility'] = -.02*getattr(self, 'proposal_feasibility_weight', 0.)*feasibility
         nominal_future = self.bank.ref(z['song'][:, None], z['frame'][:, None]+self.bank.offset11[1:])
         # 误差平方无指数饱和，奖励使用训练可见的原名义世界坐标；不进入Adapter输入。
         root_cost = (state_next[:, :3]-nominal.root_p).square().sum(-1)
@@ -203,6 +209,9 @@ class VectorControl:
             halo_max_abs=proposal['halo'].abs().amax(-1), target_qd_max_abs=proposal['future'].qd.abs().amax((1, 2)))
         raw.update(root_non_saturating=root_cost, reference_velocity=velocity_cost,
                    action_change=(proposal['action']-z['action']).square().mean(-1),
+                   proposal_projection_distance=feasibility.sqrt(),
+                   proposal_projection_joint_rms=(proposal['raw_residual'][..., 6:]-proposal['residual'][..., 6:]).square().mean((1, 2)).sqrt(),
+                   proposal_projection_rotation_rms=(proposal['raw_residual'][..., 3:6]-proposal['residual'][..., 3:6]).square().mean((1, 2)).sqrt(),
                    proposal_saturation=(proposal.get('raw_residual', proposal['residual']).abs()/self.adapter.bounds >= .98).float().mean((1, 2)))
         if self.detailed_reference:
             raw.update({'reference_'+k: v for k, v in self.reference_diagnostics(z, proposal).items()})
