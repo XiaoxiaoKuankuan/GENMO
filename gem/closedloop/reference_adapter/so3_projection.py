@@ -60,6 +60,9 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
     x = target.clone()
     slack = (h-(g@x[..., None]).squeeze(-1)).abs().clamp_min(1.)
     dual = slack.reciprocal()
+    best_x = x.clone()
+    best_error = x.new_full((len(x),), float('inf'))
+    finished = torch.zeros(len(x), device=x.device, dtype=torch.bool)
     eye = torch.eye(x.shape[-1], device=x.device, dtype=x.dtype)
     def step_length(value, direction):
         ratio = torch.where(direction < 0, -value/direction.clamp_max(-1e-100), float('inf'))
@@ -68,7 +71,15 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
         rd = x-target+(g.transpose(-1, -2)@dual[..., None]).squeeze(-1)
         rp = (g@x[..., None]).squeeze(-1)+slack-h
         mu = (slack*dual).mean(-1)
-        done = (torch.maximum(rd.abs().amax(-1), rp.abs().amax(-1)) < 1e-8) & (mu < 1e-10)
+        residual = torch.maximum(rd.abs().amax(-1), rp.abs().amax(-1))
+        error = torch.maximum(residual, mu)
+        improved = error < best_error
+        best_x = torch.where(improved[:, None], x, best_x)
+        best_error = torch.minimum(best_error, error.nan_to_num(nan=float('inf')))
+        # 已达到机器精度的平台不能继续把slack压至零并污染后续SQP曲率。
+        # 保留最小真实KKT残差的数值迭代，不改变任何外部约束或梯度定义。
+        finished |= ((residual < 1e-8) & (mu < 1e-10)) | ~torch.isfinite(error)
+        done = finished
         if bool(done.all()):
             break
         lhs = eye+g.transpose(-1, -2)@((dual/slack)[..., None]*g)
@@ -87,7 +98,7 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
         x = torch.where(done[:, None], x, x+ap[:, None]*dx)
         slack = torch.where(done[:, None], slack, (slack+ap[:, None]*ds).clamp_min(1e-30))
         dual = torch.where(done[:, None], dual, (dual+ad[:, None]*dl).clamp_min(1e-30))
-    return x
+    return best_x
 
 
 def _solve(projector, initial, target, past, anchor, rotation, lower, upper, margin):
@@ -100,7 +111,7 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
     counts = torch.zeros(len(x), device=x.device, dtype=torch.long)
     finished = torch.zeros(len(x), device=x.device, dtype=torch.bool)
     step_error = x.new_full((len(x),), float('inf'))
-    for iteration in range(60):
+    for iteration in range(20):
         value = fn(x, past, anchor, rotation) + margin
         jac = jac_fn(x, past, anchor, rotation)
         boundary = (jac @ x[..., None]).squeeze(-1) - value
@@ -114,7 +125,10 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
             x, past, anchor, rotation, nonlinear_multiplier)
         eigen, basis = torch.linalg.eigh(hessian)
         hessian = (basis*eigen.clamp_min(.01)[..., None, :])@basis.transpose(-1, -2)
-        chol = torch.linalg.cholesky(hessian)
+        chol, info = torch.linalg.cholesky_ex(hessian)
+        if bool((info!=0).any()):
+            raise ProjectionNumericalFailure('SO(3)数值SQP曲率分解失败', info!=0,
+                diagnostic=dict(cholesky_info=info.detach(), sqp_iterations=counts.detach()))
         inv_t = torch.linalg.solve_triangular(chol.transpose(-1, -2), eye.expand(len(x), -1, -1), upper=True)
         unconstrained = x-torch.cholesky_solve((x-target)[..., None], chol).squeeze(-1)
         whitened_target = (chol.transpose(-1, -2)@unconstrained[..., None]).squeeze(-1)
@@ -133,7 +147,15 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
         lam, _ = _multipliers(linear_a, linear_c, candidate-objective_grad, candidate)
         nonlinear_multiplier = lam[:, base.shape[1]:matrix.shape[1]]
         step_error = (candidate-x).abs().amax(-1)
-        converged = (value.amax(-1) <= 1e-8) & (step_error < 2e-6)
+        # 近乎切向的角加速度活跃面可能具有很大曲率：小参数步长本身并不
+        # 代表目标驻点。直接检查当前非线性KKT残差，防止提前退出后使用错误导数。
+        current_a = torch.cat((base, -base, jac), 1)
+        current_ax = (base@x[..., None]).squeeze(-1)
+        current_c = torch.cat((current_ax-upper, lower-current_ax, value), -1)
+        current_lam, _ = _multipliers(current_a, current_c, target, x)
+        current_stationarity = x-target+(current_a.transpose(-1, -2)@current_lam[..., None]).squeeze(-1)
+        converged = ((value.amax(-1) <= 1e-8) & (step_error < 2e-6)
+                     & ((current_stationarity.abs().amax(-1) < 2e-6) | (step_error < 1e-8)))
         finished |= converged
         if bool(finished.all()):
             break
@@ -142,18 +164,67 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
         g = fn(trial.flatten(0, 1), past.repeat_interleave(len(fractions), 0),
                anchor.repeat_interleave(len(fractions), 0), rotation.repeat_interleave(len(fractions), 0)) + margin
         # 平滑L1可行性罚函数仅用于SQP步长，不对跨周期参考滤波。
-        merit = .5*(trial-target[:, None]).square().sum(-1) + 1000*torch.relu(g).sum(-1).reshape(len(x), -1)
+        # 罚函数只惩罚超过数值SQP可行性精度的残差。否则约1e-10的内点法
+        # 舍入误差乘1000后会压过末期约1e-12的真实目标改进，停在非驻点；
+        # 此处1e-8与上面的内部求解精度相同，外部预算和最终证书仍严格检查。
+        merit = .5*(trial-target[:, None]).square().sum(-1) + 1000*torch.relu(g-1e-8).sum(-1).reshape(len(x), -1)
         choice = merit.argmin(-1)
         nxt = trial[torch.arange(len(x), device=x.device), choice]
+        stalled = ((nxt-x).abs().amax(-1)<1e-9) & (value.amax(-1)<=1e-8)
         counts += (~finished).long()
         x = torch.where(finished[:, None], x, nxt)
+        # 数值步长停滞转入下方KKT精化；只有最终完整驻点/证书检查决定成功。
+        finished |= stalled
+        if bool(finished.all()):
+            break
+    # 内点法末期误差在高曲率面会被放大；直接解最终活跃非线性KKT Newton
+    # 系统消除该误差，而不是放宽驻点门槛。每次精化仍检查完整约束与驻点改进。
+    polish_counts = torch.zeros_like(counts)
+    for _ in range(8):
+        c = _constraints(projector, x, past, anchor, rotation, lower, upper, margin)
+        a = _jacobian(projector, x, past, anchor, rotation)
+        multiplier, active = _multipliers(a, c, target, x)
+        r = x-target+(a.transpose(-1, -2)@multiplier[..., None]).squeeze(-1)
+        if bool((r.abs().amax(-1)<1e-8).all()):
+            break
+        hessian = eye+torch.func.vmap(torch.func.jacrev(torch.func.grad(curvature, argnums=0), argnums=0))(
+            x, past, anchor, rotation, multiplier[:, lower.shape[-1]*2:])
+        aa = a*active[..., None]
+        pinv = _pinverse_gram(aa)
+        tangent = eye-pinv@(aa.transpose(-1, -2)@aa)
+        normal = -(pinv@(aa.transpose(-1, -2)@(c*active)[..., None])).squeeze(-1)
+        rhs = -(tangent@(r+(hessian@normal[..., None]).squeeze(-1))[..., None])
+        dx = normal+torch.linalg.solve_ex(tangent@hessian@tangent+eye-tangent, rhs).result.squeeze(-1)
+        directional = (a@dx[..., None]).squeeze(-1)
+        step = torch.where(directional>0, ((1e-10-c)/directional.clamp_min(1e-100)).clamp_min(0),
+                           torch.full_like(c,float('inf'))).amin(-1).clamp_max(1.)
+        step = torch.where(step<1.,step*.999,step)
+        candidate = x+step[:, None]*dx
+        nc = _constraints(projector, candidate, past, anchor, rotation, lower, upper, margin)
+        for _ in range(8):
+            feasible = nc.amax(-1)<=1e-8
+            if bool(feasible.all()):
+                break
+            step = torch.where(feasible,step,step*.5)
+            candidate = x+step[:, None]*dx
+            nc = _constraints(projector, candidate, past, anchor, rotation, lower, upper, margin)
+        na = _jacobian(projector, candidate, past, anchor, rotation)
+        nl, _ = _multipliers(na, nc, target, candidate)
+        nr = candidate-target+(na.transpose(-1, -2)@nl[..., None]).squeeze(-1)
+        improved = ((nc.amax(-1)<=1e-8) & (nr.abs().amax(-1)<r.abs().amax(-1))
+                    & torch.isfinite(candidate).all(-1))
+        if not bool(improved.any()):
+            break
+        x = torch.where(improved[:, None], candidate, x)
+        polish_counts += improved.long()
     c = _constraints(projector, x, past, anchor, rotation, lower, upper, margin)
     a = _jacobian(projector, x, past, anchor, rotation)
     multiplier, active = _multipliers(a, c, target, x)
     stationarity = x-target+(a.transpose(-1, -2)@multiplier[..., None]).squeeze(-1)
     diagnostics = dict(sqp_iterations=counts, sqp_constraint_residual64=c.amax(-1),
                        sqp_stationarity_residual64=stationarity.abs().amax(-1),
-                       sqp_step_residual64=step_error, sqp_active_constraints=active.sum(-1))
+                       sqp_step_residual64=step_error, sqp_active_constraints=active.sum(-1),
+                       sqp_kkt_polish_iterations=polish_counts)
     return x, multiplier, active, diagnostics
 
 
@@ -224,7 +295,12 @@ def project_rotation_implicit(projector, proposal, projected, left, anchor, nomi
         margin[11:22] = .01/projector.rotation_acceleration
     needs_gradient = torch.is_grad_enabled() and any(v.requires_grad for v in (target, past, current, rotation, lo, hi))
     for attempt in range(3):
-        solution = _ImplicitSO3.apply(initial, target, past, current, rotation, lo, hi, margin, projector)
+        try:
+            solution = _ImplicitSO3.apply(initial, target, past, current, rotation, lo, hi, margin, projector)
+        except ProjectionNumericalFailure as error:
+            bad = torch.zeros(len(projected),device=projected.device,dtype=torch.bool)
+            bad[selected[error.bad_mask]] = True
+            raise ProjectionNumericalFailure(str(error),bad,diagnostic=error.diagnostic) from error
         result = projected.clone()
         result[selected, :, 3:6] = (solution.reshape(-1, 3, 10).transpose(1, 2)*unit.double()).to(projected)
         with torch.no_grad():
@@ -237,7 +313,7 @@ def project_rotation_implicit(projector, proposal, projected, left, anchor, nomi
             good = castc.amax(-1) <= 0
             if needs_gradient:
                 # 可行但非驻点的数值输出不能用最优映射KKT梯度冒充。
-                good &= projector.last_statistics["sqp_stationarity_residual64"] <= 1e-4
+                good &= projector.last_statistics["sqp_stationarity_residual64"] <= 2e-6
                 good &= projector.last_statistics["sqp_constraint_residual64"] <= 1e-6
         if bool(good.all()):
             return result

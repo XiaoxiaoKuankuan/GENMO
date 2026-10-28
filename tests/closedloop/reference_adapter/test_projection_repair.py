@@ -84,3 +84,29 @@ def test_all_eight_saved_failures_strict_budget_stationarity_and_gradients():
             finite=((p(*plus,rotation)-p(*minus,rotation))*probe).sum()/(2*epsilon)
             torch.testing.assert_close((gradient*direction).sum(),finite,atol=2e-6,rtol=.005,
                                        msg=f'GPU{case["gpu"]}, field={i}')
+
+
+def test_actual_32_sample_imagination_batch_reaches_kkt_stationarity():
+    """真实批量反例：不能只按很小的SQP步长宣布求解完成。"""
+    import json
+    from pathlib import Path
+    case=json.loads((Path(__file__).parent/'fixtures/so3_actual_batch_20261028.json').read_text())
+    p=ReferenceProjection(SimpleNamespace(joint_names=case['joint_names']),torch.tensor(case['bounds']))
+    raw,left,anchor,rotation=[torch.tensor(case[k]) for k in ('raw','left','anchor','rotation')]
+    raw.requires_grad_()
+    out=p(raw,left,anchor,rotation)
+    assert p.certificate(out,left,anchor,rotation)['feasible'].all()
+    assert float(p.last_statistics['sqp_stationarity_residual64'].max())<2e-6
+    assert int(p.last_statistics['sqp_iterations'].max())<12
+    assert torch.autograd.grad(out.sum(),raw)[0].isfinite().all()
+    # CPU/GPU批处理会有小幅舍入差异；固定整批上下文并检验历史和提案的导数。
+    p=p.double();raw=raw.detach().double().requires_grad_()
+    left=left.double().requires_grad_();anchor=anchor.double().requires_grad_();rotation=rotation.double()
+    out=p(raw,left,anchor,rotation);torch.manual_seed(729);probe=torch.randn_like(out)
+    gradients=torch.autograd.grad((out*probe).sum(),(raw,left,anchor))
+    for i,gradient in enumerate(gradients):
+        direction=torch.zeros_like(gradient);direction[...,3:6]=torch.randn_like(direction[...,3:6])*.001
+        values=[raw.detach(),left.detach(),anchor.detach()];plus=[x.clone() for x in values];minus=[x.clone() for x in values]
+        epsilon=1e-4;plus[i]+=epsilon*direction;minus[i]-=epsilon*direction
+        finite=((p(*plus,rotation)-p(*minus,rotation))*probe).sum()/(2*epsilon)
+        torch.testing.assert_close((gradient*direction).sum(),finite,atol=2e-5,rtol=.01)
