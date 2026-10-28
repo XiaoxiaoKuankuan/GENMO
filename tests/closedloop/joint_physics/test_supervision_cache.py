@@ -22,6 +22,7 @@ def test_precomputed_windows_history_gt_loss_and_gradient(tmp_path, actor_factor
     starts = (0, 3, 75, 177)
     expected = [dataset.get_window(0, f) for f in starts]
     sequence = prepare_sequence(dataset, 0, actor.endecoder, chunk_size=17)
+    dataset.reader.prepared = (tmp_path, {})
     monkeypatch.setattr(dataset.reader, 'load_aligned_sequence', lambda row: sequence)
     actual = [dataset.get_window(0, f) for f in starts]
     for first, second in zip(expected, actual):
@@ -31,6 +32,7 @@ def test_precomputed_windows_history_gt_loss_and_gradient(tmp_path, actor_factor
             else:
                 assert value == second[key]
     old, new = collate_joint_samples(expected), collate_joint_samples(actual)
+    assert '_target_body' not in old and '_target_body' in new
     from tests.closedloop.test_stage1_losses import _weights
     objective = Stage1BumiLosses(actor.endecoder, _weights())
     pred = torch.randn(4,60,30, requires_grad=True)

@@ -388,3 +388,68 @@ python tools/preprocess_then_resume_joint_physics.py \
 全库请求索引初始化现在只读取manifest身份和原文件路径，实际抽中样本才构造Stage1监督
 窗口；源/time/noise游标保持原语义。设备显存统计包含Newton/Warp的块边界采样值，
 同时单列PyTorch allocator峰值，二者都不冒充精确的整个进程瞬时显存峰值。
+
+## 2026-10-28 全库只读优化正式运行
+
+当前正式入口改为 `configs/closedloop/joint_physics_formal_200k_optimized_8gpu_server2.yaml`。
+它继承既有200000步训练数学参数，普通监督每卡256/全局2048，Future与H32子批均为4。
+网络BF16、主参数/AdamW/FK/损失/SM/WM仍为FP32；物理从20000步起渐增，30000步warmup，
+权重0.02，每4步执行，最低有效前缀8步。完整Stage1 v5所有损失和原采样概率保持。
+
+4287个train source已全部存在，不再运行Newton/WM生产，也不再刷新索引。三个只读目录是：
+
+- `/data0/user/liwei/GENMO_outputs/joint_physics_acceptance_20261027/sidecar_train_offline_v2`：2来源；
+- `/data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/train_increment_8`：8来源；
+- `/data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_bf16_20261028/sidecar_increment`：4277来源。
+
+按dataset/split/source及原文件SHA核验无重复、漏读或额外来源。合法Future记录1322995，
+可用于完整辅助监督的H1请求1276107，H32合法请求1275702，后者来自4286来源。
+有1个source没有合法H32窗口，普通监督仍保留它；提前终止后的时刻从未补成合法数据。
+每source有效物理时长、拒绝及资产合同见
+`/data0/user/liwei/GENMO_outputs/joint_optimized_readonly_cache_20261028/audit/inventory.json`。
+
+普通监督只装配真实history、合法前缀及已存Future。完整Window仅为H32执行子批构建。
+CPU缓存目录 `/data0/user/liwei/GENMO_assets/joint_supervision_cache_20261028` 约38.5GB，
+逐候选起点保持局部anchor、halo和原接触/地面/GT几何；它只读取原数据，不运行Newton/WM。
+物理请求表位于 `/data0/user/liwei/GENMO_assets/joint_request_index_20261028`，启动直接mmap，
+source/time/noise游标随原checkpoint恢复。CPU监督预算64GiB/rank按实际来源容量分配，
+sidecar按目录16GiB/rank上限；mmap底层只读文件页由系统共享，不复制八份完整张量。
+
+CPU条件装配在有界单批预取中执行，消费时才推进游标；整批pin后non_blocking上传。
+日志每100步归约区间Loss与各rank性能，记录最慢rank；Future Loss是区间每optimizer步均值，
+因此不会因日志恰好落在非Future步而恒为零。性能阶段可能重叠：sidecar_read属于后台
+condition_prepare，后者与GPU计算重叠；network_forward包含普通/Future/物理的GENMO前向，
+future_forward_loss记录辅助损失阶段。不要把这些重叠阶段直接相加。
+CUDA事件在日志间隔读取，CPU用perf_counter；disk_bytes_read是该rank进程实际读取量，
+validated_bytes是SHA校验的逻辑字节。find_unused_parameters仍保留，未启用static_graph。
+
+旧全库任务已在1860步协作保存完整八卡断点并退出。恢复点：
+`/data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_bf16_full_sidecar_20261028/run/joint_00001860.pt`。
+完整模型、AdamW、scheduler、课程、8rank全部数据/噪声/RNG状态及合同核验通过；两步真实
+八卡验收成功写入并重读完整checkpoint，参数确实更新，正式恢复前两步Loss与验收相同。
+临时验收checkpoint已清理，验收汇总保留在上述核验目录的 `ddp_validation.json`。
+
+正式run于2026-10-28启动，输出为
+`/data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_optimized_20261028/run`；
+同级 `launch.json` 保存运行源码SHA、文件哈希、完整配置、命令和原恢复点，
+`train.log` 保存日志。运行源码提交为 `3e2b57d06df7cc0a002325a3ecd23eed222f8793`。
+截至本条记录，实际已推进到2100步，最近100步最慢rank均值0.9109秒/步，data_loss1.26296，
+相比原约12秒/步约快13倍。此时尚未达到物理课程20000步，physics_effective_updates=0符合配置，
+不能把4个局部H32梯度验证称为本次正式物理课程已经生效。
+
+```bash
+# 当前任务只查看，不要重复启动。
+tmux attach -t joint-optimized-200k-20261028
+tail -f /data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_optimized_20261028/train.log
+
+# 仅在原任务已保存并退出后恢复；目标目录必须不存在。
+cd /home/user/liwei/bumi-closedloop-worktrees/joint-physics/GENMO
+export JOINT_PYTHON=/data0/user/liwei/envs/genmo_sm_runtime/bin/python
+export JOINT_GPUS=8
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+bash scripts/train_joint_physics.sh \
+  configs/closedloop/joint_physics_formal_200k_optimized_8gpu_server2.yaml \
+  --max-steps 200000 \
+  --resume <已完整保存的joint_checkpoint绝对路径> \
+  --output <不存在的新run目录>
+```
