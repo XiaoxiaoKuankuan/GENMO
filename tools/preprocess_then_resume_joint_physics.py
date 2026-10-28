@@ -1,4 +1,4 @@
-"""受控维护流水线：等待完整周期断点，暂停指定任务，预处理全库，再完整恢复训练。
+"""受控维护流水线：完整断点恢复，或经明确授权丢弃进度后的从零训练。
 
 本进程始终只用CPU。启动时固定指定torchrun、其8个训练rank和旧单环境collector的
 /proc身份（PID、启动时钟、cwd、完整argv）；等待明确global_step的原子checkpoint。
@@ -13,6 +13,11 @@ Linux pidfd，并在发送前再次比较完整进程身份；PID被复用、命
 仅删除本流水线独占目录中已核验身份的worker分片，保留索引、summary及失败日志。
 status.json和events.jsonl持续记录阶段/PID/日志/当前步数。脚本必须显式给定授权任务PID，
 不会自动选择正在运行的其它训练；本文件的存在本身不代表流水线或训练已经启动。
+
+显式--fresh-from-stopped-run切换到已停任务模式：必须给出用户接受丢弃未保存更新的
+停机证据，并重新核验具体旧PID均已退出和八卡空闲；该模式不捕获/停止不存在的任务，
+不等待或加载checkpoint。原配置必须random初始化、无pretrained/resume、seed42，
+全库预处理完成后在新目录启动200000步随机训练，命令绝不包含--resume。
 """
 
 import argparse
@@ -311,7 +316,7 @@ def run_stage(journal, stage, command, env, repo, poll_seconds):
         journal.update(stage, active_pid=child.pid, active_log=str(log), command=command)
         while child.poll() is None:
             time.sleep(poll_seconds)
-            if stage == "resumed_training":
+            if stage in ("resumed_training", "fresh_training"):
                 metric = latest_metric(argument_value(command, "--output"))
                 journal.update(stage, current_global_step=metric.get("step"), data_loss=metric.get("data_loss"),
                     physics_effective_updates=metric.get("physics_effective_updates"), active_pid=child.pid,
@@ -470,14 +475,127 @@ def execute(args, journal):
         journal.update("completed", resume_output=str(args.resume_output), max_steps=args.max_steps)
 
 
+def require_random_training_config(cfg, args):
+    initialization = cfg["initialization"]
+    if (initialization.get("mode") != "random" or initialization.get("pretrained_genmo") is not None
+            or initialization.get("resume_checkpoint") is not None or cfg["training"]["seed"] != 42
+            or cfg["training"]["max_steps"] != 200000 or args.max_steps != 200000):
+        raise ValueError("丢弃模式必须随机初始化、无旧GENMO权重/恢复状态、seed42及200000步")
+    sidecars = cfg["data"]["sidecar"]
+    if not isinstance(sidecars, list) or Path(sidecars[-1]).resolve() != args.sidecar:
+        raise ValueError("原配置最后一个sidecar不是本次已停采集目录")
+
+
+def verify_stopped_evidence(args):
+    evidence = json.loads(args.stop_evidence.read_text())
+    if (evidence.get("authorization") != "discard_uncheckpointed_progress_and_restart_random"
+            or evidence.get("all_exited") is not True or evidence.get("gpu_idle") is not True
+            or Path(evidence["run"]).resolve() != args.run
+            or [str(value) for value in evidence.get("gpus", [])] != args.gpus):
+        raise ValueError("缺少明确丢弃授权或完整停机/GPU证据")
+    identities = evidence.get("stopped_processes", [])
+    if len(identities) < 9 or len({item["pid"] for item in identities}) != len(identities):
+        raise ValueError("停机证据需包含独立torchrun和8个rank完整身份")
+    training, supervisors = [], []
+    for identity in identities:
+        if not {"pid", "starttime", "cwd", "argv"} <= identity.keys() or int(identity["starttime"]) <= 0:
+            raise ValueError("停机证据缺具体PID/starttime/cwd/argv")
+        if process_identity(identity["pid"]) is not None:
+            raise ValueError(f"旧PID仍存在或已被复用，禁止继续: {identity['pid']}")
+        if "tools/train_joint_physics.py" in identity["argv"]:
+            if (Path(identity["cwd"]).resolve() != args.repo
+                    or Path(argument_value(identity["argv"], "--output")).resolve() != args.run):
+                raise ValueError("停机证据中的训练进程不是指定原run")
+            training.append(identity)
+            if "torch.distributed.run" in identity["argv"]:
+                supervisors.append(identity)
+    if len(training) != 9 or len(supervisors) != 1 or argument_value(supervisors[0]["argv"], "--nproc_per_node") != "8":
+        raise ValueError("停机证据必须明确包含1个八卡torchrun及其8个训练rank")
+    require_idle_gpus(args.gpus)
+    return evidence
+
+
+def execute_fresh(args, journal):
+    """仅用于用户明确接受丢弃且旧任务已停；整个路径不调用checkpoint/信号接口。"""
+    evidence = verify_stopped_evidence(args)
+    config_path = args.run/"config.json"
+    config_bytes = config_path.read_bytes()
+    cfg = json.loads(config_bytes)
+    require_random_training_config(cfg, args)
+    atomic_json(journal.output/"stop_evidence_verified.json", {"evidence": evidence,
+        "evidence_path": str(args.stop_evidence), "verified_unix_seconds": time.time(),
+        "all_exited_rechecked": True, "gpu_idle_rechecked": True}, replace=False)
+    journal.update("stopped_tasks_verified_for_fresh_training", fresh_training=True,
+        discarded_uncheckpointed_progress=True, initial_global_step=0, resume_checkpoint=None,
+        pretrained_genmo=None, seed=42, training_output=str(args.resume_output))
+    # 保存原真实资产合同；后续协调器重新检查实际文件和分片，不能因重训放松资产检查。
+    baseline = json.loads((args.sidecar/"index.json").read_text())
+    reference = {"assets": baseline["assets"]}
+    cpu_env = dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1")
+    preparation_config = json.loads(json.dumps(cfg))
+    preparation_config["prepare"].update(resume=True, max_sources=None, max_sources_per_dataset=None,
+        max_control_steps=None, shard_episodes=8, balanced_sources=True)
+    preparation_path = journal.output/"preparation_config.json"
+    atomic_json(preparation_path, preparation_config, replace=False)
+    benchmark_config = json.loads(json.dumps(preparation_config))
+    excluded = benchmark_config["prepare"].setdefault("exclude_sidecars", [])
+    if str(args.sidecar) not in excluded:
+        excluded.append(str(args.sidecar))
+    benchmark_path = journal.output/"benchmark_config.json"
+    atomic_json(benchmark_path, benchmark_config, replace=False)
+    benchmark = journal.output/"benchmark"
+    try:
+        run_stage(journal, "benchmark", [args.python, "tools/benchmark_joint_physics_preparation.py",
+            "--config", str(benchmark_path), "--output", str(benchmark), "--gpu", args.gpus[0]],
+            cpu_env, args.repo, args.poll_seconds)
+    except RuntimeError:
+        if benchmark.exists():
+            clean_benchmark_shards(benchmark)
+        raise
+    selection = json.loads((benchmark/"summary.json").read_text())
+    size = selection.get("selected_num_envs")
+    if selection.get("status") != "selected" or size not in (256, 512, 1024):
+        raise ValueError("真实规模benchmark没有合法选择，禁止启动全库或随机训练")
+    journal.update("benchmark_selected", selected_num_envs=size, fresh_training=True)
+    clean_benchmark_shards(benchmark)
+    run_stage(journal, "preprocessing", [args.python, "tools/prepare_joint_physics_parallel.py",
+        "--config", str(preparation_path), "--output", str(args.sidecar), "--gpus", ",".join(args.gpus),
+        "--num-envs", str(size)], cpu_env, args.repo, args.poll_seconds)
+    summary = json.loads((args.sidecar/"summary.json").read_text())
+    index = json.loads((args.sidecar/"index.json").read_text())
+    validate_preprocessing(summary, index, reference, args.expected_sources)
+    if config_path.read_bytes() != config_bytes:
+        raise ValueError("预处理期间原训练配置改变，禁止静默改变网络/Loss/随机初始化合同")
+    require_random_training_config(json.loads(config_path.read_text()), args)
+    if args.resume_output.exists():
+        raise FileExistsError("随机重训输出已存在，禁止重复启动或覆盖")
+    require_idle_gpus(args.gpus)
+    journal.update("preprocessing_verified_for_fresh_training", fresh_training=True,
+        covered_sources=summary["covered_catalog_sources"], initial_global_step=0,
+        legal_h32_windows=summary["all_published_legal_h32"]+summary.get("excluded_legal_h32", 0))
+    env = dict(cpu_env, CUDA_VISIBLE_DEVICES=",".join(args.gpus), JOINT_GPUS="8", JOINT_PYTHON=args.python)
+    command = ["bash", "scripts/train_joint_physics.sh", str(config_path),
+               "--max-steps", str(args.max_steps), "--output", str(args.resume_output)]
+    run_stage(journal, "fresh_training", command, env, args.repo, args.poll_seconds)
+    final = json.loads((args.resume_output/"summary.json").read_text())
+    if final.get("status") == "paused":
+        journal.update("fresh_training_paused", fresh_training=True, global_step=final["global_step"])
+    elif final.get("global_step") != args.max_steps:
+        raise ValueError("随机训练退出但未达到200000步，保留现场不自动重启")
+    else:
+        journal.update("completed", fresh_training=True, training_output=str(args.resume_output), max_steps=args.max_steps)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--sidecar", type=Path, required=True)
-    parser.add_argument("--torchrun-pid", type=int, required=True)
+    parser.add_argument("--torchrun-pid", type=int)
     parser.add_argument("--collector-pid", type=int)
     parser.add_argument("--output", type=Path, required=True, help="新的独立流水线日志目录")
-    parser.add_argument("--resume-output", type=Path, required=True)
+    parser.add_argument("--training-output", "--resume-output", dest="resume_output", type=Path, required=True)
+    parser.add_argument("--fresh-from-stopped-run", action="store_true", help="仅明确授权丢弃且旧任务已停时使用；预处理后从零重训")
+    parser.add_argument("--stop-evidence", type=Path, help="含具体原PID身份、丢弃授权、all_exited和gpu_idle的JSON")
     parser.add_argument("--repo", type=Path, default=ROOT)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--gpus", type=parse_gpus, default=parse_gpus("0,1,2,3,4,5,6,7"))
@@ -488,6 +606,12 @@ def main():
     parser.add_argument("--exit-timeout", type=float, default=180.)
     parser.add_argument("--gpu-idle-timeout", type=float, default=300.)
     args = parser.parse_args()
+    if args.fresh_from_stopped_run:
+        if not args.stop_evidence or args.torchrun_pid or args.collector_pid:
+            parser.error("从零模式要求--stop-evidence，不接受需要停止的任务PID")
+        args.stop_evidence = args.stop_evidence.expanduser().resolve(strict=True)
+    elif not args.torchrun_pid or args.stop_evidence:
+        parser.error("完整恢复模式要求--torchrun-pid；停机证据仅用于显式从零模式")
     for key in ("run", "sidecar", "repo", "output", "resume_output"):
         setattr(args, key, getattr(args, key).expanduser().resolve())
     if args.gpus != [str(i) for i in range(8)] or not 0 < args.checkpoint_step < args.max_steps:
@@ -503,8 +627,11 @@ def main():
         args.output.mkdir(parents=True, exist_ok=False)
         journal = Journal(args.output)
         try:
-            journal.update("pidfd_preflight", **pidfd_preflight())
-            execute(args, journal)
+            if args.fresh_from_stopped_run:
+                execute_fresh(args, journal)
+            else:
+                journal.update("pidfd_preflight", **pidfd_preflight())
+                execute(args, journal)
         except BaseException as error:
             journal.update("failed", error=repr(error), automatic_restart=False)
             raise

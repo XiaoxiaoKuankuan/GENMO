@@ -164,6 +164,75 @@ class TestPreprocessResumePipeline(unittest.TestCase):
         self.assertTrue((worker/"index.json").exists())
         self.assertFalse(any(path.exists() for path in paths))
 
+    def test_fresh_stop_evidence_requires_nine_exact_training_identities_and_idle_gpus(self):
+        run = self.root/"old_run"
+        identities = []
+        for rank in range(9):
+            argv = ["python"]+(["-m", "torch.distributed.run", "--nproc_per_node=8"] if rank == 0 else [])
+            argv += ["tools/train_joint_physics.py", "--output", str(run)]
+            identities.append({"pid": 1000+rank, "starttime": 100+rank, "cwd": str(self.root), "argv": argv})
+        evidence = {"authorization": "discard_uncheckpointed_progress_and_restart_random", "run": str(run),
+            "all_exited": True, "gpu_idle": True, "gpus": list(range(8)), "stopped_processes": identities}
+        path = self.root/"stop.json"
+        path.write_text(json.dumps(evidence))
+        args = SimpleNamespace(stop_evidence=path, run=run, repo=self.root, gpus=list(map(str, range(8))))
+        with patch.object(pipeline, "process_identity", return_value=None), \
+             patch.object(pipeline, "require_idle_gpus") as idle:
+            self.assertEqual(len(pipeline.verify_stopped_evidence(args)["stopped_processes"]), 9)
+            idle.assert_called_once()
+        with patch.object(pipeline, "process_identity", return_value={"pid": 1000, "starttime": 999}):
+            with self.assertRaisesRegex(ValueError, "PID"):
+                pipeline.verify_stopped_evidence(args)
+        evidence["authorization"] = "resume_checkpoint"
+        path.write_text(json.dumps(evidence))
+        with self.assertRaises(ValueError):
+            pipeline.verify_stopped_evidence(args)
+
+    def test_fresh_pipeline_never_loads_checkpoint_or_passes_resume(self):
+        run, sidecar = self.root/"old_run", self.root/"sidecar"
+        run.mkdir(); sidecar.mkdir()
+        cfg = {"initialization": {"mode": "random", "pretrained_genmo": None, "resume_checkpoint": None},
+            "training": {"max_steps": 200000, "seed": 42}, "prepare": {"exclude_sidecars": []},
+            "data": {"sidecar": ["old1", "old2", str(sidecar)]}}
+        (run/"config.json").write_text(json.dumps(cfg))
+        (sidecar/"index.json").write_text(json.dumps({"assets": {"asset": "identity"}, "split": "train"}))
+        args = SimpleNamespace(run=run, sidecar=sidecar, repo=self.root, stop_evidence=self.root/"stop.json",
+            gpus=list(map(str, range(8))), max_steps=200000, expected_sources=4287,
+            resume_output=self.root/"fresh_run", python="python", poll_seconds=.01)
+        summary = {"status": "completed", "benchmark": False, "complete_index_verified": True,
+            "frozen_unchanged": True, "catalog_sources": 4287, "covered_catalog_sources": 4287,
+            "uncovered_catalog_sources": 0, "missing_assigned_sources": [], "all_published_legal_h32": 100}
+        stages = []
+        def stage(journal, name, command, env, repo, poll):
+            stages.append(name)
+            if name == "benchmark":
+                directory = self.root/"benchmark"
+                directory.mkdir()
+                (directory/"summary.json").write_text(json.dumps({"status": "selected", "selected_num_envs": 512}))
+            elif name == "preprocessing":
+                (sidecar/"summary.json").write_text(json.dumps(summary))
+            elif name == "fresh_training":
+                self.assertNotIn("--resume", command)
+                self.assertEqual(env["JOINT_GPUS"], "8")
+                self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1,2,3,4,5,6,7")
+                args.resume_output.mkdir()
+                (args.resume_output/"summary.json").write_text(json.dumps({"global_step": 200000}))
+            else:
+                self.fail("unexpected stage: "+name)
+        with patch.object(pipeline, "verify_stopped_evidence", return_value={"all_exited": True}), \
+             patch.object(pipeline, "require_idle_gpus"), patch.object(pipeline, "run_stage", side_effect=stage), \
+             patch.object(pipeline, "verify_checkpoint") as checkpoint, \
+             patch.object(pipeline, "capture_task") as capture, \
+             patch.object(pipeline, "terminate_verified") as terminate:
+            pipeline.execute_fresh(args, pipeline.Journal(self.root))
+            self.assertEqual(stages, ["benchmark", "preprocessing", "fresh_training"])
+            checkpoint.assert_not_called(); capture.assert_not_called(); terminate.assert_not_called()
+        for key in ("pretrained_genmo", "resume_checkpoint"):
+            bad = copy.deepcopy(cfg)
+            bad["initialization"][key] = "/old/model.pt"
+            with self.assertRaises(ValueError):
+                pipeline.require_random_training_config(bad, args)
+
 
 if __name__ == "__main__":
     unittest.main()
