@@ -14,7 +14,12 @@ from .vector_audit import contact_tensors
 
 
 @torch.no_grad()
-def evaluate_physical(collector, *, zero=False, split='evaluation', background_replay=None):
+def evaluate_physical(collector, *, zero=False, split='evaluation', background_replay=None, max_steps=None):
+    if background_replay is None:
+        from .paired_evaluation import evaluate_fixed
+        return evaluate_fixed(collector, zero=zero, split=split, max_steps=max_steps)
+    if max_steps is not None:
+        raise ValueError('背景Replay旧评价入口不支持行政短截断')
     bank = collector.bank
     prior_diagnostics = collector.control.detailed_reference
     collector.control.detailed_reference = True
