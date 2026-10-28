@@ -4,7 +4,8 @@
 不加载GENMO、SM或WM，不占用训练GPU，不改变训练配置、采样或checkpoint。
 完整JSON行才会消费，写入一半的末行等待下一次轮询。输出目录持有独占锁，重启时从
 已持久化的joint/global_step标记去重；源日志截断或完整行损坏时明确退出，不篡改原文件。
-默认启动仅监听127.0.0.1的TensorBoard，远程访问使用SSH转发；--once只导出当前日志，
+默认启动仅监听127.0.0.1的TensorBoard，远程访问使用SSH转发；--no-server仅持续转换，
+供已经启动的TensorBoard读取，不占用额外端口或重启已有网页；--once只导出当前日志，
 用于离线检查。退出时只清理本工具自己创建的网页子进程，不影响其它TensorBoard或训练。
 """
 
@@ -33,6 +34,7 @@ def main():
     parser.add_argument("--port", type=int, default=6013)
     parser.add_argument("--poll-seconds", type=float, default=5.)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--no-server", action="store_true", help="仅持续导出，复用已经运行的TensorBoard网页")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or args.poll_seconds <= 0:
         parser.error("端口或轮询间隔非法")
@@ -56,7 +58,7 @@ def main():
         last_step = max((item.step for item in marks), default=-1)
         writer = EventFileWriter(str(output))
         try:
-            if not args.once:
+            if not args.once and not args.no_server:
                 server = subprocess.Popen([sys.executable, "-m", "tensorboard.main", "--logdir", str(output),
                     "--host", "127.0.0.1", "--port", str(args.port)])
             with source.open("rb") as stream:
@@ -86,7 +88,7 @@ def main():
                                           "logdir": str(output)}, ensure_ascii=False), flush=True)
                     if args.once:
                         break
-                    if server.poll() is not None:
+                    if server is not None and server.poll() is not None:
                         raise RuntimeError(f"TensorBoard服务已退出：{server.returncode}")
                     time.sleep(args.poll_seconds)
         finally:
