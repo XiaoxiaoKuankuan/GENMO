@@ -368,3 +368,23 @@ Newton求解器已变快。所有预热在正式episode之前记录，有限启�
 结果`summary.json/selected_num_envs`来自三个成功组中端到端有效Future请求/s最大者；
 失败或容量溢出组不参加选择。基准目录不能加入训练缓存，完成验收后保留汇总/失败日志，
 清理其独立临时分片。正式全库生产没有这6秒截断预算。
+
+旧版本训练没有即时暂停入口时，可用受控维护工具等待明确周期断点后顺序执行：
+
+```bash
+python tools/preprocess_then_resume_joint_physics.py \
+  --run <当前正式run> --sidecar <原第三sidecar目录> \
+  --torchrun-pid <核验过的主管PID> --collector-pid <核验过的旧采集PID> \
+  --output <独立维护目录> --resume-output <独立续训目录> \
+  --checkpoint-step 5000 --max-steps 200000
+```
+
+此命令必须在tmux中运行。等待期间只占CPU；只有完整checkpoint核验和证明持久化后才
+停止指定进程。按PID、启动时间、cwd、完整argv限定任务，PID复用时拒绝发信号。旧采集
+若自然退出则跳过停止。真实规模基准失败、GPU被其它任务使用、全库覆盖或资产验证失败时
+停止后续阶段，不盲目恢复训练。`status.json`、`events.jsonl`和各阶段`.log`记录实际状态，
+`waiting_checkpoint`不代表训练已经暂停，`preprocessing`也不代表全库已经完成。
+
+全库请求索引初始化现在只读取manifest身份和原文件路径，实际抽中样本才构造Stage1监督
+窗口；源/time/noise游标保持原语义。设备显存统计包含Newton/Warp的块边界采样值，
+同时单列PyTorch allocator峰值，二者都不冒充精确的整个进程瞬时显存峰值。

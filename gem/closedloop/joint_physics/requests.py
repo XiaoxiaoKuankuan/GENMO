@@ -4,17 +4,19 @@
 H窗口/速度halo不足。真实运动和接触类别仅决定训练抽样与认证，绝不传入Actor条件。
 来源与时间使用独立PCG游标，优先轮换音乐、在源内均匀抽不同相位；监督入口不受影响。
 分类阈值是预声明物理单位，不随学生Loss或验证成功率调整。认证信息与音乐白名单分离。
+初始化仅从已验证manifest解析source身份和原文件路径，不装配完整监督窗口；实际抽中
+请求时仍调用原get_window，保留Stage1全部标签、条件和既有随机采样/恢复语义。
 """
 
 from collections import Counter, defaultdict
 import copy
-import json
 
 import numpy as np
 import torch
 
 from gem.closedloop.stage1_dataset import collate_stage1_training_samples
 from gem.closedloop.training import batch_to_device
+from gem.datasets.music_dance.music_dance_bumi import resolve_contract_path
 from .contracts import source_key, PhysicsRejected
 
 CLASSIFICATION = {"standing_speed_m_s": .08, "standing_joint_speed_rad_s": .35,
@@ -87,11 +89,16 @@ class PhysicsRequestStream:
         self.sources, self.requests, self.inventory = {}, {}, []
         initial_guards = {}
         for dataset,row in catalog.sources():
-            key = json.dumps([dataset.dataset_name, dataset.split, dataset.rows[row]["sample_id"]], separators=(",",":"),ensure_ascii=False)
+            record = dataset.rows[row]
+            # 与原Dataset.get_window的meta字段/字符串sample_id完全一致；此处不需要动作标签。
+            meta = {"dataset_id": dataset.dataset_name, "split": dataset.split,
+                    "sample_id": str(record["sample_id"])}
+            key = source_key(meta)
             if key not in store.index["sources"]:
                 self.inventory.append({"source": key, "reason": "missing_real_sidecar", "valid": 0})
                 continue
-            meta = dataset.get_window(row, 0)["meta"]
+            for field in ("motion_path", "music_feature_path"):
+                meta[field] = str(resolve_contract_path(dataset.reader.root, record[field], field, meta["sample_id"]))
             episode = store.episode(meta)
             accepted, reasons, categories = [], Counter(), Counter()
             for i in range(len(episode["offline_requests"]["frames"])):

@@ -95,7 +95,12 @@ def assigned_sources(keys, skip, world_size, max_sources=None):
     todo = [key for key in keys if key not in skip]
     if max_sources is not None:
         todo = todo[:max_sources]
-    return {str(rank): todo[rank::world_size] for rank in range(world_size)}
+    # 原清单按四来源交错，直接8卡stride会固定每rank的数据集；逐块轮换接收rank。
+    assignments = {str(rank): [] for rank in range(world_size)}
+    for index, key in enumerate(todo):
+        block, position = divmod(index, world_size)
+        assignments[str((position+block) % world_size)].append(key)
+    return assignments
 
 
 def episode_counts(index, keys=None):

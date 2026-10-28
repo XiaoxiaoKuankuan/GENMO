@@ -62,7 +62,17 @@ class TestParallelPreparation(unittest.TestCase):
         with self.assertRaises(Exception):
             parse_gpus("0,0")
         assignments = assigned_sources(list("abcdef"), {"b"}, 2, 4)
-        self.assertEqual(assignments, {"0": ["a", "d"], "1": ["c", "e"]})
+        self.assertEqual(assignments, {"0": ["a", "e"], "1": ["c", "d"]})
+
+    def test_eight_ranks_rotate_across_four_interleaved_datasets(self):
+        keys = [f"dataset{i % 4}:source{i}" for i in range(64)]
+        assignment = assigned_sources(keys, set(), 8)
+        flattened = [key for values in assignment.values() for key in values]
+        self.assertEqual(set(flattened), set(keys))
+        self.assertEqual(len(flattened), len(set(flattened)))
+        for values in assignment.values():
+            self.assertEqual({key.split(":")[0] for key in values}, {f"dataset{i}" for i in range(4)})
+        self.assertEqual(assigned_sources(keys, set(), 1)["0"], keys)
 
     def test_resume_rates_count_only_newly_published_sources(self):
         def episode(key):

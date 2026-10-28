@@ -7,6 +7,8 @@
 只按成功组每秒有效Future请求数选择规模，并报告H32、真实控制步、采集wall和显存。
 benchmark产生的6秒截断缓存不注册到正式训练sidecar，不代表整曲效果或全库预处理完成。
 本工具不会停止现有GPU任务，也不会自动启动训练；忙卡立即拒绝，所有正式处理另行启动。
+显存分别报告Torch分配器峰值和CUDA整卡占用的块边界采样峰值；后者包含Newton/Warp以及
+同卡其他进程/驱动，不能当作本进程精确峰值。旧peak_memory_bytes只是Torch峰值兼容别名。
 """
 
 import argparse
@@ -56,7 +58,15 @@ def summarize_trial(directory, num_envs, returncode, process_wall, expected_sour
                   complete_index_verified=summary.get("complete_index_verified", False))
     workers = summary.get("worker_summaries", {})
     result["worker_collection_wall_seconds"] = {rank: value.get("wall_seconds") for rank, value in workers.items()}
-    result["peak_memory_bytes"] = max((value.get("peak_memory_bytes", 0) for value in workers.values()), default=0)
+    result["torch_peak_memory_allocated_bytes"] = max((value.get("torch_peak_memory_allocated_bytes",
+        value.get("peak_memory_bytes", 0)) for value in workers.values()), default=0)
+    result["peak_memory_bytes"] = result["torch_peak_memory_allocated_bytes"]
+    result["sampled_device_memory_used_bytes"] = max((value["sampled_device_memory_used_bytes"]
+        for value in workers.values() if "sampled_device_memory_used_bytes" in value), default=None)
+    result["memory_statistics_contract"] = {rank: value.get("memory_statistics_contract",
+        {"peak_memory_bytes": "legacy_torch_allocator_only_device_memory_not_measured"})
+        for rank, value in workers.items()}
+    result["memory_sample_stages"] = {rank: value.get("memory_sample_stages", {}) for rank, value in workers.items()}
     result["solver_health"] = {rank: value.get("solver_health") for rank, value in workers.items()}
     if returncode:
         result["rejection_reason"] = "pipeline_process_failed_including_solver_overflow"

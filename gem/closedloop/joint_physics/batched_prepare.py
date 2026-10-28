@@ -8,6 +8,9 @@
 完成的歌曲批量生成离线 FutureContext，写入不可变 v2 分片，再原子发布每 worker 索引及
 公共索引。来源由确定性清单静态分配到各 GPU，已验证发布的来源不重复处理。半成品不进入
 训练索引；数据、资产、可见旧计划、失败与时间合同保持原样。不创建 GENMO 或训练优化器。
+显存同时报告PyTorch分配器峰值和块边界CUDA设备总占用采样峰值；后者覆盖Newton/Warp，
+也包含同卡其他进程/驱动占用，不等于本进程的精确瞬时峰值。旧peak_memory_bytes仅保留
+为Torch峰值的兼容字段，不能解释为全部VRAM。
 """
 
 from collections import Counter, deque
@@ -28,6 +31,38 @@ from .data import SourceCatalog
 from .offline import cache_requests_batched, source_provenance
 from .prepare_rollouts import (asset_contract, preparation_lock, preparation_sources,
                               publish_index, source_episode)
+
+
+class PreparationMemoryMonitor:
+    """仅在初始化、时间块和Future前后查询显存，不在每个控制步同步CUDA。"""
+
+    def __init__(self, device):
+        self.device = torch.device(device)
+        self.torch_peak, self.device_peak, self.device_last, self.device_total = 0, 0, 0, 0
+        self.sample_stages = Counter()
+
+    def sample(self, stage):
+        if self.device.type == "cuda":
+            free, total = torch.cuda.mem_get_info(self.device)
+            self.device_last, self.device_total = int(total-free), int(total)
+            self.device_peak = max(self.device_peak, self.device_last)
+            self.torch_peak = max(self.torch_peak, int(torch.cuda.max_memory_allocated(self.device)))
+        self.sample_stages[str(stage)] += 1
+
+    def report(self):
+        return {"peak_memory_bytes": self.torch_peak,
+            "torch_peak_memory_allocated_bytes": self.torch_peak,
+            "sampled_device_memory_used_bytes": self.device_peak,
+            "last_sampled_device_memory_used_bytes": self.device_last,
+            "device_memory_capacity_bytes": self.device_total,
+            "memory_sample_stages": dict(self.sample_stages),
+            "memory_statistics_contract": {
+                "peak_memory_bytes": "compatibility_alias_of_torch_peak_memory_allocated_bytes",
+                "torch_peak_memory_allocated_bytes": "pytorch_allocator_peak_only_excludes_newton_warp_allocations",
+                "sampled_device_memory_used_bytes": "maximum_sampled_cuda_total_minus_free_including_other_processes_and_driver",
+                "sampling": "collector_initialization_first_fill_trace_block_boundaries_before_after_offline_future_final",
+                "device_value_is_exact_process_peak": False,
+                "per_control_step_cuda_query": False}}
 
 
 def empty_index(cfg, catalog, adapter, split):
@@ -155,6 +190,8 @@ def collect_batched(cfg, adapter, env, sources, emit, *, chunk_steps=64, forecas
     records, next_id, done = {}, 0, deque()
     history = torch.zeros(n, 10, 75, device=device)
     block = TraceBlock(chunk_steps, n, device)
+    memory = PreparationMemoryMonitor(device)
+    memory.sample("collector_initialization")
     total_steps, total_requests, total_sources = 0, 0, 0
     start = time.perf_counter()
     workers = min(8, int(cfg["runtime"]["cpu_threads"]))
@@ -204,7 +241,9 @@ def collect_batched(cfg, adapter, env, sources, emit, *, chunk_steps=64, forecas
 
         def publish_done():
             nonlocal total_sources, total_requests
+            memory.sample("trace_block_before_flush")
             block.flush(records)
+            memory.sample("trace_block_after_flush")
             completed = []
             while done:
                 identifier = done.popleft()
@@ -213,7 +252,9 @@ def collect_batched(cfg, adapter, env, sources, emit, *, chunk_steps=64, forecas
                 completed.append((episode, record["dataset"], record["row"]))
             if not completed:
                 return
+            memory.sample("offline_future_before")
             summaries = cache_requests_batched(completed, adapter, batch_size=forecast_batch_size)
+            memory.sample("offline_future_after")
             from .requests import static_request
             for (episode, _, _), summary in zip(completed, summaries):
                 summary["legal_windows"] = {str(h): sum(static_request(episode, i, h)[1] is None
@@ -226,9 +267,10 @@ def collect_batched(cfg, adapter, env, sources, emit, *, chunk_steps=64, forecas
                 "control_steps": total_steps, "valid_future_requests": total_requests,
                 "source_per_second": total_sources/elapsed, "control_steps_per_second": total_steps/elapsed,
                 "future_requests_per_second": total_requests/elapsed, "wall_seconds": elapsed,
-                "num_envs": n, "peak_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type=="cuda" else 0}), flush=True)
+                "num_envs": n, **memory.report()}), flush=True)
 
         fill()
+        memory.sample("initial_slots_filled")
         while (slots >= 0).any():
             for slot in np.flatnonzero(slots >= 0):
                 episode = records[int(slots[slot])]["episode"]
@@ -284,11 +326,12 @@ def collect_batched(cfg, adapter, env, sources, emit, *, chunk_steps=64, forecas
         env.assert_solver_healthy()
         publish_done()
     elapsed = time.perf_counter()-start
+    memory.sample("collector_final")
     return {"sources": total_sources, "control_steps": total_steps, "valid_future_requests": total_requests,
             "wall_seconds": elapsed, "source_per_second": total_sources/elapsed,
             "control_steps_per_second": total_steps/elapsed, "future_requests_per_second": total_requests/elapsed,
             "num_envs": n, "solver_health": env.solver_health_tensor().cpu().tolist(),
-            "peak_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type=="cuda" else 0,
+            **memory.report(),
             "reference_cache": pages.statistics()}
 
 
