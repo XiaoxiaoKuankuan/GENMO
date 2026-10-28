@@ -25,6 +25,11 @@ def main(kind):
     parser.add_argument("--split", choices=("train", "val", "test"), default="train" if kind == "prepare" else "val")
     parser.add_argument("--max-sources", type=int)
     parser.add_argument("--max-control-steps", type=int)
+    parser.add_argument("--num-envs", type=int, default=1, help="真实sidecar批量Newton环境数；1保留原入口")
+    parser.add_argument("--worker-rank", type=int, default=0)
+    parser.add_argument("--worker-count", type=int, default=1)
+    parser.add_argument("--chunk-steps", type=int, default=64)
+    parser.add_argument("--forecast-batch-size", type=int, default=512)
     parser.add_argument("--newton", action="store_true")
     parser.add_argument("--interface-probe", action="store_true", help="仅GT接口/方向审计，绝不算学生训练成功")
     parser.add_argument("--complete-validation", help="对已有本方法原始Newton报告补充已记录目标合同和真实前瞻检查，不覆盖原报告")
@@ -91,6 +96,10 @@ def main(kind):
             if args.import_sidecar:
                 from .offline import prepare_from_sidecar
                 return prepare_from_sidecar(cfg, args.split, args.import_sidecar, output, adapter)
+            if args.num_envs > 1:
+                from .batched_prepare import prepare_worker
+                return prepare_worker(cfg, args.split, output, adapter, env, args.worker_rank, args.worker_count,
+                    chunk_steps=args.chunk_steps, forecast_batch_size=args.forecast_batch_size)
             from .prepare_rollouts import prepare
             return prepare(cfg, args.split, output, adapter, env, initialize_only=args.initialize_sidecar)
         if kind == "gradients":
@@ -114,5 +123,9 @@ def main(kind):
         solver_cfg=replace(sim_cfg.physics.solver_cfg, disable_sensors=True),
         deterministic_mode=cfg["physics"]["determinism"]))
     with launch_simulation(sim_cfg, args):
-        env = StreamingPhysicalEnv(sim_cfg, 1, adapter.bundle)
+        if kind == "prepare" and args.num_envs > 1:
+            from .batched_simulation import BatchedStreamingPhysicalEnv
+            env = BatchedStreamingPhysicalEnv(sim_cfg, args.num_envs, adapter.bundle)
+        else:
+            env = StreamingPhysicalEnv(sim_cfg, 1, adapter.bundle)
         execute(env)

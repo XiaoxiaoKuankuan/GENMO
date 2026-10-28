@@ -36,7 +36,8 @@ def asset_contract(cfg, adapter):
         "observation_noise": False}
 
 
-def collect_source(dataset, row_index, cfg, adapter, env):
+def source_episode(dataset, row_index, cfg):
+    """共享原数据/地面/版本身份装配；单环境与批量采集使用同一个合同。"""
     sequence = dataset.reader.load_aligned_sequence(dataset.rows[row_index])
     sample = dataset.get_window(row_index, 0)
     meta = sample["meta"]
@@ -56,7 +57,16 @@ def collect_source(dataset, row_index, cfg, adapter, env):
         "music_sha256": digest(meta["music_feature_path"]), "ground_height_world_m": ground["ground_height_world_m"],
         "ground_metadata": ground, "reference_qpos": qpos, "source_versions": source_versions,
         "old_plan_origin": "teacher_forced_append_only_precommitted", "reset_count": 1,
+        "old_plan_frames": old_frames, "old_plan_period_ticks": period,
         "state_origin": "continuous_newton_observation_not_data_reference", "source_crop": [0, n]}
+    return episode
+
+
+def collect_source(dataset, row_index, cfg, adapter, env):
+    episode = source_episode(dataset, row_index, cfg)
+    qpos, source_versions = episode["reference_qpos"], episode["source_versions"]
+    n = len(qpos)
+    old_frames, period = cfg["prepare"]["old_plan_frames"], cfg["prepare"]["old_plan_period_ticks"]
     device = env.device
     @lru_cache(maxsize=2)
     def cache_for_version(version):

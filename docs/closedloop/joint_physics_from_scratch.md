@@ -310,3 +310,61 @@ python tools/summarize_joint_physics_experiment.py --root <experiment_root> --ou
 `runtime.graph_tracking_monitor=true`只捕获原SM监控FK，启动前核对数值；不能据此声称
 Newton求解器已变快。所有预热在正式episode之前记录，有限启动保持仍只支持1.74s控制。
 同GPU、双GPU、固定交付、实际墙钟的结果必须分开，接管成功不代表50Hz控制无超期。
+
+## 2026-10-28：批量离线生产和协作暂停
+
+`joint_physics_sidecar_parallel_server2.yaml`只改变预处理预算及分片大小，继承同一资产、
+数据与执行Loss合同。每GPU一个Newton进程、独立环境槽位、50Hz控制/200Hz物理，不渲染。
+结束槽位立即接下一首，失败终止独立保存；不重置拼接。GPU按worldid归约真实接触，
+状态/动作每64步回传一块，FutureContext按请求分组批量SM/WM执行。参考解析沿用原FK、
+插值和速度公式，分页读取仍核对已提交可见范围及速度halo，整曲预计算不等于未来条件可见。
+
+主索引和每worker索引均原子发布，分片内容不可变。续处理验证资产/原数据/已发布分片，
+跳过已验证source；worker索引与主索引之间中断时先补发布再继续。训练原第三sidecar目录
+可直接追加，既有完整checkpoint以旧snapshot恢复后在下一次刷新纳入新增来源。
+原两份缓存及已经完成的第三目录分片保留，早期1000步截断会单独记录，不能算完整歌曲。
+
+```bash
+# CPU清单检查，不启动任何GPU进程；临时检查使用独立目录并在结束清理。
+/data0/user/liwei/envs/genmo_sm_runtime/bin/python tools/prepare_joint_physics_parallel.py \
+  --config configs/closedloop/joint_physics_sidecar_parallel_server2.yaml \
+  --output <独立预检目录> --initialize-only
+
+# GPU释放且256/512/1024真实基准完成后，使用实测最佳N，默认优先512。
+# 必须先结束同目录旧单环境生产者；协调器会通过文件锁/GPU占用检查拒绝重复运行。
+/data0/user/liwei/envs/genmo_sm_runtime/bin/python tools/prepare_joint_physics_parallel.py \
+  --config configs/closedloop/joint_physics_sidecar_parallel_server2.yaml \
+  --output /data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_bf16_20261028/sidecar_increment \
+  --gpus 0,1,2,3,4,5,6,7 --num-envs <实测最佳N>
+```
+
+`progress.json`持续记录已落盘source/s、真实控制步/s、有效Future请求/s、H32窗口和ETA。
+无有效请求时ETA为空，不编造吞吐。单卡基准的预算截断、求解器容量失败和成功组分别保存；
+只有成功完成采集、前瞻、落盘的组才可用于环境数选择。CPU测试不代表Newton性能验收。
+
+新版本训练支持在当前run目录原子发布`pause-request.json`：
+
+```json
+{"reason": "先完成全库离线预处理再恢复", "output": "/当前训练run的绝对路径"}
+```
+
+每10个optimizer边界rank0检查请求，复用已有日志归约同步各rank，无额外常规collective。
+先保存全部模型/AdamW/8rank数据和噪声RNG/sidecar快照，再写`paused.json`并正常退出。
+错误目录或不完整JSON不触发暂停。恢复使用`paused.json`所指完整checkpoint，目标仍是
+绝对global_step=200000，写入新的续训输出目录，不覆盖旧run。
+
+**已经运行的旧进程不会因修改磁盘而获得此入口。** 2026-10-28核验的旧正式进程仅每5000步
+保存，尚未保存的更新无法通过SIGINT/SIGTERM补存；暂停前必须等待实际完整checkpoint，
+或另行获得明确允许丢弃未保存进度的授权。不得把step0断点称为已经保存当前进度。
+
+单卡规模选择命令（GPU必须空闲；默认每组1024首、最多6秒真实控制，完成前瞻和写盘）：
+
+```bash
+/data0/user/liwei/envs/genmo_sm_runtime/bin/python tools/benchmark_joint_physics_preparation.py \
+  --config configs/closedloop/joint_physics_sidecar_parallel_server2.yaml \
+  --output <独立规模验收目录> --gpu 0
+```
+
+结果`summary.json/selected_num_envs`来自三个成功组中端到端有效Future请求/s最大者；
+失败或容量溢出组不参加选择。基准目录不能加入训练缓存，完成验收后保留汇总/失败日志，
+清理其独立临时分片。正式全库生产没有这6秒截断预算。

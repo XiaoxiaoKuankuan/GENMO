@@ -25,6 +25,7 @@ from .contracts import PhysicsRejected, digest, execution_contract
 from .curriculum import Readiness, physics_noise_levels
 from .data import JointDataStream, SidecarStore
 from .checkpoint import read_checkpoint, restore_trainer, save_trainer
+from .pause import PauseControl
 
 GRADIENT_GROUPS = ('future_encoder','stage1.denoiser','stage1.history_encoder',
                    'stage1.music_embedder','stage1.cond_exists_embedder','stage1.prefix_encoder')
@@ -296,9 +297,16 @@ class JointTrainer:
         # 将同型损失一次性归约/拷回CPU，日志是八卡均值而非仅rank0样本值。
         term_keys = [key for key,v in components.items() if isinstance(v,torch.Tensor)]
         terms = torch.stack([components[key].detach().float().mean() for key in term_keys])
+        pause = getattr(self, 'pause_control', None)
+        if pause is not None:
+            # 暂停位复用原有日志归约；无请求时也不新增collective或GPU同步。
+            terms = torch.cat((terms, terms.new_tensor([pause.local_flag(self.step)])))
         if self.world_size > 1:
             dist.all_reduce(terms)
-        data_terms = dict(zip(term_keys, (terms/self.world_size).cpu().tolist()))
+        term_values = (terms/self.world_size).cpu().tolist()
+        if pause is not None:
+            pause.accept_global_flag(term_values.pop())
+        data_terms = dict(zip(term_keys, term_values))
         detail_every = self.cfg['training'].get('sample_log_every',1)
         details = bool(detail_every and (self.step % detail_every == 0))
         if not details:
@@ -398,6 +406,9 @@ class JointTrainer:
 
     def run(self, output, stop_step):
         output = Path(output)
+        self.pause_control = PauseControl(output, self.rank)
+        pause_checkpoint = None
+        saved_step = None
         if self.rank == 0:
             output.mkdir(parents=True, exist_ok=False)
             (output/"config.json").write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2))
@@ -405,6 +416,7 @@ class JointTrainer:
             dist.barrier()
         if self.step == 0:
             save_trainer(self, output/"joint_00000000.pt")
+            saved_step = self.step
         if self.rank == 0 and self.physics_stream is not None:
             (output/"physics_inventory.json").write_text(json.dumps(self.physics_stream.inventory, ensure_ascii=False, indent=2))
         recent_physics_norm = 0.
@@ -437,6 +449,12 @@ class JointTrainer:
                         interval_seconds = 0.
                 if self.step % self.cfg["training"]["checkpoint_every"] == 0 or self.step == stop_step or self.step in self.cfg["training"]["diagnostic_steps"]:
                     save_trainer(self, output/f"joint_{self.step:08d}.pt")
+                    saved_step = self.step
+                if self.pause_control.requested:
+                    pause_checkpoint = output/f"joint_{self.step:08d}.pt"
+                    if saved_step != self.step:
+                        save_trainer(self, pause_checkpoint)
+                    break
                 every = self.cfg['training'].get('numerical_diagnostics_every',0)
                 if every and self.step % every == 0:
                     self.numerical_diagnostics(output)
@@ -444,8 +462,15 @@ class JointTrainer:
             self.stream.close()
             if self.adapter is not None:
                 self.adapter.bundle.assert_unchanged(self.frozen)
+        if pause_checkpoint is not None:
+            if self.world_size > 1:
+                dist.barrier()
+            if self.rank == 0:
+                self.pause_control.publish(self.step, pause_checkpoint, self.world_size)
+            if self.world_size > 1:
+                dist.barrier()
         if self.rank == 0:
             summary = {"global_step": self.step, **self.counters, "frozen_unchanged": True,
-                       "status": "joint_student_updates_observed" if self.counters["physics_updates"] else "supervision_started_only"}
+                       "status": "paused" if pause_checkpoint is not None else "joint_student_updates_observed" if self.counters["physics_updates"] else "supervision_started_only"}
             (output/"summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
         return self.counters

@@ -1,0 +1,15 @@
+# Server-2全库真实物理附属缓存生产配置。
+# 只改变离线生产预算与分片大小；GENMO网络、SM/WM资产及联合执行Loss继承原合同。
+# 50Hz控制/200Hz Newton，v2缓存连续执行失败即停；不使用渲染或训练中的在线前瞻。
+# 256/512/1024环境由协调器命令行选择，默认整曲执行，不保留旧1000步/128首预算。
+base_config: joint_physics_formal_200k_bf16_8gpu_server2.yaml
+runtime:
+  cpu_threads: 4
+prepare:
+  resume: true
+  balanced_sources: true
+  source_seed: 42
+  shard_episodes: 8
+  max_sources: null
+  max_sources_per_dataset: null
+  max_control_steps: null

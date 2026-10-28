@@ -25,7 +25,8 @@ class ForecastResult:
 
 def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None,
                      reference_dependencies=None, initial_dependency_steps=0,
-                     transition_fn=None, on_step=None, reuse_current_observation=False):
+                     transition_fn=None, on_step=None, reuse_current_observation=False,
+                     allow_nonfinite_context=False):
     if state.pending or forecast_tick < state.tick or (forecast_tick - state.tick) % 12:
         raise ValueError("前瞻必须从无pending请求预测到未来控制网格")
     predicted = state
@@ -59,9 +60,13 @@ def forecast_rollout(state, adapter, forecast_tick, *, support_guard=None,
                        mat_to_6d(ref.root_R.transpose(-1, -2) @ R) - mat_to_6d(identity),
                        local(v - ref.root_v), local(w - ref.root_w), q - ref.q, qd - ref.qd,
                        p.new_full((len(p), 1), (forecast_tick - state.tick) / 600)), -1)
-    if not bool(torch.isfinite(error).all()):
+    # 离线批量预处理在返回后按样本检查整段状态；单个坏请求不应使整批合法请求失效。
+    # 在线及训练调用保持默认严格行为，禁止把该选项用于放宽实际执行安全条件。
+    if not allow_nonfinite_context and not bool(torch.isfinite(error).all()):
         raise FloatingPointError("冻结WM前瞻产生非有限状态")
-    ctx = ForecastContext(error, torch.ones(len(p), dtype=torch.bool, device=p.device), state.tick, forecast_tick)
+    context_valid = (torch.isfinite(error).all(dim=-1) if allow_nonfinite_context
+                     else torch.ones(len(p), dtype=torch.bool, device=p.device))
+    ctx = ForecastContext(error, context_valid, state.tick, forecast_tick)
     if reference_dependencies is not None:
         depth = max(depth, reference_dependencies.control_depth(predicted.reference, forecast_tick, future_steps=0))
     return ForecastResult(ctx, predicted, ref, (forecast_tick - state.tick) // 12, depth)

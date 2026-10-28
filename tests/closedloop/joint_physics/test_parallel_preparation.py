@@ -1,0 +1,83 @@
+"""预处理协调器的纯CPU控制合同测试，不加载SM/WM或启动实际GPU任务。
+
+覆盖物理GPU编号/UUID与compute进程关联、忙卡拒绝、来源排除及固定轮流分配、
+恢复进度的新增吞吐口径，以及JSON原子写入不覆盖已有证据。真实Newton吞吐和
+环境规模选择由服务器完整采集+前瞻benchmark单独验收，本测试不替代动力学结果。
+"""
+
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+from types import SimpleNamespace
+import unittest
+
+from tools.prepare_joint_physics_parallel import (assigned_sources, atomic_json,
+    parse_gpus, progress_payload, require_idle_gpus)
+from tools.benchmark_joint_physics_preparation import select_result, summarize_trial
+
+
+class TestParallelPreparation(unittest.TestCase):
+    def test_gpu_busy_is_rejected_by_uuid_and_other_gpu_is_allowed(self):
+        def runner(command, **kwargs):
+            output = "0, GPU-a\n1, GPU-b\n" if "--query-gpu=" in command[1] else "GPU-b, 77, train.py\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+        self.assertEqual(require_idle_gpus(["0"], runner=runner), {"0": "GPU-a"})
+        with self.assertRaisesRegex(RuntimeError, "77"):
+            require_idle_gpus(["1"], runner=runner)
+        with self.assertRaises(RuntimeError):
+            require_idle_gpus(["8"], runner=runner)
+
+    def test_gpu_ids_and_deterministic_assignments(self):
+        self.assertEqual(parse_gpus("0,1,7"), ["0", "1", "7"])
+        with self.assertRaises(Exception):
+            parse_gpus("0,0")
+        assignments = assigned_sources(list("abcdef"), {"b"}, 2, 4)
+        self.assertEqual(assignments, {"0": ["a", "d"], "1": ["c", "e"]})
+
+    def test_resume_rates_count_only_newly_published_sources(self):
+        def episode(key):
+            return {"source_key": key, "control_steps": 100, "termination_reason": "sm_physical_termination",
+                    "offline_preprocessing": {"valid_requests": 10, "legal_windows": {"32": 3}}}
+        index = {"sources": dict(a={}, b={}), "episodes": [episode("a"), episode("b")]}
+        manifest = {"assignments": {"0": ["a", "b", "c"]}}
+        process = SimpleNamespace(pid=42, poll=lambda: None)
+        value = progress_payload(index, manifest, {"a"}, 2., {0: process})
+        self.assertEqual(value["completed_sources"], 2)
+        self.assertEqual(value["remaining_sources"], 1)
+        self.assertEqual(value["source_per_second"], .5)
+        self.assertEqual(value["control_steps_per_second"], 50.)
+        self.assertEqual(value["future_requests_per_second"], 5.)
+        self.assertEqual(value["total"]["legal_h32_windows"], 6)
+        self.assertEqual(value["eta_seconds"], 2.)
+
+    def test_atomic_manifest_cannot_overwrite_previous_identity(self):
+        with tempfile.TemporaryDirectory(prefix="joint-parallel-test-") as temp:
+            path = Path(temp)/"manifest.json"
+            atomic_json(path, {"workers": 8}, replace=False)
+            with self.assertRaises(FileExistsError):
+                atomic_json(path, {"workers": 1}, replace=False)
+            self.assertEqual(json.loads(path.read_text()), {"workers": 8})
+            self.assertEqual(list(Path(temp).glob("*.partial")), [])
+
+    def test_scale_selection_excludes_failed_and_uses_complete_process_time(self):
+        with tempfile.TemporaryDirectory(prefix="joint-parallel-test-") as temp:
+            output = Path(temp)
+            (output/"batch_manifest.json").write_text(json.dumps({"assignments": {"0": ["same_source"]}}))
+            (output/"summary.json").write_text(json.dumps({"status": "completed", "frozen_unchanged": True,
+                "complete_index_verified": True, "session": {"sources": 1, "control_steps": 300,
+                "valid_future_requests": 12, "legal_h32_windows": 8},
+                "worker_summaries": {"0": {"wall_seconds": 1., "peak_memory_bytes": 1000}}}))
+            first, sources = summarize_trial(output, 256, 0, 4., None)
+            self.assertTrue(first["eligible"])
+            self.assertEqual(first["process_future_requests_per_second"], 3.)
+            failed, _ = summarize_trial(output, 512, 1, 1., sources)
+            different, _ = summarize_trial(output, 1024, 0, 1., ["another_source"])
+            self.assertFalse(failed["eligible"])
+            self.assertFalse(different["eligible"])
+            self.assertEqual(select_result([first, failed, different])["num_envs"], 256)
+            self.assertIsNone(select_result([failed]))
+
+
+if __name__ == "__main__":
+    unittest.main()
