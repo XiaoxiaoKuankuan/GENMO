@@ -32,10 +32,43 @@ def _derivatives(projector, x):
         cache = projector._so3_derivatives = {}
     # KKT参数VJP需要真实二阶autograd，不能经不支持double-backward的AOT封装。
     compiled = x.is_cuda and not torch.is_grad_enabled() and getattr(projector, 'compile_derivatives', True)
-    key = (x.device, x.dtype, compiled)
+    sparse = getattr(projector, 'sparse_derivatives', False)
+    key = (x.device, x.dtype, compiled, sparse)
     if key not in cache:
-        from .so3_derivatives import build
-        cache[key] = build(projector, x, compile_kernels=compiled)
+        if sparse:
+            from .so3_derivatives import build
+            cache[key] = build(projector, x, compile_kernels=compiled)
+        else:
+            fn = torch.func.vmap(projector.angular_constraints)
+            jac = torch.func.vmap(torch.func.jacrev(projector.angular_constraints, argnums=0))
+            def curvature(value, old, current, nominal, lam):
+                return (projector.angular_constraints(value, old, current, nominal)*lam).sum()
+            hess = torch.func.vmap(torch.func.jacrev(torch.func.grad(curvature, argnums=0), argnums=0))
+            if compiled:
+                def compile_one(function):
+                    kernels = {}
+                    def fixed_batch(*values):
+                        # 数值求解本来就在no_grad内；clone统一grad标记，只用于数值
+                        # J/H的计算。最终目标/历史/参考的VJP仍由原KKT完整计算。
+                        chunks = []
+                        for begin in range(0, len(values[0]), 256):
+                            batch = min(256, len(values[0])-begin)
+                            bucket = 128 if batch <= 128 else 256
+                            inputs = []
+                            for value in values:
+                                part = value[begin:begin+batch].clone()
+                                if batch < bucket:
+                                    part = torch.cat((part, part[:1].expand(bucket-batch, *part.shape[1:])), 0)
+                                inputs.append(part)
+                            if bucket not in kernels:
+                                # 只允许128/256两个静态纯导数核，避免vmap按活跃数量重编译。
+                                kernels[bucket] = torch.compile(function, dynamic=False, fullgraph=True,
+                                    options={'triton.cudagraphs': False})
+                            chunks.append(kernels[bucket](*inputs)[:batch])
+                        return torch.cat(chunks, 0)
+                    return fixed_batch
+                jac, hess = compile_one(jac), compile_one(hess)
+            cache[key] = fn, jac, hess
     return cache[key]
 
 

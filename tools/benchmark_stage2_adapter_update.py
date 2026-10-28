@@ -38,6 +38,7 @@ def main():
     p.add_argument('--microbatches', type=int, nargs='+', default=[32, 64, 128, 256])
     p.add_argument('--implementations', nargs='+', default=['baseline', 'optimized'])
     p.add_argument('--no-compile-derivatives', action='store_true')
+    p.add_argument('--sparse-derivatives', action='store_true', help='实验性精确局部导数；默认使用已测量的原30维融合核')
     p.add_argument('--compile-components', action='store_true')
     p.add_argument('--aux-weight', type=float, default=0.)
     p.add_argument('--profile', action='store_true', help='额外H1 Kineto算子分析，不计入吞吐墙钟')
@@ -112,6 +113,7 @@ def main():
         cls = old_projection.ReferenceProjection if implementation == 'baseline' else ReferenceProjection
         control.projection = cls(control.bundle.spec, control.adapter.bounds, **cfg['alternating']['projection']).cuda()
         control.projection.compile_derivatives = not args.no_compile_derivatives
+        control.projection.sparse_derivatives = args.sparse_derivatives
         if implementation == 'baseline':
             def old_project(self, *inputs):
                 return old_so3.project_rotation_implicit(self, *inputs)
@@ -167,6 +169,8 @@ def main():
                     ref = vectors.get(key)
                     if ref is None:
                         vectors[key] = (gradient, parameters, metrics)
+                        torch.save(dict(gradient=gradient, parameters=parameters, metrics=metrics),
+                                   out/f'vectors_{implementation}_h{horizon}.pt')
                         row['comparison'] = 'first_microbatch_reference'
                     else:
                         g, params, m = ref

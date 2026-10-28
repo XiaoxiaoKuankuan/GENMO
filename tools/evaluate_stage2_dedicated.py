@@ -23,9 +23,12 @@ def main():
     p.add_argument('--max-steps', type=int)
     p.add_argument('--adapter-updates', type=int, required=True)
     p.add_argument('--baseline-source')
+    p.add_argument('--repeat-candidate', type=int, default=1)
     args = p.parse_args()
     if args.num_envs not in range(4, 9):
         raise ValueError('专用物理评价只允许4至8个实际环境')
+    if args.repeat_candidate < 1:
+        raise ValueError('重复物理评价次数必须为正')
     repo = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo))
     import yaml
@@ -90,14 +93,17 @@ def main():
                 zero.update(adapter_updates=0, exploration_noise=0., evaluation_scope=scope,
                             evaluation_backend='dedicated_physics', actual_physics_envs=args.num_envs)
                 zero_path.write_text(json.dumps(zero, ensure_ascii=False, indent=2))
-            seed_all(42); collector.generator.manual_seed(42)
-            report = evaluate_physical(collector, zero=False, split=split, max_steps=args.max_steps)
-            report.update(adapter_updates=args.adapter_updates, exploration_noise=0., evaluation_scope=scope,
-                zero_baseline_key=key, evaluation_backend='dedicated_physics', actual_physics_envs=args.num_envs)
-            report['paired_zero'] = paired_comparison(zero, report)
-            report['paired_zero_difference'] = {k: report[k]-zero[k] if report[k] is not None and zero[k] is not None else None
-                for k in ['completion_rate','mean_tracking','mean_full_horizon_tracking','mean_root_position_rmse_m','mean_jerk_rms','mean_beat_f1']}
-            (out/f'{split}_{args.adapter_updates:06d}.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+            for repeat in range(args.repeat_candidate):
+                seed_all(42); collector.generator.manual_seed(42)
+                report = evaluate_physical(collector, zero=False, split=split, max_steps=args.max_steps)
+                report.update(adapter_updates=args.adapter_updates, exploration_noise=0., evaluation_scope=scope,
+                    zero_baseline_key=key, evaluation_backend='dedicated_physics', actual_physics_envs=args.num_envs,
+                    repeat_index=repeat)
+                report['paired_zero'] = paired_comparison(zero, report)
+                report['paired_zero_difference'] = {k: report[k]-zero[k] if report[k] is not None and zero[k] is not None else None
+                    for k in ['completion_rate','mean_tracking','mean_full_horizon_tracking','mean_root_position_rmse_m','mean_jerk_rms','mean_beat_f1']}
+                suffix = '' if repeat == 0 else f'_repeat{repeat}'
+                (out/f'{split}_{args.adapter_updates:06d}{suffix}.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     (out/f'dedicated_timing_{args.adapter_updates:06d}.json').write_text(json.dumps(dict(
         seconds=time.perf_counter()-begin, actual_physics_envs=args.num_envs, training_physics_advanced=False,
         snapshot=args.snapshot), indent=2))
