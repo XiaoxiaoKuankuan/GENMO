@@ -64,7 +64,9 @@ class PrecisionObjective:
         a = v.diff(dim=1)/.02
         budget = control.projection
         velocity = (v/budget.velocity).square().mean((1, 2))
-        acceleration = (a/budget.acceleration).square().mean((1, 2))
+        # 用户关闭根角加速度时，不能仍通过稳定性成本间接优化它。
+        # 保持原27通道平均分母，其余通道权重不因去掉三个旋转通道而增大。
+        acceleration = ((a/budget.acceleration).square()*budget.acceleration_mask).mean((1, 2))
         raw.update(action_deviation=action, added_reference_velocity=velocity, added_reference_acceleration=acceleration)
         weighted.update(action_deviation=-.02*self.action_weight*action,
                         added_reference_velocity=-.02*self.velocity_weight*velocity,

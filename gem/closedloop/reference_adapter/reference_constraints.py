@@ -8,6 +8,8 @@
 
 根旋转还必须检查复合SO(3)后的真实角速度/角加速度，不能把旋转向量导数冒充它。
 数值不收敛或SO(3)预算不满足时返回明确不可执行证据，调用方不得发送该动作。
+正式配置可关闭根角加速度：同时移除旋转向量二阶差分与SO(3)角加速度约束，
+只保留根角速度和幅值；其余平移/关节约束不变。旧研究默认行为保持以便复现。
 零提案、零已提交历史严格保持零；非零历史下零提案仍须遵守接缝，不承诺数学上
 不可能同时满足的“历史非零但未来无条件全零”。旧beta仅供失败基线对照。
 """
@@ -141,11 +143,13 @@ class ReferenceProjection(torch.nn.Module):
     def __init__(self, spec, bounds, *, joint_velocity=1., joint_acceleration=10.,
                  ankle_velocity=.5, ankle_acceleration=5., height_velocity=.12,
                  height_acceleration=1.2, rotation_velocity=.3, rotation_acceleration=3.,
-                 iterations=3000, coupled_iterations=40, tolerance=1e-6):
+                 iterations=3000, coupled_iterations=40, tolerance=1e-6,
+                 constrain_root_angular_acceleration=True):
         super().__init__()
         self.iterations, self.tolerance = iterations, tolerance
         self.coupled_iterations = coupled_iterations
         self.rotation_velocity, self.rotation_acceleration = rotation_velocity, rotation_acceleration
+        self.constrain_root_angular_acceleration = constrain_root_angular_acceleration
         # 旋转三个分量分配欧氏球预算；最终角速度始终以SO(3)复合后结果核验。
         velocity = [.12, .12, height_velocity]+[rotation_velocity/(3**.5)]*3
         acceleration = [1.2, 1.2, height_acceleration]+[rotation_acceleration/(3**.5)]*3
@@ -154,6 +158,9 @@ class ReferenceProjection(torch.nn.Module):
         dtype, device = bounds.dtype, bounds.device
         self.register_buffer('velocity', torch.tensor(velocity, dtype=dtype, device=device))
         self.register_buffer('acceleration', torch.tensor(acceleration, dtype=dtype, device=device))
+        acceleration_mask = torch.ones(27, dtype=torch.bool, device=device)
+        acceleration_mask[3:6] = constrain_root_angular_acceleration
+        self.register_buffer('acceleration_mask', acceleration_mask)
         self.register_buffer('bounds', bounds.detach().clone())
         eye = torch.eye(10, device=device, dtype=dtype)
         difference = eye-torch.diag(torch.ones(9, device=device, dtype=dtype), -1)
@@ -173,6 +180,13 @@ class ReferenceProjection(torch.nn.Module):
             torch.ones_like(self.bounds)[:, None].expand(-1, 10),
             (self.acceleration*.02/self.velocity)[:, None].expand(-1, 10)), -1)
         lower, upper = boundary-limits, boundary+limits
+        if not self.constrain_root_angular_acceleration:
+            # 只移除根旋转二阶差分。由幅值/已提交历史推导必然满足的冗余上界，
+            # 保持原批处理QP形状且不引入Inf；不是提高其它运动预算或隐藏检查失败。
+            cap = 4*torch.maximum(self.bounds[3:6]/unit[3:6],
+                                  torch.maximum(l[:, 3:6].abs(), c[:, 3:6].abs()))
+            lower[:, 3:6, 20:] = a_boundary[:, 3:6]-cap[..., None]
+            upper[:, 3:6, 20:] = a_boundary[:, 3:6]+cap[..., None]
         # 已可行的提案原样通过，零严格为零，未激活约束时输入梯度严格为单位矩阵。
         feasible = ((y@self.matrix.T >= lower) & (y@self.matrix.T <= upper)).all(-1)
         indices = (~feasible).flatten().nonzero().flatten()
@@ -207,9 +221,11 @@ class ReferenceProjection(torch.nn.Module):
         w = so3_log(corrected[1:]@corrected[:-1].transpose(-1, -2))/.02
         nominal_w = so3_log(nominal_rotation[1:]@nominal_rotation[:-1].transpose(-1, -2))/.02
         dw = w-nominal_w
-        return torch.cat((dw[1:].norm(dim=-1)/self.rotation_velocity-1,
-            (dw.diff(dim=0)/.02).norm(dim=-1)/self.rotation_acceleration-1,
-            plan.norm(dim=-1)/.05-1))
+        constraints = [dw[1:].norm(dim=-1)/self.rotation_velocity-1,
+                       plan.norm(dim=-1)/.05-1]
+        if self.constrain_root_angular_acceleration:
+            constraints.insert(1, (dw.diff(dim=0)/.02).norm(dim=-1)/self.rotation_acceleration-1)
+        return torch.cat(constraints)
 
     def project_rotation(self, proposal, projected, left, anchor, nominal_rotation, lower, upper):
         unit = self.velocity[3:6]*.02
@@ -260,24 +276,28 @@ class ReferenceProjection(torch.nn.Module):
         d = torch.cat((left[:, None], anchor[:, None], proposal, halo), 1)
         velocity, acceleration = d.diff(dim=1)/.02, d.diff(dim=1).diff(dim=1)/.02**2
         excess_v = (velocity.abs()-self.velocity).amax((1, 2))
-        excess_a = (acceleration.abs()-self.acceleration).amax((1, 2))
+        excess_a = (acceleration.abs()-self.acceleration)[..., self.acceleration_mask].amax((1, 2))
         corrected = nominal_rotation@so3_exp(d[..., 3:6])
         w = so3_log(corrected[:, 1:]@corrected[:, :-1].transpose(-1, -2))/.02
         nominal_w = so3_log(nominal_rotation[:, 1:]@nominal_rotation[:, :-1].transpose(-1, -2))/.02
         # 不限制GENMO本身合法速度；限制修正带来的真实世界角速度/角加速度偏离。
         dw = w-nominal_w
         excess_w = dw.norm(dim=-1).amax(-1)-self.rotation_velocity
-        excess_alpha = (dw.diff(dim=1)/.02).norm(dim=-1).amax(-1)-self.rotation_acceleration
         excess_bound = (proposal.abs()-self.bounds).amax((1, 2))
         excess_rotation = proposal[..., 3:6].norm(dim=-1).amax(-1)-.05
         # 位移数值容差统一换算到导数，报告原量；不把不收敛解当可执行参考。
         good = ((excess_v <= self.tolerance/.02) & (excess_a <= self.tolerance/.02**2)
-                & (excess_w <= self.tolerance/.02) & (excess_alpha <= self.tolerance/.02**2)
+                & (excess_w <= self.tolerance/.02)
                 & (excess_bound <= self.tolerance))
         good &= excess_rotation <= self.tolerance
-        return dict(feasible=good, velocity_excess=excess_v, acceleration_excess=excess_a,
-            angular_velocity_excess=excess_w, angular_acceleration_excess=excess_alpha,
-            bound_excess=excess_bound, rotation_magnitude_excess=excess_rotation)
+        report = dict(velocity_excess=excess_v, acceleration_excess=excess_a,
+            angular_velocity_excess=excess_w, bound_excess=excess_bound,
+            rotation_magnitude_excess=excess_rotation)
+        if self.constrain_root_angular_acceleration:
+            excess_alpha = (dw.diff(dim=1)/.02).norm(dim=-1).amax(-1)-self.rotation_acceleration
+            good &= excess_alpha <= self.tolerance/.02**2
+            report['angular_acceleration_excess'] = excess_alpha
+        return dict(feasible=good, **report)
 
 
 def constrain_plan(proposal, left, anchor, beta):

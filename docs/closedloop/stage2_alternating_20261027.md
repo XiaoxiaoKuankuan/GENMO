@@ -4,7 +4,7 @@
 
 ## 固定合同
 
-GENMO缓存与SuperMimic Actor及Actor normalizer冻结；独立Adapter保持2654→512→512→256→270、三层SiLU、十帧SO(3)残差、根XY关闭。采用现有已运行的灵活参考投影，关节速度/加速度1rad/s、10rad/s²，踝0.5rad/s、5rad/s²，根高度0.12m/s、1.2m/s²，根旋转0.3rad/s、3rad/s²。上述是附加预算，不是硬件极限。
+GENMO缓存与SuperMimic Actor及Actor normalizer冻结；独立Adapter保持2654→512→512→256→270、三层SiLU、十帧SO(3)残差、根XY关闭。采用现有已运行的灵活参考投影，关节速度/加速度1rad/s、10rad/s²，踝0.5rad/s、5rad/s²，根高度0.12m/s、1.2m/s²，根角速度0.3rad/s。2026-10-28按用户新指令关闭根角加速度约束和成本，八份正式配置显式设置`constrain_root_angular_acceleration: false`；下方2026-10-27历史运行仍使用原3rad/s²预算，不改写旧结果。上述是附加预算，不是硬件极限。
 
 原SM六项及action-rate不变；music=1e-4，软关节限位关闭，不加body_w Huber或接触损失。原q、qd、身体姿态和局部根位移精度及参考正则保持；八组统一precision weight=0.446714796317961，其余权重见配置。训练只用64首真实GENMO生成缓存，validation选best，evaluation仅报告。
 
@@ -125,3 +125,11 @@ cd /home/user/liwei/bumi-closedloop-worktrees/adapter/GENMO
 最终完整CPU回归81 passed/33.35秒，真实SM权重未skip；活跃SO(3)约束加Critic终端的检查点梯度等价通过。已清理本轮精确测试临时目录，保留正式失败现场与训练证据。本地轻量交付证据：`/home/weili/bumi-closedloop-worktrees/adapter/alternating_20261027_2226_delivery/{initial,recovery1,current}`。
 
 本次没有执行新的WM物理方向诊断或pilot。尚未达到50次更新，因此没有新的固定整歌评价结果，也没有证据宣称真实跟踪改善；后续按50/100/200/400/700/1000自动评价，validation选best，evaluation仅独立报告，效果好坏不作为逐更新门槛。
+
+## 2026-10-28取消根角加速度
+
+用户明确“不考虑根角加速度”。正式配置同时取消旋转向量的二阶差分约束、复合SO(3)角加速度约束、该项运行时证书判断及参考加速度成本中的三个旋转通道。其余通道成本仍按原27通道分母计算，不隐式加大关节/高度正则权重。SO(3)姿态组合、角速度及幅值、关节/高度速度加速度和真实锚点/halo保留；原SM六项、WM/Actor/Adapter结构不变。
+
+“提案”仅指Adapter直接输出的270个十帧修正数，不是额外网络。SO(3)姿态组合自身保证旋转合法；旧多轮SQP是为了额外运动预算修正参考，不是生成合法旋转的必需步骤。关闭角加速度后，仅角加速度超旧预算的输出不再进入该修正分支；角速度/幅值仍可能触发求解，不能声称已删除整个SO(3)求解器。旧研究配置默认保留原行为供历史复现。
+
+截至修改前只读核验，原八组已全部退出、GPU无compute任务，旧checkpoint/日志完整保留。本次只改代码和正式配置，不自动重启旧实验、不覆盖运行源码快照。针对回归和完整测试结果见记录文本的本次条目。

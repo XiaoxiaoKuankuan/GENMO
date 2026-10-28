@@ -53,6 +53,73 @@ def test_projection_backward_includes_committed_history():
     assert torch.autograd.gradcheck(p, (y, left, anchor), fast_mode=True, atol=3e-4, rtol=3e-3)
 
 
+def test_disabled_root_angular_acceleration_keeps_velocity_and_other_constraints(monkeypatch):
+    p = ReferenceProjection(SimpleNamespace(joint_names=['joint']*21), projector().bounds,
+                            constrain_root_angular_acceleration=False)
+    raw = torch.zeros(1, 10, 27, dtype=torch.double)
+    raw[0, :, 5] = torch.tensor([.001, -.001]*5)
+    raw.requires_grad_()
+    z = torch.zeros(1, 27, dtype=torch.double)
+    rotation = torch.eye(3, dtype=torch.double).expand(1, 13, 3, 3)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('仅角加速度超旧预算不能触发SO(3)非线性修正')
+    monkeypatch.setattr(torch.func, 'jacrev', forbidden)
+    plan = p(raw, z, z, rotation)
+    torch.testing.assert_close(plan, raw, rtol=0, atol=0)
+    assert float(plan[..., 5].diff(dim=1).diff(dim=1).abs().max()/.02**2) > 3
+    certificate = p.certificate(plan, z, z, rotation)
+    assert certificate['feasible'].all()
+    assert 'angular_acceleration_excess' not in certificate
+    torch.testing.assert_close(torch.autograd.grad(plan.sum(), raw)[0], torch.ones_like(raw))
+    request = torch.zeros_like(raw)
+    request[:, 0, 2] = .02
+    request[:, 0, 6] = .1
+    limited = p(request, z, z, rotation)
+    assert float(limited[:, 0, 2].abs().max()) <= 1.2*.02**2+1e-6
+    assert float(limited[:, 0, 6].abs().max()) <= 10*.02**2+1e-6
+    assert p.certificate(limited, z, z, rotation)['feasible'].all()
+    too_fast = torch.zeros_like(raw)
+    too_fast[:, 0, 5] = .02
+    assert not p.certificate(too_fast, z, z, rotation)['feasible'].all()
+
+
+def test_disabled_root_angular_acceleration_cost_and_real_SM_contract(system):
+    from gem.closedloop.reference_adapter.alternating_learning import imagine
+    from gem.closedloop.reference_adapter.dynamics import frozen_parameters
+    from supermimic.networks import Critic
+    engine, control, z = constrained_system(system)
+    control.constraint_beta = 1
+    baseline = control.propose(z)
+    control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds,
+        constrain_root_angular_acceleration=False)
+    zero = control.propose(z)
+    for field in ('goal', 'action', 'residual'):
+        torch.testing.assert_close(zero[field], baseline[field], atol=0, rtol=0)
+    with torch.no_grad():
+        bias = control.adapter.net[-1].bias.view(10, 27)
+        bias[:, 5] = torch.atanh(torch.tensor([.001, -.001]*5)/control.adapter.bounds[5])
+    control.precision = PrecisionObjective()
+    proposal = control.propose(z)
+    off = control.advance(z, proposal, z['state'])[3]
+    assert off['added_reference_acceleration'].count_nonzero() == 0
+    gradient, = torch.autograd.grad(off['added_reference_acceleration'].sum(),
+                                   control.adapter.net[-1].bias, retain_graph=True)
+    assert gradient.count_nonzero() == 0
+    enabled = ReferenceProjection(control.bundle.spec, control.adapter.bounds)
+    disabled = control.projection
+    control.projection = enabled
+    on = control.advance(z, proposal, z['state'])[3]
+    assert (on['added_reference_acceleration'] < 0).all()
+    for key in off.keys()-{'added_reference_acceleration'}:
+        torch.testing.assert_close(off[key], on[key], atol=0, rtol=0)
+    control.projection = disabled
+    critic = Critic(2835)
+    with engine.dynamics.adapter_phase(), frozen_parameters(critic):
+        trajectory = imagine(control, engine.dynamics, critic, z, 2, terminal_value=False)
+        gradient, = torch.autograd.grad(trajectory['objective'].mean(), control.adapter.net[-1].bias)
+    assert gradient.isfinite().all() and gradient.norm() > 0
+
+
 def test_projection_receding_seam_and_real_halo():
     torch.manual_seed(4)
     p = projector()

@@ -85,13 +85,13 @@ alternating:
     height_velocity: 0.12
     height_acceleration: 1.2
     rotation_velocity: 0.3
-    rotation_acceleration: 3.0
+    constrain_root_angular_acceleration: false
   precision:
     weight: 0.446714796317961
     action_weight: 0.01
     velocity_weight: 0.002
     acceleration_weight: 0.0002
   calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle64_flexible03/zero_train_calibration.json
-  objective_version: q_qd_body_R_local_root_no_extra_body_w_v2
+  objective_version: q_qd_body_R_local_root_no_root_angular_acceleration_v3
   root_xy: false
   soft_joint_limit: false
