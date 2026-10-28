@@ -48,7 +48,7 @@ def main():
     from gem.closedloop.reference_adapter.reference_constraints import ReferenceProjection
     from gem.closedloop.reference_adapter.precision import PrecisionObjective
     from gem.closedloop.reference_adapter.vector_entry import json_write, compile_kinematics
-    from gem.closedloop.reference_adapter.wm_distribution import evaluate_executed_action_windows
+    from gem.closedloop.reference_adapter.wm_distribution import evaluate_executed_action_windows, paired_response_noise
 
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -148,6 +148,7 @@ def main():
         baseline = all_windows['zero'][0]
         valid = baseline['mask'] & repeated['mask']
         report['zero_repeat_max_state_abs_error'] = float((baseline['next_state']-repeated['next_state'])[valid].abs().max())
+        report['zero_noise_response_vs_repeat'] = paired_response_noise(baseline, all_windows['zero'][1], repeated)
         report['reference_response'] = {}
         for label, (base, candidate) in all_windows.items():
             directions = dict(interpretation='finite_amplitude_response_not_smooth_contact_derivative',

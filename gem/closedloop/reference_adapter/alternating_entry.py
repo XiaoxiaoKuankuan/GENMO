@@ -23,6 +23,16 @@ import time
 import traceback
 
 
+def normalize_extra_state(value=None):
+    """补齐新增运行元数据，保留旧checkpoint的模型/优化器/计数与历史评价原值。"""
+    result = dict(value or {})
+    defaults = dict(step_acc=0., best=None, best_short=None, evaluations=[], completed_checkpoints=[],
+                    precision_scales=None, zero_evaluations={}, consecutive_projection_rejections=0)
+    for name, default in defaults.items():
+        result.setdefault(name, default)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
@@ -49,6 +59,7 @@ def main():
     from .vector_learning import TangentReplay
     from .vector_entry import json_write, append_json, compile_kinematics, gpu_usage
     from .vector_evaluation import evaluate_physical
+    from .paired_evaluation import paired_comparison
     from .vector_checkpoint import save_vector, load_vector
     from .reference_constraints import ReferenceProjection
     from .precision import PrecisionObjective
@@ -81,8 +92,7 @@ def main():
     (output/'pid').write_text(str(os.getpid())+'\n')
     engine = critic = collector = replay = tangent = None
     optimizers = {}
-    extra = dict(step_acc=0., best=None, best_short=None, evaluations=[], completed_checkpoints=[],
-                 precision_scales=None, zero_evaluations={}, consecutive_projection_rejections=0)
+    extra = normalize_extra_state()
     frozen = None
 
     def publish(phase, **fields):
@@ -178,17 +188,21 @@ def main():
                 report.update(adapter_updates=state['accepted_updates'], exploration_noise=0.,
                               evaluation_scope=scope, zero_baseline_key=baseline_key)
                 zero = extra['zero_evaluations'][baseline_key]
-                report['paired_zero_difference'] = {k: report[k]-zero[k] for k in
+                report['paired_zero_difference'] = {k: report[k]-zero[k]
+                    if report[k] is not None and zero[k] is not None else None for k in
                     ('completion_rate', 'mean_tracking', 'mean_full_horizon_tracking',
                      'mean_root_position_rmse_m', 'mean_jerk_rms', 'mean_beat_f1')}
+                report['paired_zero'] = paired_comparison(zero, report)
                 json_write(output/f'{split}_{state["accepted_updates"]:06d}.json', report)
                 reports[split] = report
             val = reports['validation']
-            ranking = (val['completion_rate'], -val['mean_root_position_rmse_m'],
-                       val['mean_full_horizon_tracking'], -val['mean_jerk_rms'])
+            rankable = (val.get('constraint_failure_count', 0) == 0 and
+                        val['mean_root_position_rmse_m'] is not None and val['mean_jerk_rms'] is not None)
+            ranking = ((val['completion_rate'], -val['mean_root_position_rmse_m'],
+                       val['mean_full_horizon_tracking'], -val['mean_jerk_rms']) if rankable else None)
             # 前缀评价不能与整歌混排；best_checkpoint仅由完整歌曲validation选择。
             key = 'best' if full else 'best_short'
-            if extra[key] is None or ranking > tuple(extra[key]['ranking']):
+            if rankable and (extra[key] is None or ranking > tuple(extra[key]['ranking'])):
                 extra[key] = dict(adapter_updates=state['accepted_updates'], ranking=ranking,
                                  selection_split='validation_only', evaluation_scope=scope)
             extra['evaluations'].append(state['accepted_updates'])
@@ -251,15 +265,18 @@ def main():
                     if ck['config'].get(key) != cfg[key]:
                         raise ValueError('恢复算法/时域/优化合同不符；不能加载旧审计或退化Adapter')
                 state.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg))
-                extra = ck['extra_state']
+                extra = normalize_extra_state(ck.get('extra_state'))
                 if 'action_noise_rng' in extra:
                     collector.action_generator.set_state(extra['action_noise_rng'])
+                collector.projection_recoveries = state.get('projection_recovered_environments', 0)
                 state.update(pid=os.getpid(), gpu=os.environ['CUDA_VISIBLE_DEVICES'], resumed_from=args.resume)
                 state.pop('error', None)
                 json_write(output/'resume_info.json', dict(source_checkpoint=args.resume,
                     adapter_sha256=parameter_identity(control.adapter), wm_sha256=parameter_identity(engine.dynamics),
                     adapter_updates=state['accepted_updates'], wm_updates=engine.dynamics.model_version,
-                    replay_transitions=len(replay), physics_resume='new_real_episode_no_cross_reset_windows', tf32=False))
+                    replay_transitions=len(replay), physics_resume='new_real_episode_no_cross_reset_windows', tf32=False,
+                    exploration_rng=('restored_independent_action_stream' if 'action_noise_rng' in extra
+                                     else 'legacy_checkpoint_missing_new_action_stream_initialized_from_seed')))
                 del ck
             else:
                 if 0 in settings['evaluation_updates']:

@@ -156,3 +156,68 @@ def test_root_orientation_ablation_preserves_270_shape_and_other_channels(system
     assert proposal['raw_residual'].shape == (2, 10, 27)
     assert proposal['raw_residual'][..., 3:6].count_nonzero() == 0
     assert proposal['raw_residual'][..., 6:].count_nonzero() > 0
+
+
+def test_old_checkpoint_extra_fields_keep_counters_and_add_only_metadata():
+    from gem.closedloop.reference_adapter.alternating_entry import normalize_extra_state
+    old = dict(step_acc=.5, best=dict(adapter_updates=20), evaluations=[20],
+               completed_checkpoints=['old.pt'], precision_scales={'joint_position': .2})
+    restored = normalize_extra_state(old)
+    for key, value in old.items():
+        assert restored[key] == value
+    assert restored['zero_evaluations'] == {}
+    assert restored['consecutive_projection_rejections'] == 0
+    assert restored['best_short'] is None
+    assert 'zero_evaluations' not in old
+
+
+def test_complete_checkpoint_preserves_new_rng_replay_and_disabled_critic(system, tmp_path, monkeypatch):
+    from gem.closedloop.reference_adapter.vector_checkpoint import save_vector, load_vector
+    from gem.closedloop.reference_adapter.vector_learning import TangentReplay
+    from gem.closedloop.reference_adapter.alternating_entry import normalize_extra_state
+    from gem.closedloop.reference_adapter.alternating_learning import enable_wm_normalization
+    engine, control, z = setup(system)
+    enable_wm_normalization(engine.dynamics)
+    critic = Critic(2835)
+    critic.requires_grad_(False)
+    modules = dict(adapter=control.adapter, wm=engine.dynamics.model.net, critic=critic)
+    optimizers = {key: torch.optim.Adam(module.parameters(), lr=3e-5) for key, module in modules.items()}
+    for key in ('adapter', 'wm'):
+        sum(p.square().mean() for p in modules[key].parameters()).backward()
+        optimizers[key].step(); optimizers[key].zero_grad(set_to_none=True)
+    class Env:
+        N = 2
+    collector = VectorCollector(Env(), control)
+    collector.state = {k: v.clone() for k, v in z.items()}
+    monkeypatch.setattr(collector, 'reset', lambda **kwargs: None)
+    replay = VectorReplay(80, 2, 'cpu', compute_mc=False)
+    replay.add(z, z['action'], z['state'], torch.ones(2), torch.ones(2),
+               torch.zeros(2, dtype=torch.bool), torch.zeros(2, dtype=torch.bool), 1)
+    torch.randn((7,), generator=collector.action_generator)
+    extra = normalize_extra_state(dict(action_noise_rng=collector.action_generator.get_state(),
+                                      evaluations=[0], consecutive_projection_rejections=2))
+    expected_noise = torch.randn((5,), generator=collector.action_generator)
+    config = dict(music={}, rewards=control.weights, reference_steps=10, control_hz=50)
+    expected = {key: {name: value.clone() for name, value in module.state_dict().items()}
+                for key, module in modules.items()}
+    path = tmp_path/'complete_runtime_recovery_fixture.pt'
+    save_vector(path, engine, critic, optimizers, replay, TangentReplay(1), collector,
+                dict(wm_updates=1, accepted_updates=1), config, extra_state=extra)
+    with torch.no_grad():
+        for module in modules.values():
+            for parameter in module.parameters():
+                parameter.zero_()
+    restored = load_vector(path, engine, critic, optimizers, replay, TangentReplay(1), collector, config)
+    saved = torch.load(path, map_location='cpu', weights_only=False)
+    restored_extra = normalize_extra_state(saved['extra_state'])
+    collector.action_generator.set_state(restored_extra['action_noise_rng'])
+    torch.testing.assert_close(torch.randn((5,), generator=collector.action_generator), expected_noise)
+    assert restored == dict(wm_updates=1, accepted_updates=1)
+    assert restored_extra['evaluations'] == [0] and restored_extra['consecutive_projection_rejections'] == 2
+    assert not replay.compute_mc and len(replay) == 2
+    torch.testing.assert_close(saved['collector_state']['music'], z['music'])
+    torch.testing.assert_close(saved['collector_state']['plan'], z['plan'])
+    for key, module in modules.items():
+        for name, value in module.state_dict().items():
+            torch.testing.assert_close(value, expected[key][name], atol=0, rtol=0)
+        assert bool(optimizers[key].state) == (key != 'critic')

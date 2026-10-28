@@ -146,3 +146,37 @@ def evaluate_executed_action_windows(dynamics, windows, *, horizons=(1, 8, 16, 3
     raw_targets = dynamics.model.targets(unflatten_state(s[flat]), unflatten_state(target[flat]))
     return dict(horizons=reports, input_distribution=distribution_shift(dynamics.model.in_norm, raw_inputs),
                 target_distribution=distribution_shift(dynamics.model.out_norm, raw_targets))
+
+
+@torch.no_grad()
+def paired_response_noise(baseline, candidate, repeat, *, horizons=(1, 8, 16, 32), gamma=.99):
+    """同初态三条真实窗口的有限幅度响应与重复噪声，禁止当作BPTT方向验收。"""
+    from supermimic.mdp import unflatten_state
+    from supermimic.networks import WorldModel
+    if any(w.get('origin') != 'real' for w in (baseline, candidate, repeat)):
+        raise ValueError('重复误差必须来自真实仿真')
+    initial_error = max(float((baseline['state'][:, 0]-w['state'][:, 0]).abs().max())
+                        for w in (candidate, repeat))
+    names = ('root_position', 'root_orientation', 'root_linear_velocity', 'root_angular_velocity',
+             'joint_position', 'joint_velocity')
+    reports = {}
+    for horizon in horizons:
+        valid = baseline['mask'][:, :horizon].all(1) & candidate['mask'][:, :horizon].all(1) & repeat['mask'][:, :horizon].all(1)
+        if not bool(valid.any()):
+            reports[str(horizon)] = dict(valid_pairs=0); continue
+        target = unflatten_state(baseline['next_state'][valid, horizon-1])
+        signal = WorldModel.state_error(unflatten_state(candidate['next_state'][valid, horizon-1]), target)
+        noise = WorldModel.state_error(unflatten_state(repeat['next_state'][valid, horizon-1]), target)
+        discount = gamma**torch.arange(horizon, device=signal.device, dtype=signal.dtype)
+        delta = ((candidate['reward'][valid, :horizon]-baseline['reward'][valid, :horizon])*discount).sum(-1)
+        repeated = ((repeat['reward'][valid, :horizon]-baseline['reward'][valid, :horizon])*discount).sum(-1)
+        reports[str(horizon)] = dict(valid_pairs=int(valid.sum()),
+            physical_response_rmse={name: float(x.square().mean().sqrt()) for name, x in zip(names, signal.split((3, 3, 3, 3, 21, 21), -1))},
+            physical_repeat_rmse={name: float(x.square().mean().sqrt()) for name, x in zip(names, noise.split((3, 3, 3, 3, 21, 21), -1))},
+            real_discounted_objective_delta_mean=float(delta.mean()),
+            real_discounted_objective_delta_std=float(delta.std(unbiased=False)),
+            repeat_discounted_objective_delta_mean=float(repeated.mean()),
+            repeat_discounted_objective_delta_abs_mean=float(repeated.abs().mean()),
+            repeat_discounted_objective_delta_abs_max=float(repeated.abs().max()))
+    return dict(initial_state_max_abs_difference=initial_error, horizons=reports,
+        interpretation='fixed_finite_amplitude_response_not_parameter_update_gradient_or_full_song_gain')

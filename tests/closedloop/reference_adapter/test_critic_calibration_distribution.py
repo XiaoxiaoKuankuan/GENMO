@@ -12,7 +12,7 @@ from gem.closedloop.reference_adapter.critic_calibration import (
     real_mc_suffixes, discounted_value_upper_bound, bounded_terminal_value, physical_calibration,
     terminal_value_allowed, preserve_critic_input_function, real_anchor_loss)
 from gem.closedloop.reference_adapter.wm_distribution import (
-    rebase_wm_normalization, distribution_shift, restore_rebased_normalization_policy)
+    rebase_wm_normalization, distribution_shift, restore_rebased_normalization_policy, paired_response_noise)
 
 
 def test_mc_requires_real_terminal_continuity_and_never_crosses_reset():
@@ -41,6 +41,27 @@ def test_value_bound_and_raw_calibration_reject_bootstrap_inflation():
     assert not terminal_value_allowed(True, good, real_anchor_updates=0)
     assert not terminal_value_allowed(False, good, real_anchor_updates=10)
     assert terminal_value_allowed(True, good, real_anchor_updates=10)
+
+
+def test_response_noise_uses_common_valid_prefix_without_imagined_labels():
+    state = torch.zeros(2, 32, 55)
+    state[..., 3] = 1  # 原SM state55中的根四元数 w。
+    baseline = dict(origin='real', state=state.clone(), next_state=state.clone(),
+                    reward=torch.zeros(2, 32), mask=torch.ones(2, 32, dtype=torch.bool))
+    repeat = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in baseline.items()}
+    candidate = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in baseline.items()}
+    candidate['next_state'][..., 34:] = .1
+    candidate['reward'][:] = .001
+    candidate['mask'][1, 8:] = False
+    report = paired_response_noise(baseline, candidate, repeat)
+    assert report['initial_state_max_abs_difference'] == 0
+    assert report['horizons']['8']['valid_pairs'] == 2
+    assert report['horizons']['32']['valid_pairs'] == 1
+    assert report['horizons']['32']['physical_repeat_rmse']['joint_velocity'] == 0
+    assert report['horizons']['32']['physical_response_rmse']['joint_velocity'] == pytest.approx(.1)
+    candidate['origin'] = 'imagined'
+    with pytest.raises(ValueError, match='真实'):
+        paired_response_noise(baseline, candidate, repeat)
 
 
 def test_critic_normalizer_change_preserves_values_and_gradients():
