@@ -123,6 +123,21 @@ def main():
         warm_begin = time.perf_counter()
         policy_update(control, engine.dynamics, critic, warm_optimizer, select_state(z, slice(0, min(32, args.batch))),
                       2, terminal_value=False, microbatch=32, diagnostics=False)
+        if implementation == 'optimized' and not args.no_compile_derivatives:
+            # 编译128/256两个静态数学核都在计时前完成，不让microbatch256承担首次编译。
+            from gem.closedloop.reference_adapter.so3_projection import _derivatives
+            with torch.no_grad():
+                seed = select_state(z, slice(0, 1))
+                raw = control.adapter.forward_packed(control.packed(control.fields(seed)))
+                x = (raw[..., 3:6]/(control.projection.velocity[3:6]*.02)).transpose(1, 2).flatten(1).double()
+                rotation = bank.pose(seed['song'][:, None], (seed['frame'][:, None]+bank.offset13).clamp_min(0))[1].double()
+                for bucket in (128, 256):
+                    values = [v.expand(bucket, *v.shape[1:]).clone() for v in
+                        (x, seed['left'][:, 3:6].double(), seed['anchor'][:, 3:6].double(), rotation)]
+                    _, jac, hess = _derivatives(control.projection, values[0])
+                    jac(*values)
+                    count = 32 if control.projection.constrain_root_angular_acceleration else 21
+                    hess(*values, x.new_ones(bucket, count))
         torch.cuda.synchronize()
         (out/f'warmup_{implementation}.json').write_text(json.dumps(dict(seconds=time.perf_counter()-warm_begin,
             excluded_from_steady_measurement=True)))
