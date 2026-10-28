@@ -68,6 +68,24 @@ def main():
             if z.numel()<40:return z.tolist()
             return dict(shape=list(z.shape),min=float(z.float().min()),max=float(z.float().max()),mean=float(z.float().mean()))
         return value
+    original_propose=control.propose
+    def diagnosed_propose(z,*positional,**keywords):
+        try:return original_propose(z,*positional,**keywords)
+        except RuntimeError as error:
+            if hasattr(error,'bad_mask'):
+                with torch.no_grad():
+                    raw=control.adapter.forward_packed(control.packed(control.fields(z)))
+                    raw[...,:2]=0
+                    frames=(z['frame'][:,None]+bank.offset13).clamp_min(0)
+                    rotation=bank.pose(z['song'][:,None],frames)[1]
+                    evidence=dict(raw=raw.cpu(),left=z['left'].detach().cpu(),anchor=z['anchor'].detach().cpu(),
+                        rotation=rotation.cpu(),bad_mask=error.bad_mask.cpu(),bounds=control.adapter.bounds.cpu(),
+                        joint_names=control.bundle.spec.joint_names,
+                        diagnostic={k:v.detach().cpu() for k,v in control.projection.last_statistics.items()},
+                        state={k:v.detach().cpu() for k,v in z.items()})
+                torch.save(evidence,out/f'failed_projection_{time.time_ns()}.pt')
+            raise
+    control.propose=diagnosed_propose
     if args.mode=='failures':
         reports=[];fixtures=[]
         for gpu in range(8):
@@ -151,7 +169,8 @@ def main():
                          projection_statistics=small(result['projection_statistics']),
                          timing_scope='one_formal_BPTT_microbatch_not_1024_sample_update',
                          real_start='same_saved_collector_state',compiled_FK=True,checkpoint_steps=True)
-            except Exception as error:row=dict(implementation=kind,horizon=horizon,error=repr(error))
+            except Exception as error:row=dict(implementation=kind,horizon=horizon,error=repr(error),
+                diagnostic=small(getattr(error,'diagnostic',{})),bad_mask=small(getattr(error,'bad_mask',None)))
             finally:torch.profiler.record_function=original_record
             rows.append(row);print(json.dumps({k:v for k,v in row.items() if k!='projection_statistics'}),flush=True)
             (out/'projection_profile.json').write_text(json.dumps(rows,indent=2))
