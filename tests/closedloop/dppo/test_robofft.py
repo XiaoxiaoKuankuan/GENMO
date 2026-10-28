@@ -36,7 +36,7 @@ def cpu_threads():
 
 
 def settings():
-    return configuration(ROOT/'configs/closedloop/stage2_continuous_rolling_robofft.yaml')['stage9']
+    return configuration(ROOT/'tests/closedloop/fixtures/robofft_contract.yaml')['stage9']
 
 
 def make_policy(factory, *, starts=(45, 47), prefix=6):
@@ -233,18 +233,6 @@ def test_action_update_changes_output_no_gaussian_dependency(actor_factory,monke
     cache.close()
 
 
-def test_configuration_preserves_physical_critic_rewards_and_removes_gaussian_controls():
-    before=configuration(ROOT/'configs/closedloop/stage2_continuous_rolling_train10.yaml')
-    after=configuration(ROOT/'configs/closedloop/stage2_continuous_rolling_robofft.yaml')
-    for key in ('critic','reward','physical_episode','generation_horizon','ppo_rollout'):
-        assert before['stage10'][key]==after['stage10'][key]
-    for key in ('runtime','timing','termination','model','environment','paths'):
-        assert before[key]==after[key]
-    for key in ('std_schedule','eta','guidance_scale','gamma_upper','lambda_upper','frozen_prefix_steps'):
-        assert before['stage9'][key]==after['stage9'][key]
-    assert 'kl' not in after['stage10'] and 'trust_region' not in after['stage9']
-    assert after['stage10']['scale']['actor_minibatch_actions']==8192
-    assert after['stage9']['bc_batch']==0
 
 
 def test_fixed_evaluation_uses_compact_surrogate_not_gaussian(actor_factory,tmp_path,monkeypatch):

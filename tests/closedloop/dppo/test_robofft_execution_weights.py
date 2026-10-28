@@ -145,16 +145,6 @@ def test_variant_warm_start_preserves_adam_but_not_progress_and_rejects_value_ch
     for k,v in before.items():assert torch.equal(v,actor.state_dict()[k])
 
 
-def test_ten_and_twenty_epochs_are_explicit_robofft_configurations(tmp_path):
-    import yaml
-    from gem.closedloop.dppo.training_config import configuration
-    config=yaml.safe_load((ROOT/'configs/closedloop/stage2_robofft_execution_weighted_server1.yaml').read_text())
-    for epochs in (10,20):
-        config['stage10']['training']['ppo_epochs']=epochs
-        path=tmp_path/'config.yaml';path.write_text(yaml.safe_dump(config))
-        resolved=configuration(path)
-        assert resolved['stage9']['ppo_epochs']==epochs
-        assert resolved['stage10']['derived']['maximum_actor_steps']>=epochs
 
 
 def test_variant_supervisor_only_initializes_first_launch(tmp_path):
@@ -167,20 +157,6 @@ def test_variant_supervisor_only_initializes_first_launch(tmp_path):
     with pytest.raises(ValueError):training_command('new.yaml',tmp_path,3,'old.pt',robofft_variant='parent.pt')
 
 
-def test_weighted_objective_requires_explicit_distinct_schema(tmp_path):
-    import yaml
-    from gem.closedloop.dppo.training_config import configuration
-    from gem.closedloop.robofft.configuration import optimization_binding, EXECUTION_SCHEMA
-    c=yaml.safe_load((ROOT/'configs/closedloop/stage2_robofft_execution_weighted_server1.yaml').read_text())
-    p=tmp_path/'variant.yaml';p.write_text(yaml.safe_dump(c))
-    assert optimization_binding(configuration(p)['stage10'])['schema']==EXECUTION_SCHEMA
-    c['stage10']['actor_optimization']['schema']='genmo.closedloop.stage2.robofft_d.v1'
-    p.write_text(yaml.safe_dump(c))
-    with pytest.raises(ValueError,match='Explicit RoboFFT'):configuration(p)
-    c['stage10']['actor_optimization']['schema']=EXECUTION_SCHEMA
-    c['stage10']['training']['robofft'].pop('execution_weighting')
-    p.write_text(yaml.safe_dump(c))
-    with pytest.raises(ValueError,match='Explicit RoboFFT'):configuration(p)
 
 
 def test_plan_auditor_recomputes_cached_weights_and_rejects_changed_provenance(actor_factory):

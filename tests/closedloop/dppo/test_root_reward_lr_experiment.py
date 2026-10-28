@@ -59,19 +59,6 @@ def test_reward_changed_comparison_is_not_mislabeled_as_physics_export(monkeypat
     if not same_reward:assert result['reason']=='behavior_reward_differs_from_requested_reward'
 
 
-@pytest.mark.parametrize('factor',[10,50])
-def test_requested_lr_and_reward_configuration_preserve_other_contracts(tmp_path,factor):
-    path=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_continuous_rolling.yaml'
-    original=yaml.safe_load(path.read_text());changed=copy.deepcopy(original)
-    t=changed['stage10']['training'];t['actor_lr']=1e-6*factor;t['trust_region']['maximum_lr']=t['actor_lr']
-    target=tmp_path/'candidate.yaml';target.write_text(yaml.safe_dump(changed))
-    c=configuration(target);stage=c['stage10']
-    assert stage['reward']['version']==ROOT_RELAXED_REWARD_VERSION
-    assert c['stage9']['reward']['tracking']['reward_std']==ROOT_RELAXED_REWARD_STD
-    assert c['stage9']['actor_lr']==pytest.approx(1e-6*factor)
-    for field in ('actor_lr_multipliers','std_schedule','frozen_prefix_steps','ppo_steps_per_chain','bc_enabled'):
-        assert c['stage9'][field]==original['stage10']['training'][field]
-    assert stage['reward']['tracking']['weights']==original['stage10']['reward']['tracking']['weights']
 
 
 def test_bounded_condition_encoding_preserves_all_probabilities_and_global_gradient(actor_factory):

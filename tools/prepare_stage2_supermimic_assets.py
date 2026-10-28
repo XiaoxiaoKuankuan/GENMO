@@ -57,7 +57,7 @@ def main():
                 dataset[key] = data.sample_contract[key]
     supervision = output / "supervision_original.yaml"
     OmegaConf.save(OmegaConf.create(OmegaConf.to_container(data, resolve=True)), supervision)
-    cfg = OmegaConf.load(REPO / "configs/closedloop/stage2_supermimic_worldmodel.yaml")
+    cfg = OmegaConf.load(REPO / "configs/closedloop/stage2_supermimic_music_teacher_8gpu.yaml")
     cfg.stage1 = {"checkpoint": str(checkpoint), "stats": str(stage / "qpos30_train_stats.json"),
                   "kinematics": data.dataset_defaults.kinematics_path, "data_config": str(supervision)}
     cfg.supermimic = {"repo": str(Path(args.sm_repo).resolve()), "checkpoint": str(Path(args.sm_checkpoint).resolve()),

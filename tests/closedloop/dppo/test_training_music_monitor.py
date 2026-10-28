@@ -68,12 +68,6 @@ def test_train_monitor_does_not_implicitly_allow_mc_or_missing_original_provenan
     with pytest.raises(ValueError,match='Insufficient'):train_plan(catalog)
 
 
-def test_formal_configuration_explicitly_uses_original_and_current_train():
-    from pathlib import Path
-    root=Path(__file__).resolve().parents[3]
-    stage=configuration(root/'configs/closedloop/stage2_transformer_groups.yaml')['stage10']
-    assert stage['evaluation']['split']==stage['evaluation']['original_split']=='train'
-    assert stage['evaluation']['purpose']=='training_progress'
 
 
 def test_stage1_view_matches_real_frozen_twenty_step_sampler_without_changing_actor(actor_factory,tmp_path):

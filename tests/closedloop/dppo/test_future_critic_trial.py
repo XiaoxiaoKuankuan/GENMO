@@ -24,7 +24,7 @@ ROOT=Path(__file__).resolve().parents[3]
 
 
 def trial_config():
-    return configuration(ROOT/'configs/closedloop/stage2_robofft_future_critic_trial_server1.yaml')
+    return configuration(ROOT/'tests/closedloop/fixtures/future_critic_contract.yaml')
 
 
 def test_trial_is_explicit_bounded_and_has_no_full_mc():

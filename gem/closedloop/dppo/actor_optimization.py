@@ -172,4 +172,4 @@ def validate_optimization_configuration(config,maximum_steps):
 def require_current_actor_objective(settings):
     """旧配置只读可识别，但不能从当前训练入口误启动旧联合PPO。"""
     if settings.get('actor_objective') not in ACTOR_OBJECTIVES:
-        raise ValueError('Historical full-chain config is read-only; use stage2_stepwise_mean.yaml for Actor training')
+        raise ValueError('Historical full-chain config is read-only; provide an explicit supported Actor objective configuration')

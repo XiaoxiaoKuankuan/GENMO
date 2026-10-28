@@ -95,7 +95,7 @@ def test_administrative_physical_episode_is_excluded_not_bootstrapped_as_mc():
 
 def test_current_configuration_separates_three_time_concepts():
     root=Path(__file__).resolve().parents[3]
-    c=configuration(root/'configs/closedloop/stage2_full_chain.yaml')
+    c=configuration(root/'tests/closedloop/fixtures/dppo_contract.yaml')
     assert 'episode_seconds' not in c['stage10']['training']
     assert c['stage10']['physical_episode']['safety_limit_seconds'] is None
     assert c['stage10']['ppo_rollout']['world_seconds']==8.
