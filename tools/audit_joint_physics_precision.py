@@ -147,7 +147,25 @@ def run(args):
             "both_exact_zero_at_initialization": both_zero,
             "relative_difference": float((a - b).norm()) / max(an, 1e-12)}
     known = batch["known_qpos30_mask"].cpu()
-    exact_prefix = torch.equal(bf["pred_x_start"][known], bf["target_x_start"][known])
+    # sidecar条件是请求时已经提交的旧计划，不能把GT目标当作该承诺的精确值。
+    # 两种精度都必须逐坐标严格保持真实known_x；条件与GT的差异只记录，不作精度门禁。
+    with torch.autocast(device_type="cuda", enabled=False):
+        known_condition = actor.stage1.adapt_conditions(batch)["known_x"].detach().cpu()[known]
+    prefix_report = {"reference": "normalized_known_condition_from_committed_plan_not_target",
+                     "known_coordinates": int(known.sum())}
+    for precision, values in (("fp32", fp), ("bf16_mixed", bf)):
+        actual = values["pred_x_start"][known]
+        error = actual.double() - known_condition.double()
+        prefix_report[precision] = {"exact": torch.equal(actual, known_condition),
+                                    "max_absolute_error": float(error.abs().max()),
+                                    "rmse": float(error.square().mean().sqrt())}
+    condition_target_error = known_condition.double() - fp["target_x_start"][known].double()
+    prefix_report["condition_vs_ground_truth"] = {
+        "exact": torch.equal(known_condition, fp["target_x_start"][known]),
+        "max_absolute_error": float(condition_target_error.abs().max()),
+        "rmse": float(condition_target_error.square().mean().sqrt()),
+        "role": "diagnostic_only_committed_prefix_and_ground_truth_have_distinct_contracts"}
+    exact_prefix = prefix_report["fp32"]["exact"] and prefix_report["bf16_mixed"]["exact"]
     exact_noise = all(torch.equal(fp[name], bf[name]) for name in ("noise", "xt", "target_x_start"))
     loss_relative = abs(mixed["loss"] - reference["loss"]) / max(abs(reference["loss"]), 1e-8)
     nonzero_groups = [value for value in gradient_comparison.values() if not value["both_exact_zero_at_initialization"]]
@@ -169,7 +187,7 @@ def run(args):
             "noise_sha256": hashlib.sha256(noise.cpu().numpy().tobytes()).hexdigest(),
             "thresholds": THRESHOLDS, "fp32": reference, "bf16_mixed": mixed,
             "output_errors": output_errors, "loss_relative_error": loss_relative,
-            "gradient_comparison": gradient_comparison, "checks": checks,
+            "gradient_comparison": gradient_comparison, "known_prefix": prefix_report, "checks": checks,
             "cuda_peak_allocated_bytes": torch.cuda.max_memory_allocated(device)}
 
 
