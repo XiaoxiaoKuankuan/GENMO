@@ -11,13 +11,42 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from tools.prepare_joint_physics_parallel import (assigned_sources, atomic_json,
-    parse_gpus, progress_payload, require_idle_gpus)
+    episode_counts, parse_gpus, progress_payload, records_from_verified_shards, require_idle_gpus)
 from tools.benchmark_joint_physics_preparation import select_result, summarize_trial
 
 
 class TestParallelPreparation(unittest.TestCase):
+    def test_legacy_converted_v2_counts_come_from_real_shard_once(self):
+        import torch
+        with tempfile.TemporaryDirectory(prefix="joint-parallel-test-") as temp:
+            output = Path(temp)
+            episodes = [{"source_key": key, "split": "train", "control_steps": steps,
+                "action": torch.zeros(steps, 21), "termination_reason": reason,
+                "offline_requests": {"frames": torch.tensor([0, 3]), "valid": torch.tensor([True, False])}}
+                for key, steps, reason in (("a", 100, "explicit_control_budget"),
+                                           ("b", 50, "sm_physical_termination"))]
+            torch.save(episodes, output/"shard.pt")
+            # 原转换器只保存前瞻统计，故意放入不真实数字，必须完全忽略该摘要。
+            index = {"split": "train", "sources": {key: {"shard": "shard.pt", "episode": i}
+                for i, key in enumerate(("a", "b"))}, "shards": {"shard.pt": "already_verified"},
+                "episodes": [{"source": "a", "valid_requests": 999}]}
+            def validator(episode, index, horizon):
+                self.assertEqual(horizon, 32)
+                return (None, None if bool(episode["offline_requests"]["valid"][index]) else "invalid")
+            with patch.object(torch, "load", wraps=torch.load) as loader:
+                records = records_from_verified_shards(index, output, validator)
+                self.assertEqual(loader.call_count, 1)
+            counts = episode_counts({"episodes": records})
+            self.assertEqual(counts["sources"], 2)
+            self.assertEqual(counts["control_steps"], 150)
+            self.assertEqual(counts["valid_future_requests"], 2)
+            self.assertEqual(counts["legal_h32_windows"], 2)
+            self.assertEqual(counts["explicit_control_budget_count"], 1)
+            self.assertEqual(counts["failed_termination_count"], 1)
+
     def test_gpu_busy_is_rejected_by_uuid_and_other_gpu_is_allowed(self):
         def runner(command, **kwargs):
             output = "0, GPU-a\n1, GPU-b\n" if "--query-gpu=" in command[1] else "GPU-b, 77, train.py\n"

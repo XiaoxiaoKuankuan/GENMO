@@ -132,9 +132,43 @@ def progress_payload(index, manifest, baseline_keys, elapsed, processes):
             "updated_unix_seconds": time.time()}
 
 
+def records_from_verified_shards(index, directory, validate_request):
+    """旧转换v2索引只有前瞻摘要；从已核验真实分片还原统计，每个shard只加载一次。"""
+    import torch
+    grouped = {}
+    for source, location in index["sources"].items():
+        shard = location["shard"]
+        if shard not in index["shards"]:
+            raise ValueError(f"source引用未核验分片: {shard}")
+        grouped.setdefault(shard, []).append((source, int(location["episode"])))
+    records = []
+    for shard, locations in grouped.items():
+        payload = torch.load(Path(directory)/shard, map_location="cpu", weights_only=False, mmap=True)
+        for source, offset in locations:
+            if not 0 <= offset < len(payload):
+                raise ValueError(f"排除缓存episode索引越界: {source}")
+            episode = payload[offset]
+            if episode["source_key"] != source or episode["split"] != index["split"]:
+                raise ValueError(f"排除缓存真实episode身份/split错误: {source}")
+            steps = int(episode["control_steps"])
+            if steps < 0 or len(episode["action"]) != steps:
+                raise ValueError(f"排除缓存真实控制步数与动作长度不一致: {source}")
+            requests = episode["offline_requests"]
+            if len(requests["valid"]) != len(requests["frames"]):
+                raise ValueError(f"排除缓存请求valid/frames长度不同: {source}")
+            records.append({"source_key": source, "control_steps": steps,
+                "termination_reason": episode["termination_reason"],
+                "offline_preprocessing": {"valid_requests": int(requests["valid"].sum()),
+                    "legal_windows": {"32": sum(validate_request(episode, i, 32)[1] is None
+                                                 for i in range(len(requests["frames"])))}}})
+        del payload
+    return records
+
+
 def verify_excluded(cfg, split, expected):
     from gem.closedloop.joint_physics.data import SidecarStore
     from gem.closedloop.joint_physics.contracts import digest
+    from gem.closedloop.joint_physics.requests import static_request
     keys, directories, episodes = set(), [], []
     for name in cfg["prepare"].get("exclude_sidecars", []):
         directory = Path(name).resolve()
@@ -145,7 +179,9 @@ def verify_excluded(cfg, split, expected):
         if keys & set(store.index["sources"]):
             raise ValueError("exclude_sidecars之间存在重复source，禁止重复统计或混合训练")
         keys.update(store.index["sources"])
-        episodes.extend(store.index.get("episodes", []))
+        # 转换生成的旧v2 index.episodes仅有offline摘要，不能缺字段就按0统计。
+        # 数据真实性来自不可变分片中的episode，H32沿用训练的同一静态时间支持检查。
+        episodes.extend(records_from_verified_shards(store.index, directory, static_request))
         directories.append(str(directory))
     return keys, directories, episode_counts({"episodes": episodes})
 
