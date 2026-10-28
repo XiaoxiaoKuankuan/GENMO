@@ -12,7 +12,8 @@ data:
     - /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/train_increment_8
     - /data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_bf16_20261028/sidecar_increment
   sidecar_refresh_every: 500
-  loading: {workers: 4, prefetch_batches: 1, sequence_cache_mb: 4096}
+  # 每个sidecar目录最多映射16GiB；现有全库约13.7GB，避免随机读取反复反序列化。
+  loading: {workers: 4, prefetch_batches: 1, sequence_cache_mb: 4096, sidecar_cache_mb: 16384}
 physics:
   horizon: 32
   subbatch: 4

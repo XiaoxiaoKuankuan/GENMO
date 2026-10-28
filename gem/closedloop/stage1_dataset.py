@@ -461,6 +461,13 @@ class BumiClosedLoopStage1Dataset(Dataset):
         self._ground_supervision_cache[cache_key] = result
         return dict(result)
 
+    def _window_features(self, sequence, decision_frame, qpos_halo):
+        return self.codec.encode_condition_features(qpos_halo)[0]
+
+    def _window_history(self, sequence, decision_frame):
+        return self.proprio_builder.build_history(sequence['qpos'][:decision_frame+1],
+            decision_frame=decision_frame, history_steps=self.history_steps)
+
     def get_window(self, row_index: int, start_frame: int | None = None) -> dict[str, Any]:
         """构造一条样本；``start_frame`` 即 decision frame，可显式落在序列尾部。"""
 
@@ -495,7 +502,7 @@ class BumiClosedLoopStage1Dataset(Dataset):
             decision_frame : min(sequence_length, decision_frame + self.motion_frames + 1)
         ]
         # 此处仅使用qpos30，不消费encode返回的22体FK；原条件编码器保留相同anchor与运算顺序。
-        encoded_halo, _ = self.codec.encode_condition_features(qpos_halo)
+        encoded_halo = self._window_features(sequence, decision_frame, qpos_halo)
         target_qpos30 = torch.zeros(self.motion_frames, QPOS30_DIM, dtype=torch.float32)
         target_qpos30_valid = torch.zeros(self.motion_frames, QPOS30_DIM, dtype=torch.bool)
         target_qpos30[:future_count] = encoded_halo[:future_count]
@@ -515,11 +522,7 @@ class BumiClosedLoopStage1Dataset(Dataset):
         ]
         target_contact[~target_contact_valid] = 0.0
 
-        history, history_valid, history_times = self.proprio_builder.build_history(
-            qpos[: decision_frame + 1],
-            decision_frame=decision_frame,
-            history_steps=self.history_steps,
-        )
+        history, history_valid, history_times = self._window_history(sequence, decision_frame)
         decision_time = torch.tensor(decision_frame / float(MOTION_FPS), dtype=torch.float64)
         future_times = (
             decision_frame + torch.arange(self.motion_frames, dtype=torch.float64)

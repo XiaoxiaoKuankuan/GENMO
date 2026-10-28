@@ -1,0 +1,15 @@
+# 全库只读优化运行：保留原二十万步数学参数，恢复本方法完整八卡断点。
+# 三个缓存目录互不重复，共4287个train source；禁止启动Newton/WM数据生产。
+# CPU监督缓存保留每0.1秒候选起点独立anchor、原接触/地面和全部Stage1 v5目标。
+# 每rank最多16GiB sidecar映射、24GiB监督映射；mmap文件页由操作系统共享。
+base_config: joint_physics_formal_200k_bf16_8gpu_server2.yaml
+data:
+  sidecar_refresh_every: 0
+  loading:
+    workers: 4
+    prefetch_batches: 1
+    pin_memory: true
+    sidecar_cache_mb: 16384
+    sequence_cache_mb: 24576
+    supervision_cache: /data0/user/liwei/GENMO_assets/joint_supervision_cache_20261028
+    request_cache: /data0/user/liwei/GENMO_assets/joint_request_index_20261028

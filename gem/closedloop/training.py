@@ -237,7 +237,7 @@ def batch_to_device(batch: Mapping[str, Any], device: torch.device | str) -> dic
     """仅移动张量，保留已有 provenance/meta 的结构与内容。"""
 
     return {
-        key: value.to(device) if isinstance(value, torch.Tensor) else value
+        key: value.to(device, non_blocking=value.is_pinned()) if isinstance(value, torch.Tensor) else value
         for key, value in batch.items()
     }
 

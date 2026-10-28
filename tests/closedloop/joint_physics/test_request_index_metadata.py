@@ -55,7 +55,7 @@ def test_index_uses_metadata_and_next_still_builds_original_window(tmp_path, mon
     assert calls == []
     assert stream.keys == [key]
     assert key in store.verified  # 路径优化不跳过原数据身份检查。
-    monkeypatch.setattr(requests, "collate_stage1_training_samples", lambda samples: {"samples": samples})
+    monkeypatch.setattr(requests, "collate_joint_samples", lambda samples: {"samples": samples})
     monkeypatch.setattr(requests, "batch_to_device", lambda batch, _device: batch)
     before = stream.state_dict()
     batch, records = stream.next(2, "cpu")

@@ -119,6 +119,11 @@ class BumiKinematics(nn.Module):
                 )
         self._parent_body_indices_py = tuple(parent)
         self._child_body_indices_py = tuple(child)
+        depths = [0]*22
+        for p, c in zip(parent, child):
+            depths[c] = depths[p]+1
+        self._fk_levels = tuple(tuple(i for i, c in enumerate(child) if depths[c] == depth)
+                                for depth in range(1, max(depths)+1))
         self.register_buffer(
             "parent_body_indices", torch.tensor(parent, dtype=torch.long), persistent=False
         )
@@ -391,30 +396,19 @@ class BumiKinematics(nn.Module):
         body_rotations: list[torch.Tensor | None] = [None] * 22
         body_positions[0] = root_pos
         body_rotations[0] = root_rot
-        for joint_index in range(21):
-            parent_index = self._parent_body_indices_py[joint_index]
-            child_index = self._child_body_indices_py[joint_index]
-            parent_pos = body_positions[parent_index]
-            parent_rot = body_rotations[parent_index]
-            if parent_pos is None or parent_rot is None:
-                raise RuntimeError(
-                    "BUMI kinematics are not topologically ordered at joint "
-                    f"{self.joint_order[joint_index]!r}"
-                )
-            angle = joints[..., joint_index : joint_index + 1]
-            axis = _view_for_batch(axes[joint_index], batch_ndim)
-            joint_rot = axis_angle_to_matrix(axis * angle)
-            origin_rot = _view_for_batch(origin_rotations[joint_index], batch_ndim)
-            origin = _view_for_batch(origins[joint_index], batch_ndim)
-            anchor = _view_for_batch(anchors[joint_index], batch_ndim)
-            rotated_anchor = (joint_rot @ anchor.unsqueeze(-1)).squeeze(-1)
-            local_position = origin + (
-                origin_rot @ (anchor - rotated_anchor).unsqueeze(-1)
-            ).squeeze(-1)
-            body_positions[child_index] = parent_pos + (
-                parent_rot @ local_position.unsqueeze(-1)
-            ).squeeze(-1)
-            body_rotations[child_index] = parent_rot @ origin_rot @ joint_rot
+        # 轴角和关节局部变换一次合批；同一树深度并行，保留原矩阵乘法结合顺序。
+        joint_rotations = axis_angle_to_matrix(axes*joints[..., None])
+        rotated_anchors = (joint_rotations @ anchors[..., None]).squeeze(-1)
+        local_positions = origins+(origin_rotations @ (anchors-rotated_anchors)[..., None]).squeeze(-1)
+        for level in self._fk_levels:
+            parent_pos = torch.stack([body_positions[self._parent_body_indices_py[i]] for i in level], -2)
+            parent_rot = torch.stack([body_rotations[self._parent_body_indices_py[i]] for i in level], -3)
+            positions = parent_pos+(parent_rot @ local_positions[..., level, :, None]).squeeze(-1)
+            rotations = parent_rot @ origin_rotations[list(level)] @ joint_rotations[..., level, :, :]
+            for slot, joint_index in enumerate(level):
+                child_index = self._child_body_indices_py[joint_index]
+                body_positions[child_index] = positions[..., slot, :]
+                body_rotations[child_index] = rotations[..., slot, :, :]
         if any(value is None for value in body_positions) or any(
             value is None for value in body_rotations
         ):

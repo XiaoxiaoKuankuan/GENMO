@@ -69,17 +69,18 @@ class JointTrainer:
             "fk_sha256": self.actor.stage1.endecoder.kinematics.kinematics_sha256}
         self.frozen = self.adapter.bundle.frozen_snapshot() if self.adapter is not None else None
         self.store = None
+        self.sidecar_cache_bytes = int(cfg['data'].get('loading', {}).get('sidecar_cache_mb', 16384) * 1024**2)
         if cfg['data']['sidecar']:
             snapshot = resume_value.get('sidecar_snapshot') if resume_value else None
             if rank == 0:
                 self.store = SidecarStore(cfg['data']['sidecar'],'train',self.assets,
-                    sample_contract=cfg['data']['sample_contract'],snapshot=snapshot)
+                    sample_contract=cfg['data']['sample_contract'],snapshot=snapshot,cache_bytes=self.sidecar_cache_bytes)
             if world_size > 1:
                 payload = [self.store.snapshot() if rank == 0 else None]
                 dist.broadcast_object_list(payload,src=0)
                 if rank != 0:
                     self.store = SidecarStore(cfg['data']['sidecar'],'train',self.assets,
-                        sample_contract=cfg['data']['sample_contract'],snapshot=payload[0])
+                        sample_contract=cfg['data']['sample_contract'],snapshot=payload[0],cache_bytes=self.sidecar_cache_bytes)
         report = cfg["physics"].get("validation_report") if cfg["physics"]["enabled"] else None
         self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device, execution_contract(cfg)) if report else None
         self.noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+1000+rank)
@@ -128,16 +129,17 @@ class JointTrainer:
                                               find_unused_parameters=True, gradient_as_bucket_view=True) if world_size > 1 else self.actor
 
     def update(self):
-        from .reference import attach_sidecars
+        from .reference import attach_sidecars, attach_supervised_sidecars
         from .execution import execute_window
         from .diagnostics import sample_record, summarize
         started = time.perf_counter()
         self.actor.train()
         self.optimizer.zero_grad(set_to_none=True)
-        batch = self.stream.next(self.cfg['training']['batch_size'], self.device)
+        batch = self.stream.next(self.cfg['training']['batch_size'], 'cpu')
         # A/B完全相同的真实/代理历史；物理认证只影响执行分支，不能改变监督条件。
-        batch, contexts, _, missing = attach_sidecars(batch, self.store, self.adapter,
-            self.actor.stage1.endecoder.codec, self.cfg['physics']['horizon'])
+        batch, contexts, missing = attach_supervised_sidecars(batch, self.store, self.adapter,
+            self.actor.stage1.endecoder.codec, self.cfg['physics']['horizon'], self.device)
+        data_ready = time.perf_counter()
         b = len(batch['decision_time'])
         timesteps = torch.randint(1000, (b,), generator=self.noise_rng).to(self.device)
         noise = torch.randn(b, 60, 30, generator=self.noise_rng).to(self.device)
@@ -169,9 +171,9 @@ class JointTrainer:
         future_inputs, future_batch = None, None
         fcfg = self.cfg.get('future_supervision', {})
         if self.future_stream is not None and self.future_stream.keys and self.step % fcfg['every_steps'] == 0:
-            future_batch, _ = self.future_stream.next(fcfg['batch_size'], self.device)
-            future_batch, future_contexts, _, future_reasons = attach_sidecars(future_batch, self.store, self.adapter,
-                self.actor.stage1.endecoder.codec, 1)
+            future_batch, _ = self.future_stream.next(fcfg['batch_size'], 'cpu')
+            future_batch, future_contexts, future_reasons = attach_supervised_sidecars(future_batch, self.store, self.adapter,
+                self.actor.stage1.endecoder.codec, 1, self.device)
             if any(reason != 'available' for reason in future_reasons):
                 raise ValueError('已索引Future监督请求的持久缓存合同损坏: '+str(future_reasons))
             n = len(future_contexts)
@@ -336,6 +338,7 @@ class JointTrainer:
             'physics_source_count':len(self.physics_stream.keys) if self.physics_stream else 0,
             'future_source_count':len(self.future_stream.keys) if self.future_stream else 0,
             'data_terms':data_terms,'gradient_norm':float(norm),**diagnostics,
+            'data_preparation_seconds':data_ready-started,
             'wall_seconds':time.perf_counter()-started,
             'peak_memory_bytes':torch.cuda.max_memory_allocated(self.device) if self.device.type=='cuda' else 0}
 
@@ -351,7 +354,7 @@ class JointTrainer:
             changed = payload[0] is not None
             if changed and self.rank != 0:
                 self.store = SidecarStore(self.cfg['data']['sidecar'],'train',self.assets,
-                    sample_contract=self.cfg['data']['sample_contract'],snapshot=payload[0])
+                    sample_contract=self.cfg['data']['sample_contract'],snapshot=payload[0],cache_bytes=self.sidecar_cache_bytes)
         if not changed:
             return
         from .requests import PhysicsRequestStream
@@ -436,7 +439,7 @@ class JointTrainer:
                         keys = ('step','lr','data_loss','data_terms','future_supervised_loss','execution_loss','lambda_exec',
                                 'physics_attempts','physics_valid_samples','physics_effective_updates','physics_update_fraction',
                                 'effective_horizon_counts','physics_rejections_total','wall_seconds','peak_memory_bytes',
-                                'precision','physics_source_count','future_source_count')
+                                'precision','physics_source_count','future_source_count','data_preparation_seconds')
                         brief = {k:result[k] for k in keys}
                         brief['data_terms'] = {key:result['data_terms'][key] for key in (
                             'normalized_repr_root_pos_loss','normalized_repr_root_rot_loss','normalized_repr_joint_loss',

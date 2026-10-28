@@ -10,6 +10,9 @@ H窗口/速度halo不足。真实运动和接触类别仅决定训练抽样与�
 
 from collections import Counter, defaultdict
 import copy
+import hashlib
+import json
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -18,10 +21,34 @@ from gem.closedloop.stage1_dataset import collate_stage1_training_samples
 from gem.closedloop.training import batch_to_device
 from gem.datasets.music_dance.music_dance_bumi import resolve_contract_path
 from .contracts import source_key, PhysicsRejected
+from .data import collate_joint_samples
 
 CLASSIFICATION = {"standing_speed_m_s": .08, "standing_joint_speed_rad_s": .35,
                   "arm_speed_rad_s": .5, "leg_speed_rad_s": .5,
                   "turn_speed_rad_s": .25, "high_excursion_rad": .5, "fast_joint_rad_s": 2.}
+
+
+class _RequestTable:
+    """紧凑列式请求表：帧/时刻/类型用数组保存，取到一个请求时才恢复小字典。"""
+    def __init__(self, value):
+        self.value = value
+    def __len__(self):
+        return len(self.value['rows'])
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        frame, request_tick, start_tick, prefix, profile = self.value['rows'][index].tolist()
+        return dict(self.value['constants'], frame=frame, request_tick=request_tick, start_tick=start_tick,
+                    prefix_frames=prefix, **self.value['profiles'][profile])
+
+
+class _RequestGroup:
+    def __init__(self, table, indices):
+        self.table, self.indices = table, indices
+    def __len__(self):
+        return len(self.indices)
+    def __getitem__(self, index):
+        return self.table[int(self.indices[index])]
 
 
 def motion_tags(states, joint_names, contacts=None):
@@ -81,12 +108,21 @@ def static_request(episode, index, horizon):
 
 
 class PhysicsRequestStream:
-    def __init__(self, catalog, store, joint_names, horizon, seed, rank=0, certification=None, *, historical_mode="strict", noise_levels=None):
+    def __init__(self, catalog, store, joint_names, horizon, seed, rank=0, certification=None, *, historical_mode="strict", noise_levels=None,
+                 cache_directory=None):
         self.catalog, self.store, self.horizon = catalog, store, horizon
         self.source_rng = np.random.default_rng(seed+3000+rank)
         self.time_rng = np.random.default_rng(seed+4000+rank)
         self.draws, self.order, self.cursor = 0, [], 0
         self.sources, self.requests, self.inventory = {}, {}, []
+        cache_identity = dict(catalog=catalog.identity, sidecar=store.identity, joint_names=list(joint_names),
+            horizon=horizon, classification=CLASSIFICATION, historical_mode=historical_mode,
+            noise_levels=noise_levels, certification=certification.report if certification is not None else None)
+        self.cache_key = hashlib.sha256(json.dumps(cache_identity, sort_keys=True).encode()).hexdigest()
+        self.cache_path = Path(cache_directory)/f'requests_h{horizon}_{self.cache_key}.pt' if cache_directory else None
+        if self.cache_path is not None and self.cache_path.exists():
+            self._load_compact()
+            return
         initial_guards = {}
         for dataset,row in catalog.sources():
             record = dataset.rows[row]
@@ -156,6 +192,45 @@ class PhysicsRequestStream:
         self.identity = {"sidecar": store.identity, "horizon": horizon, "keys": self.keys,
                          "static_selection":"time_prefix_halo_profile_real_window_state_action_v2", "historical_mode": historical_mode,
                          "classification": CLASSIFICATION, "catalog": catalog.identity}
+        if self.cache_path is not None:
+            self._save_compact()
+            self._load_compact()
+
+    def _save_compact(self):
+        from .checkpoint import atomic_save
+        packed = {}
+        for key, items in self.requests.items():
+            profiles, lookup, rows = [], {}, []
+            for item in items:
+                profile = {name:item[name] for name in ('tags','historically_certified','timesteps')}
+                name = json.dumps(profile, sort_keys=True)
+                if name not in lookup:
+                    lookup[name] = len(profiles); profiles.append(profile)
+                rows.append([item[k] for k in ('frame','request_tick','start_tick','prefix_frames')]+[lookup[name]])
+            grouped = defaultdict(list)
+            for i, item in enumerate(items):
+                grouped['|'.join(item['tags'])].append(i)
+            packed[key] = dict(rows=torch.tensor(rows, dtype=torch.int32), profiles=profiles,
+                constants={name:items[0][name] for name in ('source','dataset','music_identity')},
+                groups=[torch.tensor(grouped[name],dtype=torch.int32) for name in sorted(grouped)])
+        try:
+            atomic_save({'cache_key':self.cache_key, 'identity':self.identity, 'inventory':self.inventory,
+                         'tables':packed}, self.cache_path)
+        except FileExistsError:
+            pass  # 并发rank仅接受已原子发布且identity相同的只读表。
+
+    def _load_compact(self):
+        value = torch.load(self.cache_path, weights_only=False, map_location='cpu', mmap=True)
+        if value['cache_key'] != self.cache_key:
+            raise ValueError('持久请求表身份不匹配')
+        self.identity, self.inventory = value['identity'], value['inventory']
+        self.keys = self.identity['keys']
+        self.requests = {key:_RequestTable(table) for key,table in value['tables'].items()}
+        self.groups = {key:[_RequestGroup(self.requests[key], group) for group in table['groups']]
+                       for key,table in value['tables'].items()}
+        all_sources = {source_key({'dataset_id':ds.dataset_name, 'split':ds.split,
+            'sample_id':str(ds.rows[row]['sample_id'])}):(ds,row) for ds,row in self.catalog.sources()}
+        self.sources = {key:all_sources[key] for key in self.keys}
 
     def next(self, count, device):
         if not self.keys:
@@ -177,7 +252,7 @@ class PhysicsRequestStream:
             samples.append(sample)
             records.append(dict(request, draw=self.draws))
             self.draws += 1
-        return batch_to_device(collate_stage1_training_samples(samples),device), records
+        return batch_to_device(collate_joint_samples(samples),device), records
 
     def state_dict(self):
         return {"source_rng": copy.deepcopy(self.source_rng.bit_generator.state),

@@ -187,17 +187,21 @@ class Stage1BumiLosses(BumiRobotLosses):
         combined_norm = torch.where(valid, combined_norm, neutral_norm)
         # 一次共享时间轴的 decode/integration，绝不分别编码前缀与未来。
         decoded = self.endecoder.decode(combined_norm)
-        target_decoded = self.endecoder.decode(target_norm)
         pred_qpos = self.endecoder.compose_qpos(decoded)
-        target_qpos = self.endecoder.compose_qpos(target_decoded)
         pred_fk = self.kinematics.forward_kinematics(pred_qpos)
-        target_fk = self.kinematics.forward_kinematics(target_qpos)
         pred_body = self.endecoder.codec.body_positions_in_root_frame(
             pred_qpos[..., :3], pred_qpos[..., 3:7], pred_fk["body_pos_w"][..., 1:, :]
         )
-        target_body = self.endecoder.codec.body_positions_in_root_frame(
-            target_qpos[..., :3], target_qpos[..., 3:7], target_fk["body_pos_w"][..., 1:, :]
-        )
+        with torch.no_grad():
+            target_decoded = self.endecoder.decode(target_norm)
+            target_qpos = self.endecoder.compose_qpos(target_decoded)
+            target_body = batch.get('_target_body')
+            if target_body is None:
+                target_positions = self.kinematics.forward_body_positions(target_qpos)
+                target_body = self.endecoder.codec.body_positions_in_root_frame(
+                    target_qpos[..., :3], target_qpos[..., 3:7], target_positions[..., 1:, :])
+            elif target_body.shape != (*pred.shape[:2], 21, 3) or target_body.dtype != torch.float32:
+                raise ValueError('GT几何缓存必须为FP32[B,T,21,3]')
         # XY[t] 依赖全部较早的 delta 和 heading；Z[t] 只依赖本帧高度。
         rot_valid = valid[..., 3:9].all(-1)
         delta_support = valid[..., :2].all(-1) & rot_valid
