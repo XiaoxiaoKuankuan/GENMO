@@ -46,6 +46,21 @@ def test_SO3_cast_float32_stays_inside_actual_acceleration_budget():
     assert float(p.last_statistics['so3_float32_excess'].max())<=0
 
 
+def test_sparse_SO3_derivatives_equal_full_30_dimension_autodiff():
+    """局部6/9维精确组装必须与原30维Jacobian及非线性Hessian一致。"""
+    from gem.closedloop.reference_adapter.so3_derivatives import build
+    p, raw, left, anchor, rotation = fixture()
+    x = (raw[..., 3:6]/(p.velocity[3:6]*.02)).transpose(1, 2).flatten(1)
+    _, jac, hess = build(p, x)
+    expected_jac = torch.func.vmap(torch.func.jacrev(p.angular_constraints, argnums=0))(x, left[:, 3:6], anchor[:, 3:6], rotation)
+    torch.testing.assert_close(jac(x, left[:, 3:6], anchor[:, 3:6], rotation), expected_jac, atol=1e-10, rtol=1e-9)
+    lam = torch.linspace(0, 1, expected_jac.shape[1], dtype=x.dtype)[None]
+    def curvature(value, old, current, nominal, multiplier):
+        return (p.angular_constraints(value, old, current, nominal)*multiplier).sum()
+    expected_hess = torch.func.vmap(torch.func.hessian(curvature, argnums=0))(x, left[:, 3:6], anchor[:, 3:6], rotation, lam)
+    torch.testing.assert_close(hess(x, left[:, 3:6], anchor[:, 3:6], rotation, lam), expected_hess, atol=1e-9, rtol=1e-8)
+
+
 def test_SO3_axis_aligned_constraint_has_finite_curvature_backward():
     p,raw,left,anchor,rotation=fixture()
     rotation=torch.eye(3,dtype=raw.dtype).expand(1,13,3,3)

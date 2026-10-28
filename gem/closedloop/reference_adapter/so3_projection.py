@@ -34,25 +34,8 @@ def _derivatives(projector, x):
     compiled = x.is_cuda and not torch.is_grad_enabled() and getattr(projector, 'compile_derivatives', True)
     key = (x.device, x.dtype, compiled)
     if key not in cache:
-        fn = torch.func.vmap(projector.angular_constraints)
-        jac = torch.func.vmap(torch.func.jacrev(projector.angular_constraints, argnums=0))
-        def curvature(value, old, current, nominal, lam):
-            return (projector.angular_constraints(value, old, current, nominal)*lam).sum()
-        hess = torch.func.vmap(torch.func.jacrev(torch.func.grad(curvature, argnums=0), argnums=0))
-        if compiled:
-            # 不编译循环、活跃集选择或KKT反向；不同有效批量共用动态batch内核。
-            def compile_kernel(function):
-                kernel = torch.compile(function, dynamic=True, fullgraph=True,
-                    options={'triton.cudagraphs': False})
-                def fixed_tail(*values):
-                    # Functorch内部matmul目前不支持符号13/3维；只让batch动态。
-                    for value in values:
-                        for dim in range(1, value.ndim):
-                            torch._dynamo.mark_static(value, dim)
-                    return kernel(*values)
-                return fixed_tail
-            fn, jac, hess = [compile_kernel(f) for f in (fn, jac, hess)]
-        cache[key] = fn, jac, hess
+        from .so3_derivatives import build
+        cache[key] = build(projector, x, compile_kernels=compiled)
     return cache[key]
 
 
@@ -290,12 +273,8 @@ class _ImplicitSO3(torch.autograd.Function):
         projector = ctx.projector
         with scope('projection.SO3_KKT_implicit_backward'), torch.no_grad():
             # 最终非线性KKT导数含Hessian，不能用末次线性QP切空间近似替代。
-            def lagrangian(value, old, current, nominal, lam):
-                angular = projector.angular_constraints(value, old, current, nominal)
-                return (angular*lam).sum()
             nlinear = lower.shape[-1]*2
-            hessian_fn = torch.func.jacrev(torch.func.grad(lagrangian, argnums=0), argnums=0)
-            hessian = torch.func.vmap(hessian_fn)(x, past, anchor, rotation, multiplier[:, nlinear:])
+            hessian = _derivatives(projector, x)[2](x, past, anchor, rotation, multiplier[:, nlinear:])
             eye = torch.eye(x.shape[-1], device=x.device, dtype=x.dtype)
             hessian = eye + hessian
             a = _jacobian(projector, x, past, anchor, rotation)*active[..., None]

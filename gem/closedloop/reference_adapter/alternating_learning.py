@@ -225,22 +225,33 @@ def _policy_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
     adam_before = copy.deepcopy(optimizer.state_dict())
     with dynamics.adapter_phase(), frozen_parameters(critic):
         for offset in range(0, count, microbatch):
-            start = detach_state(select_state(starts, slice(offset, offset+microbatch)))
-            try:
-                trajectory = imagine(control, dynamics, critic, start, horizon,
-                    terminal_value=terminal_value, gamma=gamma, gradient_diagnostics=diagnostics)
-            except RuntimeError as error:
-                if not _projection_failure(error):
-                    raise
-                rejected += len(start['state'])
-                rejection_rows.append(dict(offset=offset, samples=len(start['state']),
-                    infeasible_samples=int(error.bad_mask.sum()), reason=str(error)))
-                if failure_identity is None:
-                    from .update_diagnostics import parameter_identity
-                    failure_identity = dict(failure_context or {}, wm_version=dynamics.model_version,
-                        adapter_sha256=parameter_identity(control.adapter), wm_sha256=parameter_identity(dynamics))
-                retain_partial_failure(control, error, start, starts, offset=offset, horizon=horizon,
-                                       context=failure_identity)
+            sample_ids = torch.arange(offset, min(offset+microbatch, count), device=starts['state'].device)
+            trajectory = None
+            while len(sample_ids):
+                start = detach_state(select_state(starts, sample_ids))
+                try:
+                    trajectory = imagine(control, dynamics, critic, start, horizon,
+                        terminal_value=terminal_value, gamma=gamma, gradient_diagnostics=diagnostics)
+                    break
+                except RuntimeError as error:
+                    if not _projection_failure(error):
+                        raise
+                    bad = error.bad_mask
+                    if bad.shape != sample_ids.shape or not bool(bad.any()):
+                        raise RuntimeError('投影拒样必须明确标出当前批次的真实失败样本') from error
+                    bad_ids = sample_ids[bad].cpu().tolist()
+                    rejected += len(bad_ids)
+                    rejection_rows.append(dict(offset=offset, samples=len(bad_ids), sample_indices=bad_ids,
+                        infeasible_samples=len(bad_ids), reason=str(error)))
+                    if failure_identity is None:
+                        from .update_diagnostics import parameter_identity
+                        failure_identity = dict(failure_context or {}, wm_version=dynamics.model_version,
+                            adapter_sha256=parameter_identity(control.adapter), wm_sha256=parameter_identity(dynamics))
+                    retain_partial_failure(control, error, start, starts, offset=offset, horizon=horizon,
+                                           context=failure_identity)
+                    # 只排除数值失败环境；更大microbatch不能连带丢弃其它有效起点。
+                    sample_ids = sample_ids[~bad]
+            if trajectory is None:
                 continue
             loss = -trajectory['objective'].sum()/count
             if not torch.isfinite(loss):
@@ -278,7 +289,7 @@ def _policy_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
         gradient_square = dict(zip(names, values[:len(names)]))
         projection_gradient_dot, projection_inactive_coordinates, projection_coordinates = values[-3:]
     if rejected:
-        excluded = {i for row in rejection_rows for i in range(row['offset'], row['offset']+row['samples'])}
+        excluded = {i for row in rejection_rows for i in row['sample_indices']}
         control.last_imagination_failure.update(accepted_samples=accepted, rejected_samples=rejected,
             rejected_microbatches=rejection_rows,
             accepted_sample_indices=[i for i in range(count) if i not in excluded])
