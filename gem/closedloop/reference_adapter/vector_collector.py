@@ -175,16 +175,16 @@ class VectorCollector:
         if contact_count:
             from .vector_audit import contact_tensors
             contacts = contact_tensors(self.env, contact_count)
-        if cuda:
+        if cuda and contact_count:
             torch.cuda.synchronize(self.device)
         t3b = time.perf_counter()
-        if not torch.isfinite(next_state).all() or not torch.isfinite(reward).all():
+        if not bool(torch.isfinite(next_state).all() & torch.isfinite(reward).all()):
             raise FloatingPointError('真实物理状态或奖励出现非有限值')
         if replay is not None:
             ids = slice(None) if replay_ids is None else replay_ids
             replay.add(select_state(z, ids), proposal['action'][ids], next_state[ids], reward[ids],
                        continuation[ids], done[ids], failed[ids], self.policy_version)
-        if cuda:
+        if cuda and replay is not None:
             torch.cuda.synchronize(self.device)
         t4 = time.perf_counter()
         # reset只写采集器下一状态；返回的真实末态和起点不能被原地改成reset状态。
@@ -196,6 +196,8 @@ class VectorCollector:
         if auto_reset and len(ended):
             # 计费角色train_safety不是新的歌曲划分；复位仍显式采样其所属训练集。
             self.reset(ended, split=reset_split or split, random_start=True, perturb=perturb)
+        if cuda:
+            torch.cuda.synchronize(self.device)
         t5 = time.perf_counter()
         timing = dict(control_ms=(t1-t0)*1000, physics_ms=(t2-t1)*1000,
             reward_and_shared_diagnostics_ms=(t3-t2)*1000, detailed_contact_diagnostics_ms=(t3b-t3)*1000,

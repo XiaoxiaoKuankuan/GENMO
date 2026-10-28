@@ -192,10 +192,13 @@ def main():
         pointer['seconds'] = time.perf_counter()-checkpoint_begin
         append_json(output/'checkpoint_history.jsonl', pointer)
         append_json(output/'timing.jsonl', dict(phase='checkpoint', **pointer, timestamp=time.time()))
+        from .training_report import safe_update_report as update_report
+        update_report(output.parent)
         return path
 
     def collect(n):
         totals = {}
+        breakdown = {}
         begin = time.perf_counter()
         collector.policy_version = state['accepted_updates']
         for _ in range(n):
@@ -203,6 +206,9 @@ def main():
                 exploration_fraction=settings.get('exploration_fraction', 0.),
                 exploration_std=settings.get('exploration_std', .1))
             update_wm_normalization(engine.dynamics, row)
+            for name, milliseconds in row['timing'].items():
+                if name.endswith('_ms'):
+                    breakdown[name[:-3]+'_seconds'] = breakdown.get(name[:-3]+'_seconds', 0.)+milliseconds/1000
             values = dict(real_reward=row['reward'].mean(), real_tracking=row['raw']['track'].mean(),
                 real_reference_rms=row['proposal']['residual'].square().mean().sqrt(),
                 real_action_vs_zero_rms=(row['proposal']['action']-row['proposal']['zero_action']).square().mean().sqrt(),
@@ -221,6 +227,7 @@ def main():
         values = torch.stack(list(totals.values())).cpu().tolist()
         totals = dict(zip(keys, values))
         totals.update(collection_seconds=time.perf_counter()-begin, collection_vector_steps=n,
+                      collection_breakdown_seconds=breakdown,
                       physical_metrics_scope='training_distribution_not_paired_policy_improvement')
         if collector.projection_recovery_events:
             append_json(output/'projection_recovery.jsonl', dict(
@@ -259,6 +266,7 @@ def main():
         extra['evaluations'].append(state['accepted_updates'])
         append_json(output/'timing.jsonl', dict(phase='dedicated_evaluation', adapter_updates=state['accepted_updates'],
             seconds=time.perf_counter()-begin, actual_physics_envs=actual_envs,
+            evaluation_physics=json.loads((output/f'dedicated_timing_{state["accepted_updates"]:06d}.json').read_text()),
             training_physics_advanced=False, timestamp=time.time()))
         return {split: {k: r[k] for k in ('completion_rate', 'mean_tracking', 'mean_root_position_rmse_m',
                                         'mean_jerk_rms', 'mean_beat_f1', 'paired_zero_difference')} for split, r in reports.items()}
@@ -408,9 +416,12 @@ def main():
                 append_json(output/'training.jsonl', row)
                 append_json(output/'timing.jsonl', dict(phase='alternating_iteration', adapter_updates=update,
                     real_collection_seconds=row['collection_seconds'], wm10_seconds=row['wm_seconds'],
+                    real_collection_regions=row['collection_breakdown_seconds'],
                     adapter_seconds=row.get('policy_seconds'), adapter_regions=row.get('timing'), timestamp=time.time()))
                 if warmup and state['iterations'] % 10 == 0 or not warmup and (update == 1 or update % settings['log_every'] == 0):
                     print(json.dumps(row, ensure_ascii=False, allow_nan=False), flush=True)
+                    from .training_report import safe_update_report as update_report
+                    update_report(output.parent)
                 evaluated = False
                 if not warmup and update in settings['evaluation_updates'] and update not in extra['evaluations']:
                     summary = evaluate()

@@ -106,6 +106,7 @@ def main():
                 (out/f'{split}_{args.adapter_updates:06d}{suffix}.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     (out/f'dedicated_timing_{args.adapter_updates:06d}.json').write_text(json.dumps(dict(
         seconds=time.perf_counter()-begin, actual_physics_envs=args.num_envs, training_physics_advanced=False,
+        physical_transitions=collector.real_transitions, measured_by_role=collector.real_by_role,
         snapshot=args.snapshot), indent=2))
     return 0
 

@@ -132,6 +132,42 @@ def test_all_projection_rejections_preserve_parameters_and_optimizer(system, mon
         assert after.grad is None
 
 
+def test_large_microbatch_retries_good_environments_without_dropping_them(system, monkeypatch):
+    engine, control, z = setup(system)
+    optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5)
+    original = control.propose
+    calls = []
+    def propose(state, **kwargs):
+        calls.append(len(state['state']))
+        if len(calls) == 1:
+            raise numerical_failure(torch.tensor([True, False]))
+        return original(state, **kwargs)
+    monkeypatch.setattr(control, 'propose', propose)
+    report, _ = policy_update(control, engine.dynamics, Critic(2835), optimizer, z, 2,
+                             terminal_value=False, microbatch=2)
+    assert report['accepted_samples'] == 1 and report['rejected_samples'] == 1
+    assert calls[0] == 2 and calls[1] == 1
+    assert control.last_imagination_failure['accepted_sample_indices'] == [1]
+
+
+def test_nonfinite_loss_with_finite_gradient_never_executes_Adam(system, monkeypatch):
+    import gem.closedloop.reference_adapter.alternating_learning as learning
+    engine, control, z = setup(system)
+    optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5)
+    before = [p.detach().clone() for p in control.adapter.parameters()]
+    def bad_trajectory(*args, **kwargs):
+        score = next(control.adapter.parameters()).sum()*0+float('nan')
+        return dict(objective=score.expand(2), terms={}, terminal=score*0,
+                    survival=score*0, projection_statistics={}, gradient_probe=None)
+    monkeypatch.setattr(learning, 'imagine', bad_trajectory)
+    with pytest.raises(FloatingPointError, match='未执行Adam'):
+        policy_update(control, engine.dynamics, Critic(2835), optimizer, z, 2,
+                      terminal_value=False, microbatch=2)
+    assert not optimizer.state
+    for a, b in zip(before, control.adapter.parameters()):
+        torch.testing.assert_close(a, b, atol=0, rtol=0)
+
+
 def test_update_diagnostics_report_projection_and_first_frame_gradients(system):
     engine, control, z = setup(system)
     optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5)

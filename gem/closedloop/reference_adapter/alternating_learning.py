@@ -210,6 +210,7 @@ def _policy_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
     projection_coordinates = starts['state'].new_zeros(())
     projection_statistics = {}
     probes = fixed_probes(starts, per_song=1) if diagnostics else None
+    losses_finite = torch.ones((), device=starts['state'].device, dtype=torch.bool)
     with torch.no_grad():
         try:
             before_proposal = control.propose(probes) if diagnostics else None
@@ -254,8 +255,7 @@ def _policy_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
             if trajectory is None:
                 continue
             loss = -trajectory['objective'].sum()/count
-            if not torch.isfinite(loss):
-                raise FloatingPointError('Adapter想象累计目标非有限')
+            losses_finite &= torch.isfinite(loss)
             with phase('backward'), scope('stage2_BPTT_backward'):
                 loss.backward()
             accepted += len(start['state'])
@@ -297,6 +297,9 @@ def _policy_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
         optimizer.zero_grad(set_to_none=True)
         raise PolicyProjectionRejected(dict(accepted_samples=0, rejected_samples=rejected,
             rejected_microbatches=rejection_rows, optimizer_step_completed=False))
+    if not bool(losses_finite):
+        optimizer.zero_grad(set_to_none=True)
+        raise FloatingPointError('Adapter想象累计目标非有限；未执行Adam')
     # 仅对实际有效样本取均值；被拒绝批没有backward，不能稀释有效梯度。
     normalization = count/accepted
     if accepted != count:
