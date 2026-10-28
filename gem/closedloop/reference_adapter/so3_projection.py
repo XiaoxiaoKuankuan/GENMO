@@ -53,12 +53,50 @@ def _multipliers(a, c, target, x):
     return multiplier, active
 
 
+def _numerical_qp(target, lower, upper, matrix, iterations):
+    """严格数值IPM，不把不满足互补条件的额外面硬精化为等式。"""
+    g = torch.cat((matrix, -matrix), 1)
+    h = torch.cat((upper, -lower), 1)
+    x = target.clone()
+    slack = (h-(g@x[..., None]).squeeze(-1)).abs().clamp_min(1.)
+    dual = slack.reciprocal()
+    eye = torch.eye(x.shape[-1], device=x.device, dtype=x.dtype)
+    def step_length(value, direction):
+        ratio = torch.where(direction < 0, -value/direction.clamp_max(-1e-100), float('inf'))
+        return ratio.amin(-1).clamp_max(1.)
+    for _ in range(max(iterations, 60)):
+        rd = x-target+(g.transpose(-1, -2)@dual[..., None]).squeeze(-1)
+        rp = (g@x[..., None]).squeeze(-1)+slack-h
+        mu = (slack*dual).mean(-1)
+        done = (torch.maximum(rd.abs().amax(-1), rp.abs().amax(-1)) < 1e-8) & (mu < 1e-10)
+        if bool(done.all()):
+            break
+        lhs = eye+g.transpose(-1, -2)@((dual/slack)[..., None]*g)
+        def newton(central):
+            rhs = -rd+(g.transpose(-1, -2)@((central-dual*rp)/slack)[..., None]).squeeze(-1)
+            dx = torch.linalg.solve_ex(lhs, rhs[..., None]).result.squeeze(-1)
+            ds = -rp-(g@dx[..., None]).squeeze(-1)
+            dl = (-central-dual*ds)/slack
+            return dx, ds, dl
+        _, ds, dl = newton(slack*dual)
+        ap, ad = step_length(slack, ds), step_length(dual, dl)
+        mu_aff = ((slack+ap[:, None]*ds)*(dual+ad[:, None]*dl)).mean(-1)
+        sigma = (mu_aff/mu.clamp_min(1e-30)).clamp(0, 1).pow(3)
+        dx, ds, dl = newton(slack*dual+ds*dl-sigma[:, None]*mu[:, None])
+        ap, ad = .995*step_length(slack, ds), .995*step_length(dual, dl)
+        x = torch.where(done[:, None], x, x+ap[:, None]*dx)
+        slack = torch.where(done[:, None], slack, (slack+ap[:, None]*ds).clamp_min(1e-30))
+        dual = torch.where(done[:, None], dual, (dual+ad[:, None]*dl).clamp_min(1e-30))
+    return x
+
+
 def _solve(projector, initial, target, past, anchor, rotation, lower, upper, margin):
-    from .reference_constraints import _CoupledProjection
     x = initial.clone()
     base = torch.block_diag(projector.matrix, projector.matrix, projector.matrix).to(x).expand(len(x), -1, -1)
     fn = torch.func.vmap(projector.angular_constraints)
     jac_fn = torch.func.vmap(torch.func.jacrev(projector.angular_constraints, argnums=0))
+    nonlinear_multiplier = torch.zeros_like(fn(x, past, anchor, rotation))
+    eye = torch.eye(x.shape[-1], device=x.device, dtype=x.dtype)
     counts = torch.zeros(len(x), device=x.device, dtype=torch.long)
     finished = torch.zeros(len(x), device=x.device, dtype=torch.bool)
     step_error = x.new_full((len(x),), float('inf'))
@@ -67,17 +105,39 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
         jac = jac_fn(x, past, anchor, rotation)
         boundary = (jac @ x[..., None]).squeeze(-1) - value
         matrix = torch.cat((base, jac), 1)
-        scale = matrix.norm(dim=-1).clamp_min(1.)
+        # 使用真实拉格朗日曲率的SQP：原单位Hessian在角加速度范数活跃面上会
+        # 产生来回振荡，固定最小1/64步长最终选择零步。SPD修正只服务数值搜索；
+        # 收敛后的隐式反向仍使用未修正的真实拉格朗日Hessian。
+        def curvature(value, old, current, nominal, lam):
+            return (projector.angular_constraints(value, old, current, nominal)*lam).sum()
+        hessian = eye+torch.func.vmap(torch.func.jacrev(torch.func.grad(curvature, argnums=0), argnums=0))(
+            x, past, anchor, rotation, nonlinear_multiplier)
+        eigen, basis = torch.linalg.eigh(hessian)
+        hessian = (basis*eigen.clamp_min(.01)[..., None, :])@basis.transpose(-1, -2)
+        chol = torch.linalg.cholesky(hessian)
+        inv_t = torch.linalg.solve_triangular(chol.transpose(-1, -2), eye.expand(len(x), -1, -1), upper=True)
+        unconstrained = x-torch.cholesky_solve((x-target)[..., None], chol).squeeze(-1)
+        whitened_target = (chol.transpose(-1, -2)@unconstrained[..., None]).squeeze(-1)
+        whitened_matrix = matrix@inv_t
+        scale = whitened_matrix.norm(dim=-1).clamp_min(1.)
+        qp_lower = torch.cat((lower, torch.full_like(boundary, -1e4)), -1)
+        qp_upper = torch.cat((upper, boundary), -1)
         with torch.profiler.record_function("projection.SO3_QP"):
-            candidate = _CoupledProjection.apply(target,
-                torch.cat((lower, torch.full_like(boundary, -1e4)), -1)/scale,
-                torch.cat((upper, boundary), -1)/scale, matrix/scale[..., None], projector.coupled_iterations)
+            whitened = _numerical_qp(whitened_target, qp_lower/scale,
+                qp_upper/scale, whitened_matrix/scale[..., None], projector.coupled_iterations)
+            candidate = (inv_t@whitened[..., None]).squeeze(-1)
+        linear_c = torch.cat(((matrix@candidate[..., None]).squeeze(-1)-qp_upper,
+                              qp_lower-(matrix@candidate[..., None]).squeeze(-1)), -1)
+        linear_a = torch.cat((matrix, -matrix), 1)
+        objective_grad = (hessian@(candidate-x)[..., None]).squeeze(-1)+x-target
+        lam, _ = _multipliers(linear_a, linear_c, candidate-objective_grad, candidate)
+        nonlinear_multiplier = lam[:, base.shape[1]:matrix.shape[1]]
         step_error = (candidate-x).abs().amax(-1)
         converged = (value.amax(-1) <= 1e-8) & (step_error < 2e-6)
         finished |= converged
         if bool(finished.all()):
             break
-        fractions = x.new_tensor([1., .5, .25, .125, .0625, .03125, .015625, 0.])
+        fractions = x.new_tensor([2.**-j for j in range(17)]+[0.])
         trial = x[:, None] + fractions[None, :, None]*(candidate-x)[:, None]
         g = fn(trial.flatten(0, 1), past.repeat_interleave(len(fractions), 0),
                anchor.repeat_interleave(len(fractions), 0), rotation.repeat_interleave(len(fractions), 0)) + margin
@@ -162,6 +222,7 @@ def project_rotation_implicit(projector, proposal, projected, left, anchor, nomi
     margin[:11] = 1e-4/projector.rotation_velocity
     if projector.constrain_root_angular_acceleration:
         margin[11:22] = .01/projector.rotation_acceleration
+    needs_gradient = torch.is_grad_enabled() and any(v.requires_grad for v in (target, past, current, rotation, lo, hi))
     for attempt in range(3):
         solution = _ImplicitSO3.apply(initial, target, past, current, rotation, lo, hi, margin, projector)
         result = projected.clone()
@@ -174,6 +235,10 @@ def project_rotation_implicit(projector, proposal, projected, left, anchor, nomi
                 so3_float32_excess=castc.amax(-1), so3_resolve_attempts=selected.new_tensor(attempt+1))
             # 在实际输出精度下严格不超过预算，不使用certificate的容差通过内部重解。
             good = castc.amax(-1) <= 0
+            if needs_gradient:
+                # 可行但非驻点的数值输出不能用最优映射KKT梯度冒充。
+                good &= projector.last_statistics["sqp_stationarity_residual64"] <= 1e-4
+                good &= projector.last_statistics["sqp_constraint_residual64"] <= 1e-6
         if bool(good.all()):
             return result
         initial = solution.detach()
@@ -181,4 +246,4 @@ def project_rotation_implicit(projector, proposal, projected, left, anchor, nomi
     bad = torch.zeros(len(projected), device=projected.device, dtype=torch.bool)
     bad[selected[~good]] = True
     certificate = projector.certificate(result.detach(), left.detach(), anchor.detach(), nominal_rotation.detach())
-    raise ProjectionNumericalFailure('SO(3)投影在实际输出精度下仍不可行；拒绝失败样本', bad, certificate, projector.last_statistics)
+    raise ProjectionNumericalFailure('SO(3)投影未满足实际输出精度或KKT驻点精度；拒绝失败样本', bad, certificate, projector.last_statistics)

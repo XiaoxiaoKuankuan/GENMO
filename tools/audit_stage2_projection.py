@@ -48,7 +48,13 @@ def main():
     old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
     def projection(kind):
         kw=dict(cfg['alternating']['projection']);kw['constrain_root_angular_acceleration']=True
-        return (old.ReferenceProjection if kind=='old' else ReferenceProjection)(control.bundle.spec,control.adapter.bounds,**kw).cuda()
+        if kind=='old':kw.pop('constrain_root_angular_acceleration',None)
+        value=(old.ReferenceProjection if kind=='old' else ReferenceProjection)(control.bundle.spec,control.adapter.bounds,**kw).cuda()
+        if kind=='old':
+            value.acceleration_mask=torch.ones(27,device='cuda:0',dtype=torch.bool)
+            value.constrain_root_angular_acceleration=True
+            value.last_statistics={}
+        return value
     def saved(data):
         extra=data['extra_state'];item=extra.get('imagination_failure')
         if item:
@@ -93,25 +99,24 @@ def main():
         torch.save(dict(cases=fixtures,bounds=control.adapter.bounds.detach().cpu(),joint_names=control.bundle.spec.joint_names),out/'projection_fixtures.pt')
         return
     path,data=load(args.gpu_case);engine.step.adapter.load_state_dict(data['adapter']);engine.dynamics.load_state_dict(data['dynamics'])
-    state,_,_=saved(data)
+    state=data['collector_state']
     z={k:v[:args.batch].to('cuda:0') for k,v in state.items()}
+    from gem.closedloop.reference_adapter.vector_entry import compile_kinematics
+    from gem.closedloop.reference_adapter.alternating_learning import imagine
+    compile_report=compile_kinematics(engine,bank)
+    (out/'compiled_fk.json').write_text(json.dumps(compile_report,indent=2))
     from torch.profiler import profile,ProfilerActivity,record_function
     rows=[]
     def rollout(horizon):
-        current=z;score=z['state'].new_zeros(len(z['state']));stats=[]
-        for step in range(horizon):
-            with record_function('stage2.Adapter_Projection_Actor'):
-                proposal=control.propose(current,checkpoint_actor=True)
-            with record_function('stage2.WM'):
-                nxt=engine.dynamics.step(current['state'],proposal['action'],current['xi'])
-            with record_function('stage2.Reward_and_History'):
-                current,reward,_,_,continuation,_,_=control.advance(current,proposal,nxt)
-            score=score+.99**step*reward
-            if hasattr(control.projection,'last_statistics'):stats.append(dict(control.projection.last_statistics))
-        with record_function('stage2.BPTT_backward'):(-score.mean()).backward()
-        return stats
+        result=imagine(control,engine.dynamics,None,z,horizon,terminal_value=False,checkpoint_steps=True)
+        with record_function('stage2.BPTT_backward'):(-result['objective'].mean()).backward()
+        return result['projection_statistics']
     for kind in args.implementations:
         control.projection=projection(kind)
+        # 排除编译及首个CUDA核缓存开销；与正式入口相同的真实起点和checkpoint图。
+        with frozen_parameters(engine.dynamics):
+            try:rollout(1)
+            except RuntimeError:pass
         for horizon in args.horizons:
             engine.step.adapter.zero_grad(set_to_none=True);torch.cuda.empty_cache();torch.cuda.reset_peak_memory_stats()
             torch.cuda.synchronize();start=time.perf_counter()
@@ -120,9 +125,11 @@ def main():
                     stats=rollout(horizon)
                 torch.cuda.synchronize()
                 events=[dict(name=e.key,cpu_ms=e.cpu_time_total/1000,cuda_ms=e.device_time_total/1000,calls=e.count)
-                        for e in prof.key_averages() if e.key.startswith(('stage2.','projection.'))]
+                        for e in prof.key_averages() if e.key.startswith(('stage2.','stage2_','projection.'))]
                 row=dict(implementation=kind,horizon=horizon,batch=len(z['state']),seconds=time.perf_counter()-start,
-                         peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,events=events,projection_statistics=[small(v) for v in stats])
+                         peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,events=events,projection_statistics=small(stats),
+                         timing_scope='one_formal_BPTT_microbatch_not_1024_sample_update',
+                         real_start='same_saved_collector_state',compiled_FK=True,checkpoint_steps=True)
             except Exception as error:row=dict(implementation=kind,horizon=horizon,error=repr(error))
             rows.append(row);print(json.dumps({k:v for k,v in row.items() if k!='projection_statistics'}),flush=True)
             (out/'projection_profile.json').write_text(json.dumps(rows,indent=2))

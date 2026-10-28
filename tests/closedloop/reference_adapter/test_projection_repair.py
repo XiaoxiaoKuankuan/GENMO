@@ -53,3 +53,34 @@ def test_SO3_axis_aligned_constraint_has_finite_curvature_backward():
     value=p(raw,left,anchor,rotation)
     gradient=torch.autograd.grad(value.sum(),raw)[0]
     assert gradient.isfinite().all()
+
+
+def test_all_eight_saved_failures_strict_budget_stationarity_and_gradients():
+    import json
+    from pathlib import Path
+    fixture=json.loads((Path(__file__).parent/'fixtures/so3_failed_alternating_20261028.json').read_text())
+    torch.manual_seed(912)
+    for case in fixture['cases']:
+        p=ReferenceProjection(SimpleNamespace(joint_names=fixture['joint_names']),torch.tensor(fixture['bounds']))
+        raw,left,anchor,rotation=[torch.tensor(case[k]) for k in ('raw','left','anchor','rotation')]
+        value=p(raw,left,anchor,rotation)
+        certificate=p.certificate(value,left,anchor,rotation)
+        assert certificate['feasible'].all(), (case['gpu'],certificate)
+        assert float(certificate['angular_acceleration_excess'].max())<=0
+        assert float(p.last_statistics['sqp_stationarity_residual64'].max())<1e-4
+        assert int(p.last_statistics['sqp_iterations'].max())<20
+        # 用双精度对求解映射做中央差分，避免FP32量化噪声掩盖真实导数。
+        p=p.double()
+        raw,left,anchor,rotation=[v.double() for v in (raw,left,anchor,rotation)]
+        for v in (raw,left,anchor):v.requires_grad_()
+        value=p(raw,left,anchor,rotation);probe=torch.randn_like(value)
+        gradients=torch.autograd.grad((value*probe).sum(),(raw,left,anchor))
+        for i,gradient in enumerate(gradients):
+            direction=torch.zeros_like((raw,left,anchor)[i])
+            direction[...,3:6]=torch.randn_like(direction[...,3:6])*.001
+            plus=[v.detach().clone() for v in (raw,left,anchor)]
+            minus=[v.detach().clone() for v in (raw,left,anchor)]
+            epsilon=1e-4;plus[i]+=epsilon*direction;minus[i]-=epsilon*direction
+            finite=((p(*plus,rotation)-p(*minus,rotation))*probe).sum()/(2*epsilon)
+            torch.testing.assert_close((gradient*direction).sum(),finite,atol=2e-6,rtol=.005,
+                                       msg=f'GPU{case["gpu"]}, field={i}')
