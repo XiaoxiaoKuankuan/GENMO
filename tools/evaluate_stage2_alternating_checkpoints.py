@@ -49,6 +49,7 @@ def main():
     tasks=[t for t in read_tasks(cfg['tasks']) if t['split'] in args.splits]
     bank=VectorBank(tasks,engine,'cuda:0');control=VectorControl(engine,bank)
     settings=cfg['alternating'];control.adapter.disable_root_xy=True
+    control.disable_root_orientation=not settings.get('root_orientation',True)
     control.projection=ReferenceProjection(control.bundle.spec,control.adapter.bounds,**settings['projection']).cuda()
     calibration=json.loads(Path(settings['calibration']).read_text())
     control.precision=PrecisionObjective(calibration['scales'],**settings['precision'])

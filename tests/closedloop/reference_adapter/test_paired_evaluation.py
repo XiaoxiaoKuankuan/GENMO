@@ -32,3 +32,22 @@ def test_failed_prefix_cannot_claim_full_song_improvement():
     assert difference['completion_delta']==-1
     assert difference['tracking_delta']<0
     assert difference['cases'][0]['current_steps']==50
+
+
+def test_projection_exception_rejects_only_bad_evaluation_environment():
+    import torch
+    from gem.closedloop.reference_adapter.paired_evaluation import _feasible_evaluation_proposal
+    class Control:
+        def propose(self, z, zero=False):
+            bad=z['frame']==3
+            if bad.any():
+                error=RuntimeError('float32不可执行');error.bad_mask=bad
+                raise error
+            return {'action':z['frame'].float()[:,None].expand(-1,21)}
+        def constraint_certificate(self,z,proposal):
+            return {'feasible':torch.ones(len(z['frame']),dtype=torch.bool)}
+    ids,z,proposal,failures=_feasible_evaluation_proposal(Control(),{'frame':torch.tensor([1,3,5])},
+        torch.arange(3),zero=False)
+    assert ids.tolist()==[0,2]
+    assert proposal['action'].shape==(2,21)
+    assert failures[0]['env']==1 and failures[0]['frame']==3

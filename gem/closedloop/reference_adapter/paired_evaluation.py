@@ -21,6 +21,35 @@ def tensor_digest(value):
     return hashlib.sha256(value.detach().contiguous().cpu().numpy().tobytes()).hexdigest()
 
 
+def _feasible_evaluation_proposal(control, full_state, ids, *, zero):
+    """只剔除失败环境后重算批量提案；求解异常也必须留下逐episode证据。"""
+    failures = []
+    while len(ids):
+        z = select_state(full_state, ids)
+        try:
+            proposal = control.propose(z, zero=zero)
+            certificate = control.constraint_certificate(z, proposal)
+            bad = (~certificate['feasible'] if certificate is not None else
+                   torch.zeros(len(ids), dtype=torch.bool, device=ids.device))
+            error_text = 'reference_certificate_failed'
+        except RuntimeError as error:
+            if not hasattr(error, 'bad_mask'):
+                raise
+            bad = error.bad_mask.to(device=ids.device, dtype=torch.bool)
+            certificate = getattr(error, 'certificate', {})
+            error_text = str(error)
+        if bad.shape != ids.shape:
+            raise RuntimeError('投影失败mask不匹配实际评价环境，禁止推进物理')
+        if not bool(bad.any()):
+            return ids, z, proposal, failures
+        for local in bad.nonzero().flatten().tolist():
+            failures.append(dict(env=int(ids[local]), frame=int(z['frame'][local]), error=error_text,
+                certificate={k: v[local].detach().cpu().tolist() for k,v in certificate.items()
+                    if isinstance(v, torch.Tensor) and v.ndim and len(v)==len(ids)}))
+        ids = ids[~bad]
+    return ids, None, None, failures
+
+
 @torch.no_grad()
 def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None):
     control, bank = collector.control, collector.bank
@@ -44,27 +73,16 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None)
     try:
         while bool(active.any()) and (max_steps is None or len(states) < max_steps):
             ids = active.nonzero().flatten()
-            z = select_state(collector.state, ids)
-            proposal = control.propose(z, zero=zero)
-            certificate = control.constraint_certificate(z, proposal)
-            if certificate is not None:
-                bad = ~certificate['feasible']
-                if bool(bad.any()):
-                    for local in bad.nonzero().flatten().tolist():
-                        env_id = int(ids[local])
-                        reasons[env_id] = 'constraint_failure'
-                        constraint_failures.append(dict(env=env_id, task=bank.tasks[int(songs[env_id])]['id'],
-                            frame=int(z['frame'][local]), certificate={k: v[local].cpu().tolist()
-                                for k, v in certificate.items() if isinstance(v, torch.Tensor)}))
-                    active[ids[bad]] = False
-                    ids = ids[~bad]
-                    if not len(ids):
-                        break
-                    z = select_state(collector.state, ids)
-                    proposal = control.propose(z, zero=zero)
-                    checked = control.constraint_certificate(z, proposal)
-                    if checked is not None and not bool(checked['feasible'].all()):
-                        raise RuntimeError('相同评价输入重复投影不一致，不能发送未经确认参考')
+            ids, z, proposal, failures = _feasible_evaluation_proposal(
+                control, collector.state, ids, zero=zero)
+            for failure in failures:
+                env_id = failure['env']
+                reasons[env_id] = 'constraint_failure'
+                active[env_id] = False
+                failure['task'] = bank.tasks[int(songs[env_id])]['id']
+                constraint_failures.append(failure)
+            if not len(ids):
+                break
             action = initial.new_zeros(collector.num_envs, 21)
             action[ids] = proposal['action']
             nxt = collector.env.step_physics(action)
@@ -115,7 +133,7 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None)
         n = int(live[:, i].sum())
         state = torch.cat((initial[i:i+1], state_all[:n, i]))
         q, qd = state[:, 13:34], state[:, 34:]
-        terms = {k: float(v[:n, i].mean()) for k, v in raw_all.items() if v.ndim == 2} if n else {}
+        terms = {k: float(v[:n, i].float().mean()) for k, v in raw_all.items() if v.ndim == 2} if n else {}
         planned = int(bank.ends[song]); budget = min(planned, max_steps) if max_steps is not None else planned
         slip_mask = contact_all[:n, i]
         slip = float(raw_all['foot_speed_xy'][:n, i][slip_mask].mean()) if n and bool(slip_mask.any()) else 0.
