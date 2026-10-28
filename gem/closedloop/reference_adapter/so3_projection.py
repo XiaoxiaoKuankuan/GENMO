@@ -11,6 +11,40 @@ SO(3)约束只在内部留小幅安全余量，外部角速度/角加速度预�
 import torch
 
 
+def _static(projector, x):
+    """按设备/精度缓存只读小矩阵，避免每轮SQP重新拼接和分配。"""
+    cache = getattr(projector, '_so3_static', None)
+    if cache is None:
+        cache = projector._so3_static = {}
+    key = (x.device, x.dtype)
+    if key not in cache:
+        cache[key] = (torch.block_diag(projector.matrix, projector.matrix, projector.matrix).to(x),
+                      torch.eye(30, device=x.device, dtype=x.dtype),
+                      x.new_tensor([2.**-j for j in range(17)]+[0.]))
+    return cache[key]
+
+
+def _derivatives(projector, x):
+    """仅编译无控制流的SO(3)数值导数核；动态SQP/验收仍用原严格逻辑。"""
+    cache = getattr(projector, '_so3_derivatives', None)
+    if cache is None:
+        cache = projector._so3_derivatives = {}
+    compiled = x.is_cuda and getattr(projector, 'compile_derivatives', True)
+    key = (x.device, x.dtype, compiled)
+    if key not in cache:
+        fn = torch.func.vmap(projector.angular_constraints)
+        jac = torch.func.vmap(torch.func.jacrev(projector.angular_constraints, argnums=0))
+        def curvature(value, old, current, nominal, lam):
+            return (projector.angular_constraints(value, old, current, nominal)*lam).sum()
+        hess = torch.func.vmap(torch.func.jacrev(torch.func.grad(curvature, argnums=0), argnums=0))
+        if compiled:
+            # 不编译循环、活跃集选择或KKT反向；不同有效批量共用动态batch内核。
+            fn, jac, hess = [torch.compile(f, dynamic=True, fullgraph=True,
+                options={'triton.cudagraphs': False}) for f in (fn, jac, hess)]
+        cache[key] = fn, jac, hess
+    return cache[key]
+
+
 class ProjectionNumericalFailure(RuntimeError):
     def __init__(self, message, bad_mask, certificate=None, diagnostic=None):
         super().__init__(message)
@@ -27,15 +61,15 @@ def _pinverse_gram(a):
 
 
 def _constraints(projector, x, past, anchor, rotation, lower, upper, margin):
-    base = torch.block_diag(projector.matrix, projector.matrix, projector.matrix).to(x)
+    base = _static(projector, x)[0]
     ax = x @ base.T
-    nonlinear = torch.func.vmap(projector.angular_constraints)(x, past, anchor, rotation) + margin
+    nonlinear = _derivatives(projector, x)[0](x, past, anchor, rotation) + margin
     return torch.cat((ax-upper, lower-ax, nonlinear), -1)
 
 
 def _jacobian(projector, x, past, anchor, rotation):
-    base = torch.block_diag(projector.matrix, projector.matrix, projector.matrix).to(x)
-    angular = torch.func.vmap(torch.func.jacrev(projector.angular_constraints, argnums=0))(x, past, anchor, rotation)
+    base = _static(projector, x)[0]
+    angular = _derivatives(projector, x)[1](x, past, anchor, rotation)
     return torch.cat((base.expand(len(x), -1, -1), -base.expand(len(x), -1, -1), angular), 1)
 
 
@@ -67,7 +101,7 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
     def step_length(value, direction):
         ratio = torch.where(direction < 0, -value/direction.clamp_max(-1e-100), float('inf'))
         return ratio.amin(-1).clamp_max(1.)
-    for _ in range(max(iterations, 60)):
+    for iteration in range(max(iterations, 60)):
         rd = x-target+(g.transpose(-1, -2)@dual[..., None]).squeeze(-1)
         rp = (g@x[..., None]).squeeze(-1)+slack-h
         mu = (slack*dual).mean(-1)
@@ -80,12 +114,14 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
         # 保留最小真实KKT残差的数值迭代，不改变任何外部约束或梯度定义。
         finished |= ((residual < 1e-8) & (mu < 1e-10)) | ~torch.isfinite(error)
         done = finished
-        if bool(done.all()):
+        if iteration % 4 == 3 and bool(done.all()):
             break
         lhs = eye+g.transpose(-1, -2)@((dual/slack)[..., None]*g)
+        # predictor/corrector的矩阵完全相同；只分解一次，数值精度与原LU求解一致。
+        lu, pivots, _ = torch.linalg.lu_factor_ex(lhs, check_errors=False)
         def newton(central):
             rhs = -rd+(g.transpose(-1, -2)@((central-dual*rp)/slack)[..., None]).squeeze(-1)
-            dx = torch.linalg.solve_ex(lhs, rhs[..., None]).result.squeeze(-1)
+            dx = torch.linalg.lu_solve(lu, pivots, rhs[..., None]).squeeze(-1)
             ds = -rp-(g@dx[..., None]).squeeze(-1)
             dl = (-central-dual*ds)/slack
             return dx, ds, dl
@@ -103,26 +139,26 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
 
 def _solve(projector, initial, target, past, anchor, rotation, lower, upper, margin):
     x = initial.clone()
-    base = torch.block_diag(projector.matrix, projector.matrix, projector.matrix).to(x).expand(len(x), -1, -1)
-    fn = torch.func.vmap(projector.angular_constraints)
-    jac_fn = torch.func.vmap(torch.func.jacrev(projector.angular_constraints, argnums=0))
+    static, eye, fractions = _static(projector, x)
+    base = static.expand(len(x), -1, -1)
+    fn, jac_fn, hessian_fn = _derivatives(projector, x)
     nonlinear_multiplier = torch.zeros_like(fn(x, past, anchor, rotation))
-    eye = torch.eye(x.shape[-1], device=x.device, dtype=x.dtype)
     counts = torch.zeros(len(x), device=x.device, dtype=torch.long)
     finished = torch.zeros(len(x), device=x.device, dtype=torch.bool)
     step_error = x.new_full((len(x),), float('inf'))
     for iteration in range(20):
         value = fn(x, past, anchor, rotation) + margin
-        jac = jac_fn(x, past, anchor, rotation)
+        with torch.profiler.record_function('projection.SO3_Jacobian'):
+            jac = jac_fn(x, past, anchor, rotation)
         boundary = (jac @ x[..., None]).squeeze(-1) - value
         matrix = torch.cat((base, jac), 1)
         # 使用真实拉格朗日曲率的SQP：原单位Hessian在角加速度范数活跃面上会
         # 产生来回振荡，固定最小1/64步长最终选择零步。SPD修正只服务数值搜索；
         # 收敛后的隐式反向仍使用未修正的真实拉格朗日Hessian。
-        def curvature(value, old, current, nominal, lam):
-            return (projector.angular_constraints(value, old, current, nominal)*lam).sum()
-        hessian = eye+torch.func.vmap(torch.func.jacrev(torch.func.grad(curvature, argnums=0), argnums=0))(
-            x, past, anchor, rotation, nonlinear_multiplier)
+        with torch.profiler.record_function('projection.SO3_Hessian'):
+            # 首轮lambda严格为零，拉格朗日Hessian精确为I，不必构建二阶导数。
+            hessian = (eye.expand(len(x), -1, -1) if iteration == 0 else
+                       eye+hessian_fn(x, past, anchor, rotation, nonlinear_multiplier))
         eigen, basis = torch.linalg.eigh(hessian)
         hessian = (basis*eigen.clamp_min(.01)[..., None, :])@basis.transpose(-1, -2)
         chol, info = torch.linalg.cholesky_ex(hessian)
@@ -159,7 +195,6 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
         finished |= converged
         if bool(finished.all()):
             break
-        fractions = x.new_tensor([2.**-j for j in range(17)]+[0.])
         trial = x[:, None] + fractions[None, :, None]*(candidate-x)[:, None]
         g = fn(trial.flatten(0, 1), past.repeat_interleave(len(fractions), 0),
                anchor.repeat_interleave(len(fractions), 0), rotation.repeat_interleave(len(fractions), 0)) + margin
@@ -187,8 +222,7 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
         r = x-target+(a.transpose(-1, -2)@multiplier[..., None]).squeeze(-1)
         if bool((r.abs().amax(-1)<1e-8).all()):
             break
-        hessian = eye+torch.func.vmap(torch.func.jacrev(torch.func.grad(curvature, argnums=0), argnums=0))(
-            x, past, anchor, rotation, multiplier[:, lower.shape[-1]*2:])
+        hessian = eye+hessian_fn(x, past, anchor, rotation, multiplier[:, lower.shape[-1]*2:])
         aa = a*active[..., None]
         pinv = _pinverse_gram(aa)
         tangent = eye-pinv@(aa.transpose(-1, -2)@aa)
