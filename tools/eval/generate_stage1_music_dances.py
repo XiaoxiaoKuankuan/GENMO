@@ -56,23 +56,32 @@ from tools.eval.validate_closedloop_stage1 import (  # noqa: E402
 
 
 @torch.inference_mode()
-def generate(actor, runtime, music, total, seed, directory):
-    """以标准站姿启动，复用第一阶段已有 12 帧前缀的自主滚动语义。"""
+def generate(actor, runtime, music, total, seed, directory, *, window_frames=120, prefix_frames=12, initial_qpos=None):
+    """复用因果滚动；可显式指定60帧及单一初态，未知未来示范不进入生成条件。
+
+    total可含明确的歌曲末尾速度halo；音乐耗尽后的music_valid为假，不复制末端动作。
+    默认参数保留原120帧工具语义。initial_qpos只接受一个物理初态，不是示范动作前缀。
+    """
+    if not 1 <= prefix_frames < window_frames or total <= prefix_frames:
+        raise ValueError("需要合法窗口、前缀和正的生成后缀")
     codec = actor.endecoder.codec
     kin = codec.kinematics
     builder = CausalDemoProprio48Builder(kin)
-    generated = kin.make_standing_qpos().cpu().repeat(min(12, total), 1)
+    initial = kin.make_standing_qpos().cpu() if initial_qpos is None else initial_qpos.detach().cpu()
+    if initial.shape != (28,):
+        raise ValueError("初态必须是单个qpos28")
+    generated = initial.repeat(min(prefix_frames, total), 1)
     contacts = torch.zeros(len(generated), 2)
     contact_valid = torch.zeros(len(generated), dtype=torch.bool)
     windows = []
     decision = 0
     device = next(actor.parameters()).device
     while len(generated) < total:
-        count = min(120, total - decision)
-        prefix = generated[decision : decision + 12]
+        count = min(window_frames, total - decision)
+        prefix = generated[decision : decision + prefix_frames]
         encoded = codec.encode(prefix)
-        known = torch.zeros(120, 30)
-        mask = torch.zeros(120, 30, dtype=torch.bool)
+        known = torch.zeros(window_frames, 30)
+        mask = torch.zeros(window_frames, 30, dtype=torch.bool)
         mask[: len(prefix), 2:] = True
         mask[: len(prefix) - 1, :2] = True
         known[: len(prefix)] = encoded.physical_features
@@ -80,26 +89,27 @@ def generate(actor, runtime, music, total, seed, directory):
         history, history_valid, history_times = builder.build_history(
             generated[: decision + 1], decision_frame=decision, history_steps=50
         )
-        music_window = torch.zeros(120, 35)
-        music_window[:count] = music[decision : decision + count]
-        valid = torch.arange(120) < count
+        music_window = torch.zeros(window_frames, 35)
+        music_count = max(0, min(count, len(music)-decision))
+        music_window[:music_count] = music[decision : decision + music_count]
+        valid = torch.arange(window_frames) < count
         conditions = batch_to_device(
             {
                 "music_features": music_window[None],
-                "music_valid": valid[None],
+                "music_valid": (torch.arange(window_frames) < music_count)[None],
                 "proprio_history": history[None],
                 "proprio_history_valid": history_valid[None],
                 "proprio_history_times": history_times[None],
                 "known_qpos30": known[None],
                 "known_qpos30_mask": mask[None],
                 "future_valid": valid[None],
-                "future_times": ((decision + torch.arange(120, dtype=torch.float64)) / 30)[None],
+                "future_times": ((decision + torch.arange(window_frames, dtype=torch.float64)) / 30)[None],
                 "decision_time": torch.tensor([decision / 30], dtype=torch.float64),
             },
             device,
         )
         window_seed = seed + len(windows)
-        noise = torch.randn((1, 120, 30), generator=torch.Generator().manual_seed(window_seed))
+        noise = torch.randn((1, window_frames, 30), generator=torch.Generator().manual_seed(window_seed))
         result = runtime.sample(conditions, steps=20, guidance_scale=2.5, noise=noise.to(device))
         error = float(
             (
@@ -125,7 +135,7 @@ def generate(actor, runtime, music, total, seed, directory):
                 "prefix_max_abs_error": error,
             }
         )
-        decision = len(generated) - 12
+        decision = len(generated) - prefix_frames
         print(
             f"{directory.name}: 窗口 {len(windows)}，已生成 {len(generated)}/{total} 帧", flush=True
         )
