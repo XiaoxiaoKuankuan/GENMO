@@ -97,7 +97,7 @@ def gradient_validation(policy,rows,cache,distributed,*,clip=.01,microbatches=(1
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--case',type=Path,required=True)
-    parser.add_argument('--config',type=Path,default=ROOT/'configs/closedloop/stage2_stepwise_mean.yaml')
+    parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--output-dir',type=Path,required=True)
     parser.add_argument('--learning-rates',type=float,nargs='+',default=[1e-6,3e-6,1e-5])
     parser.add_argument('--epochs',type=int,default=1)

@@ -453,14 +453,14 @@ def test_zero_prefix_mixture_requires_positive_nonzero_range(tmp_path: Path) -> 
 def test_formal_config_applies_prefix_mixture_to_all_sources() -> None:
     from gem.closedloop.training import load_stage1_config, load_stage1_data_config
 
-    formal = load_stage1_config("configs/closedloop/stage1_server1_8gpu.yaml")
+    formal = load_stage1_config("configs/closedloop/stage1_server2_scratch_600k.yaml")
     data = load_stage1_data_config(formal)
     for split in data.datasets.values():
         for source in split.values():
             assert source.prefix_min_frames == 6
-            assert source.prefix_max_frames == 18
+            assert source.prefix_max_frames == 30
             assert source.prefix_zero_probability == 0.15
-    assert formal.deployment_reference.prefix_frames == 12
+    assert formal.deployment_reference.min_prefix_frames == 12
     assert formal.deployment_reference.motion_fps == 30
     smoke_data = load_stage1_data_config(load_stage1_config("configs/closedloop/stage1_train.yaml"))
     assert smoke_data.datasets.train.aistpp.prefix_zero_probability == 0.0

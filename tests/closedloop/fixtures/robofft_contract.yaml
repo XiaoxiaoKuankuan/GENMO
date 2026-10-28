@@ -1,3 +1,5 @@
+# 仅用于CPU算法契约回归的固定夹具；不是训练或部署入口。
+# 禁止将本文件传入训练启动器；服务器资产路径只是测试身份字段，不访问真实资产。
 # RoboFFT-D 连续滚动 Actor 候选；源配置 stage2_continuous_rolling_train10.yaml。
 # 最终 normalized action_x0 -> 固定 MC16 前向腐蚀 -> 同 CFG x0 转 epsilon -> Delta log-SNR。
 # 先平均 MC 对数比、再一次动作级 PPO clip；不存反向链，不接 Gaussian KL/回溯。

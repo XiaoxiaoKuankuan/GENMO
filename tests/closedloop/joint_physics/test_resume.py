@@ -18,7 +18,8 @@ from tests.closedloop.test_stage1_dataset import _write_dataset, KINEMATICS_PATH
 
 def test_checkpoint_reproduces_next_batch_and_update(tmp_path, monkeypatch):
     root = _write_dataset(tmp_path/"data", length=180)
-    cfg = config.read_config(config.ROOT/"configs/closedloop/joint_physics_data_only.yaml")
+    cfg = config.read_config(config.ROOT/"configs/closedloop/joint_physics_from_scratch.yaml")
+    cfg["physics"]["enabled"] = False
     cfg["stage1"]["model"].update(latent_dim=32, num_layers=2, num_heads=4, history_hidden_dim=24)
     cfg["training"].update(batch_size=2, max_steps=10, lr_warmup_steps=0, diagnostics_every=10)
     cfg["data"]["sidecar"] = None

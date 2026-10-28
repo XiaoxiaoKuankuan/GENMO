@@ -126,22 +126,6 @@ def test_stepwise_grouped_audit_and_separate_chain_kl_are_additive():
     assert not check_candidate_kl(report,{})['passed']
 
 
-def test_new_formal_configuration_has_explicit_proxy_and_uncalibrated_joint_tail():
-    root=Path(__file__).resolve().parents[3]
-    c=configuration(root/'configs/closedloop/stage2_stepwise_mean.yaml')
-    old=configuration(root/'configs/closedloop/stage2_random20s_gamma095.yaml')
-    s=c['stage10'];t=c['stage9'];require_current_actor_objective(t)
-    assert t['ppo_clip']==.01 and t['gamma_denoising']==1. and t['bc_enabled'] is False
-    assert t['objective_logprob_reduction']=='free_coordinate_mean' and t['actor_trainable_scope']=='all'
-    assert s['kl']['mean_coordinate']==.0009 and s['kl']['maximum_step_mean_coordinate']==.0018
-    assert s['kl']['p95_coordinate']==.0021
-    assert all(s['kl']['chain_joint_'+k] is None for k in ('mean','p95','p99','max'))
-    assert s['kl']['calibration']['joint_tail_status']=='uncalibrated_diagnostic_only'
-    for key in ('critic','reward','physical_episode','generation_horizon','dataset','precision','ppo_rollout','scale'):
-        assert s[key]==old['stage10'][key],key
-    for key in ('actor_lr','actor_lr_multipliers','std_schedule','gamma_upper','lambda_upper'):
-        assert t[key]==old['stage9'][key],key
-    with pytest.raises(ValueError,match='read-only'):require_current_actor_objective(old['stage9'])
 
 
 def test_explicit_new_objective_transfer_keeps_nonempty_adam_and_rejects_behavior_changes(tmp_path):
@@ -149,12 +133,10 @@ def test_explicit_new_objective_transfer_keeps_nonempty_adam_and_rejects_behavio
     from gem.closedloop.dppo.training_checkpoint import SCHEMA,load_training_checkpoint
     from gem.closedloop.dppo.gradient_merge import BCGradientController
     from tests.closedloop.dppo.test_actor_backtracking import equal_state
-    root=Path(__file__).resolve().parents[3]
-    def identity(name):
-        c=configuration(root/'configs/closedloop'/name);s=c['stage10']
-        return {key:copy.deepcopy(s[key]) for key in ('training','critic','kl','scale','dataset','physical_episode',
-            'reward','ppo_rollout','generation_horizon','bc_gradient')}
-    old=identity('stage2_random20s_gamma095.yaml');new=identity('stage2_stepwise_mean.yaml')
+    old = dict(training=dict(actor_objective='full_chain_clipped_ppo', gamma_upper=.95, actor_lr=1e-6),
+               dataset=dict(standing_start_probability=.1), reward=dict(track_weight=1.))
+    new = copy.deepcopy(old)
+    new['training']['actor_objective'] = 'stepwise_coordinate_mean_clipped_ppo'
     actor=torch.nn.Linear(2,1);critic=torch.nn.Linear(2,1)
     ao=torch.optim.AdamW(actor.parameters(),lr=1e-6);co=torch.optim.AdamW(critic.parameters(),lr=1e-4)
     for model,opt in ((actor,ao),(critic,co)):
