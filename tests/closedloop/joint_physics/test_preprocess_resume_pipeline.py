@@ -1,13 +1,16 @@
-"""受控预处理恢复流水线的CPU安全回归，不发送真实信号或启动任何作业。
+"""受控预处理恢复流水线的CPU安全回归，不发送真实非零信号或启动任何作业。
 
 使用临时/proc身份与小型完整checkpoint验证PID复用拒绝、完整断点前禁止停止、
 checkpoint缺rank或含NaN拒绝、benchmark失败后不启动预处理/恢复，以及精确清理
-只作用于已核验benchmark分片。测试替换所有进程/信号接口，不操作现有训练任务。
+只作用于已核验benchmark分片。停止任务接口全部替换；pidfd ABI回退仅对测试进程自身
+执行signal0能力检查，不递送终止信号，不操作现有训练任务。
 """
 
 import copy
+import errno
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -38,6 +41,35 @@ class TestPreprocessResumePipeline(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="joint-pipeline-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    @unittest.skipUnless(pipeline.sys.platform == "linux" and pipeline.platform.machine() == "x86_64", "仅已核验ABI")
+    def test_syscall_fallback_opens_self_and_checks_signal_zero_only(self):
+        with patch.object(pipeline.os, "pidfd_open", None, create=True), \
+             patch.object(pipeline.signal, "pidfd_send_signal", None, create=True), \
+             patch.object(pipeline.os, "kill") as naked_kill:
+            result = pipeline.pidfd_preflight()
+            self.assertEqual(result["own_pid"], os.getpid())
+            self.assertEqual(result["signal_number"], 0)
+            self.assertEqual(result["pidfd_open_backend"], "linux_x86_64_syscall434")
+            self.assertEqual(result["pidfd_send_backend"], "linux_x86_64_syscall424")
+            self.assertTrue(result["pidfd_closed"])
+            naked_kill.assert_not_called()
+
+    @unittest.skipUnless(pipeline.sys.platform == "linux" and pipeline.platform.machine() == "x86_64", "仅已核验ABI")
+    def test_pidfd_fallback_propagates_errno_and_never_uses_kill(self):
+        with patch.object(pipeline.os, "pidfd_open", None, create=True), \
+             patch.object(pipeline.signal, "pidfd_send_signal", None, create=True), \
+             patch.object(pipeline.os, "kill") as naked_kill:
+            with self.assertRaises(OSError) as opened:
+                pipeline.safe_pidfd_open(-1)
+            self.assertEqual(opened.exception.errno, errno.EINVAL)
+            with self.assertRaises(OSError) as sent:
+                pipeline.safe_pidfd_send_signal(-1, 0)
+            self.assertEqual(sent.exception.errno, errno.EBADF)
+            with patch.object(pipeline.platform, "machine", return_value="aarch64"):
+                with self.assertRaises(RuntimeError):
+                    pipeline.safe_pidfd_open(os.getpid())
+            naked_kill.assert_not_called()
 
     def test_proc_full_identity_detects_pid_reuse_and_argv_change(self):
         directory = self.root/"42"

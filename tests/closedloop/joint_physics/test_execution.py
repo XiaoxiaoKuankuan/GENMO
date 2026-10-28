@@ -2,9 +2,11 @@
 
 这里只检查reference→SM→WM→执行Loss链、H归一化和冻结参数/buffer；真实状态、同起点
 Newton方向及学生有效更新由独立CLI验收。所有几何/速度均调用当前bridge。
+跨服务器可用JOINT_TEST_ASSET_CONFIG显式指定真实资产配置，不改训练配置或冻结权重。
 """
 
 from dataclasses import replace
+import os
 
 import torch
 import pytest
@@ -21,7 +23,7 @@ from supermimic.mdp import flatten_state
 
 
 def test_real_frozen_weights_execution_gradient_and_fd(actor_factory):
-    cfg = read_config(ROOT / "configs/closedloop/joint_physics_from_scratch.yaml")
+    cfg = read_config(os.getenv("JOINT_TEST_ASSET_CONFIG", str(ROOT / "configs/closedloop/joint_physics_from_scratch.yaml")))
     adapter = build_adapter(cfg, "cpu")
     frozen = adapter.bundle.frozen_snapshot()
     base, batch = actor_factory(motion_frames=60, starts=(0,), prefix=12)

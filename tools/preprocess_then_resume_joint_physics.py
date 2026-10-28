@@ -17,11 +17,13 @@ status.json和events.jsonl持续记录阶段/PID/日志/当前步数。脚本必
 
 import argparse
 from contextlib import contextmanager
+import ctypes
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import signal
 import subprocess
 import sys
@@ -32,6 +34,55 @@ sys.path.insert(0, str(ROOT))
 from tools.prepare_joint_physics_parallel import atomic_json, parse_gpus, require_idle_gpus
 
 CHECKPOINT_SCHEMA = "genmo.joint_diffusion_physics.v1.checkpoint.v3.formal_prefix_future"
+
+
+def _linux_x86_64_syscall(number, *arguments):
+    """仅使用Server2已核验的Linux x86_64 pidfd ABI；其它架构直接拒绝。"""
+    if sys.platform != "linux" or platform.machine() != "x86_64" or ctypes.sizeof(ctypes.c_void_p) != 8:
+        raise RuntimeError("缺少Python pidfd接口，syscall回退仅支持已核验Linux x86_64 ABI")
+    if number not in (424, 434):
+        raise ValueError("仅允许已核验pidfd_send_signal=424/pidfd_open=434")
+    libc = ctypes.CDLL(None, use_errno=True)
+    syscall = libc.syscall
+    syscall.restype = ctypes.c_long
+    syscall.argtypes = [ctypes.c_long]
+    ctypes.set_errno(0)
+    result = syscall(ctypes.c_long(number), *arguments)
+    if result == -1:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return int(result)
+
+
+def safe_pidfd_open(pid):
+    """优先Python接口；发行版缺接口时直接调用pidfd_open，不退回裸PID信号。"""
+    builtin = getattr(os, "pidfd_open", None)
+    if callable(builtin):
+        return int(builtin(int(pid), 0))
+    return _linux_x86_64_syscall(434, ctypes.c_int(int(pid)), ctypes.c_uint(0))
+
+
+def safe_pidfd_send_signal(descriptor, signal_number):
+    if signal_number not in (0, signal.SIGTERM):
+        raise ValueError("受控流水线仅允许signal0预检及SIGTERM")
+    builtin = getattr(signal, "pidfd_send_signal", None)
+    if callable(builtin):
+        builtin(int(descriptor), int(signal_number), None, 0)
+        return
+    _linux_x86_64_syscall(424, ctypes.c_int(int(descriptor)), ctypes.c_int(int(signal_number)),
+                         ctypes.c_void_p(None), ctypes.c_uint(0))
+
+
+def pidfd_preflight():
+    """只对协调器自身发送signal0做权限/ABI检查，不停止自身或任何任务。"""
+    descriptor = safe_pidfd_open(os.getpid())
+    try:
+        safe_pidfd_send_signal(descriptor, 0)
+    finally:
+        os.close(descriptor)
+    return {"own_pid": os.getpid(), "signal_number": 0, "pidfd_closed": True,
+            "pidfd_open_backend": "python" if callable(getattr(os, "pidfd_open", None)) else "linux_x86_64_syscall434",
+            "pidfd_send_backend": "python" if callable(getattr(signal, "pidfd_send_signal", None)) else "linux_x86_64_syscall424"}
 
 
 def argument_value(argv, name):
@@ -186,10 +237,10 @@ def require_checkpoint_proof(proof_path):
 
 
 def signal_exact_pidfd(identity):
-    descriptor = os.pidfd_open(identity["pid"], 0)
+    descriptor = safe_pidfd_open(identity["pid"])
     try:
         require_same_process(identity)
-        signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+        safe_pidfd_send_signal(descriptor, signal.SIGTERM)
     finally:
         os.close(descriptor)
 
@@ -452,6 +503,7 @@ def main():
         args.output.mkdir(parents=True, exist_ok=False)
         journal = Journal(args.output)
         try:
+            journal.update("pidfd_preflight", **pidfd_preflight())
             execute(args, journal)
         except BaseException as error:
             journal.update("failed", error=repr(error), automatic_restart=False)
