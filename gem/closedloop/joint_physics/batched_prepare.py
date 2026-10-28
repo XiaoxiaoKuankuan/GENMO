@@ -331,6 +331,7 @@ def collect_batched(cfg, adapter, env, sources, emit, *, chunk_steps=64, forecas
             "wall_seconds": elapsed, "source_per_second": total_sources/elapsed,
             "control_steps_per_second": total_steps/elapsed, "future_requests_per_second": total_requests/elapsed,
             "num_envs": n, "solver_health": env.solver_health_tensor().cpu().tolist(),
+            "solver_allocations": env.allocation_summary(),
             **memory.report(),
             "reference_cache": pages.statistics()}
 

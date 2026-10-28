@@ -7,7 +7,7 @@
 
 import torch
 
-from gem.closedloop.joint_physics.batched_simulation import health_failure_mask, reduce_contacts_tensor
+from gem.closedloop.joint_physics.batched_simulation import health_failure_mask, reduce_contacts_tensor, warp_array_inventory
 
 
 def test_contact_worldid_and_old_active_contact_semantics():
@@ -44,3 +44,20 @@ def test_solver_capacity_and_iteration_status_are_distinct():
     assert mask.tolist() == [False, True, True, True, True]
     assert health_failure_mask(health[:1], torch.ones(1, dtype=torch.int32), contact_capacity=1024,
                                constraint_capacity=500, capacity_mask=511 | 2048).item()
+
+
+def test_allocation_inventory_deduplicates_aliases_without_data_readback():
+    import warp as wp
+    wp.init()
+    vector = wp.zeros((3, 2), dtype=wp.vec3, device="cpu")
+    integer = wp.zeros(4, dtype=wp.int32, device="cpu")
+    root = {"vectors": vector, "alias": vector, "integers": integer}
+    root["cycle"] = root
+    report = warp_array_inventory({"example": root})
+    assert report["array_count"] == 2
+    assert report["known_arrays_capacity_bytes"] == 3*2*3*4 + 4*4
+    assert report["known_cuda_arrays_capacity_bytes"] == 0
+    assert report["capacity_bytes_by_device"] == {"cpu": 88}
+    assert report["arrays"][0]["shape"] == [3, 2]
+    assert report["exact_process_vram"] is False
+    assert report["host_metadata_only_no_gpu_readback"] is True

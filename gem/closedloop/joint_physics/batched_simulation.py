@@ -16,6 +16,8 @@ CPU 只在采集块边界读取小型统计；容量溢出、非法接触索引�
 
 from __future__ import annotations
 
+from dataclasses import fields, is_dataclass
+
 import torch
 import warp as wp
 
@@ -86,6 +88,55 @@ def health_failure_mask(health, invalid_contacts, *, contact_capacity, constrain
     return ((health[:, 0].bitwise_and(capacity_mask) != 0) |
             (health[:, 1] > constraint_capacity) | (health[:, 2] > contact_capacity) |
             (health[:, 3] > contact_capacity) | (invalid_contacts.reshape(()) != 0))
+
+
+def warp_array_inventory(roots, *, max_depth=5):
+    """只读宿主对象元数据，按设备指针去重，不搬运任何GPU数组或申请新GPU内存。
+
+    记录可达Warp数组的shape/capacity；图内临时workspace、分配池保留和驱动内存可能无法
+    从这些对象枚举，所以此总额不能替代mem_get_info的整卡采样，也不宣称精确进程显存。
+    """
+    visited, pointers, arrays = set(), set(), []
+
+    def visit(value, name, depth):
+        if isinstance(value, wp.array):
+            if not value.ptr or not value.size:
+                return
+            pointer = (str(value.device), int(value.ptr))
+            if pointer not in pointers:
+                pointers.add(pointer)
+                arrays.append({"name": name, "shape": list(value.shape),
+                    "dtype": getattr(value.dtype, "__name__", str(value.dtype)),
+                    "device": str(value.device), "capacity_bytes": int(value.capacity)})
+            return
+        if depth > max_depth or value is None or id(value) in visited:
+            return
+        visited.add(id(value))
+        if isinstance(value, dict):
+            children = value.items()
+        elif isinstance(value, (list, tuple)):
+            children = enumerate(value)
+        elif is_dataclass(value) and not isinstance(value, type):
+            children = ((field.name, getattr(value, field.name)) for field in fields(value))
+        elif hasattr(value, "__dict__") and not isinstance(value, type):
+            children = vars(value).items()
+        else:
+            return
+        for key, child in children:
+            visit(child, f"{name}.{key}", depth+1)
+
+    for name, root in roots.items():
+        visit(root, name, 0)
+    arrays.sort(key=lambda row: row["capacity_bytes"], reverse=True)
+    by_device = {}
+    for row in arrays:
+        by_device[row["device"]] = by_device.get(row["device"], 0) + row["capacity_bytes"]
+    return {"arrays": arrays, "known_arrays_capacity_bytes": sum(row["capacity_bytes"] for row in arrays),
+        "capacity_bytes_by_device": by_device,
+        "known_cuda_arrays_capacity_bytes": sum(count for device, count in by_device.items() if device.startswith("cuda")),
+        "array_count": len(arrays), "deduplication": "same_device_and_same_pointer",
+        "scope": "reachable_named_warp_arrays_only_excludes_unreachable_graph_temporaries_allocator_pool_driver",
+        "exact_process_vram": False, "host_metadata_only_no_gpu_readback": True}
 
 
 class BatchedStreamingPhysicalEnv:
@@ -196,3 +247,32 @@ class BatchedStreamingPhysicalEnv:
             "predicate": "dist<includemargin and both geom>=0", "geometry_to_foot": "geom_bodyid/body_name",
             "foot_by_geom": wp.to_torch(self._foot_by_geom).cpu().tolist(),
             "health_columns": list(HEALTH_COLUMNS), "health_all_200hz_substeps": True}
+
+    def allocation_summary(self):
+        """结束或诊断边界记录真实容量及命名数组，不改变求解参数、同步或GPU计算。"""
+        backend = getattr(self._manager, "backend", None)
+        roots = {"solver": self._solver, "state_0": getattr(backend, "state_0", None),
+            "state_1": getattr(backend, "state_1", None), "control": getattr(backend, "control", None),
+            "contacts": getattr(self._manager, "_contacts", None),
+            "diagnostic_contacts": self._contacts, "diagnostic_health": self._health}
+        missing = [name for name, value in roots.items() if value is None]
+        try:
+            inventory = warp_array_inventory(roots)
+        except Exception as error:
+            # 只读诊断不能在长采集结束后使正式summary丢失；真正solver health门禁不在此捕获。
+            inventory = {"available": False, "reason": f"{type(error).__name__}: {error}"}
+        model = getattr(self._solver, "mj_model", None)
+        def scalar(owner, name, label):
+            value = getattr(owner, name, None)
+            if value is None:
+                missing.append(label)
+                return None
+            return int(value)
+        return {**inventory, "nworld": int(self._data.nworld), "naconmax": self.contact_capacity,
+            "njmax": self.constraint_capacity, "naccdmax": scalar(self._data, "naccdmax", "naccdmax"),
+            "mj_model_nq": scalar(model, "nq", "mj_model.nq"), "mj_model_nv": scalar(model, "nv", "mj_model.nv"),
+            "mj_model_nbody": scalar(model, "nbody", "mj_model.nbody"), "mj_model_ngeom": scalar(model, "ngeom", "mj_model.ngeom"),
+            "deterministic_mode": str(getattr(self._solver, "_deterministic", "unavailable")),
+            "deterministic_max_records": scalar(self._solver, "_deterministic_max_records", "deterministic_max_records"),
+            "cuda_graph_captured": getattr(self._manager, "_graph", None) is not None,
+            "unavailable_fields": missing}
