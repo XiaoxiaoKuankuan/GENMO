@@ -76,95 +76,6 @@ def test_aist_ground_sources_accept_official_72d_pose_contract(
     assert torch.equal(sources[0]["motion"]["body_pose"], pose[:, 3:66])
 
 
-def test_physics_experiment_is_derived_without_mutating_baseline() -> None:
-    with initialize_config_dir(
-        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
-    ):
-        physics = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v1"],
-        )
-        baseline = compose(
-            config_name="train", overrides=["exp=gem_smpl_music_only_4set"]
-        )
-    assert physics.optimizer.lr == pytest.approx(2e-5)
-    assert list(physics.scheduler.scheduler.milestones) == [30000, 45000]
-    assert physics.pl_trainer.max_steps == 50000
-    assert physics.pl_trainer.use_distributed_sampler is False
-    assert physics.data.balanced_sampling.samples_per_epoch == 52224
-    assert physics.pipeline.args.physics_losses.sole_penetration.weight == 0.005
-    assert all(
-        value.duration_aware_sampling is False
-        for value in physics.train_datasets.values()
-    )
-    assert all(
-        value.duration_aware_sampling is True
-        for value in baseline.train_datasets.values()
-    )
-    assert "physics_losses" not in baseline.pipeline.args
-    physics_network = OmegaConf.to_container(physics.network, resolve=True)
-    baseline_network = OmegaConf.to_container(baseline.network, resolve=True)
-    physics_network["args"].pop("physics_losses")
-    physics_network["model_cfg"]["denoiser"]["args"].pop("physics_losses")
-    assert physics_network == baseline_network
-    assert OmegaConf.to_container(
-        physics.endecoder, resolve=True
-    ) == OmegaConf.to_container(baseline.endecoder, resolve=True)
-
-
-def test_physics_v2_is_a_long_scratch_run_with_calibrated_weights() -> None:
-    with initialize_config_dir(
-        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
-    ):
-        v1 = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v1"],
-        )
-        v2 = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v2"],
-        )
-
-    assert v2.exp_name == "gem_smpl_music_only_4set_physics_v2"
-    assert v2.pretrain_ckpt is None
-    assert v2.ckpt_path is None
-    assert v2.resume_mode is None
-    assert v2.optimizer.lr == pytest.approx(3e-4)
-    assert list(v2.scheduler.scheduler.milestones) == [100000, 150000]
-    assert v2.pl_trainer.max_steps == 170000
-    assert v2.pipeline.args.physics_losses.warmup_steps == 6667
-    assert v2.data.loader_opts.train.batch_size == 384
-    assert v2.data.balanced_sampling.samples_per_epoch == 52224
-    assert (
-        v2.data.balanced_sampling.samples_per_epoch // 8
-        // v2.data.loader_opts.train.batch_size
-        == 17
-    )
-
-    expected_weights = {
-        "root_velocity": 0.20,
-        "root_acceleration": 0.040,
-        "root_jerk": 0.004,
-        "joint_angular_velocity": 0.10,
-        "joint_angular_acceleration": 0.020,
-        "fk_velocity": 0.20,
-        "fk_acceleration": 0.040,
-        "fk_jerk": 0.008,
-        "sole_penetration": 0.020,
-    }
-    for name, weight in expected_weights.items():
-        assert v2.pipeline.args.physics_losses[name].weight == pytest.approx(weight)
-
-    # The completed v1 run remains reproducible and unchanged.
-    assert v1.optimizer.lr == pytest.approx(2e-5)
-    assert v1.pl_trainer.max_steps == 50000
-    assert v1.pipeline.args.physics_losses.warmup_steps == 10000
-    assert v1.pipeline.args.physics_losses.fk_jerk.weight == pytest.approx(0.0002)
-    assert v1.pipeline.args.physics_losses.sole_penetration.weight == pytest.approx(
-        0.005
-    )
-
-
 def test_manual_q1_physics_v3_uses_stronger_losses_and_requested_budget() -> None:
     with initialize_config_dir(
         version_base="1.3", config_dir=str(REPO_ROOT / "configs")
@@ -172,10 +83,6 @@ def test_manual_q1_physics_v3_uses_stronger_losses_and_requested_budget() -> Non
         curated = compose(
             config_name="train",
             overrides=["exp=gem_smpl_music_only_4set_curated"],
-        )
-        v2 = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v2"],
         )
         v3 = compose(
             config_name="train",
@@ -214,9 +121,18 @@ def test_manual_q1_physics_v3_uses_stronger_losses_and_requested_budget() -> Non
         "fk_jerk",
         "sole_penetration",
     )
+    expected_weights = {'root_velocity': 0.4,
+     'root_acceleration': 0.08,
+     'root_jerk': 0.008,
+     'joint_angular_velocity': 0.2,
+     'joint_angular_acceleration': 0.04,
+     'fk_velocity': 0.4,
+     'fk_acceleration': 0.08,
+     'fk_jerk': 0.016,
+     'sole_penetration': 0.04}
     for name in physics_names:
         assert v3.pipeline.args.physics_losses[name].weight == pytest.approx(
-            2.0 * v2.pipeline.args.physics_losses[name].weight
+            expected_weights[name]
         )
 
     v3_network = OmegaConf.to_container(v3.network, resolve=True)
@@ -405,13 +321,26 @@ class _FakeEndecoder:
 
 
 def test_complete_physics_loss_ramps_and_backpropagates_in_fp32() -> None:
-    with initialize_config_dir(
-        version_base="1.3", config_dir=str(REPO_ROOT / "configs")
-    ):
-        config = compose(
-            config_name="train",
-            overrides=["exp=gem_smpl_music_only_4set_physics_v1"],
-        ).pipeline.args.physics_losses
+    # 最小物理损失夹具；不依赖已退役训练实验。
+    config = OmegaConf.create(
+        {'enabled': True,
+         'fps': 30.0,
+         'warmup_steps': 10000,
+         'max_gt_root_speed': 6.0,
+         'max_gt_joint_angular_speed': 30.0,
+         'max_gt_fk_speed': 9.0,
+         'sole_tolerance_m': 0.01,
+         'dataset_ids': ['aist++', 'aioz_gdance', 'finedance', 'compas3d'],
+         'root_velocity': {'scale': 2.0, 'weight': 0.01},
+         'root_acceleration': {'scale': 20.0, 'weight': 0.002},
+         'root_jerk': {'scale': 600.0, 'weight': 0.0002},
+         'joint_angular_velocity': {'scale': 6.0, 'weight': 0.005},
+         'joint_angular_acceleration': {'scale': 180.0, 'weight': 0.0005},
+         'fk_velocity': {'scale': 2.0, 'weight': 0.01},
+         'fk_acceleration': {'scale': 30.0, 'weight': 0.002},
+         'fk_jerk': {'scale': 600.0, 'weight': 0.0002},
+         'sole_penetration': {'scale': 0.03, 'weight': 0.005}}
+    )
     batch, frames = 1, 5
     pred_pose = torch.zeros(batch, frames, 63, requires_grad=True)
     pred_betas = torch.zeros(batch, frames, 10, requires_grad=True)

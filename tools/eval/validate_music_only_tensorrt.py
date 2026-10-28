@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--engine", type=Path, required=True)
-    parser.add_argument("--exp", default="gem_smpl_music_only_4set_physics_v1")
+    parser.add_argument("--exp", default="gem_smpl_music_only_4set_manual_q1_physics_v3_100k")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timestep", type=int, default=999)
