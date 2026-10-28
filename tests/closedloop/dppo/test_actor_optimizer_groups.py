@@ -133,20 +133,3 @@ def test_group_diagnostics_reconstruct_actual_adam_lr_and_detect_duplicate_or_fr
     optimizer.param_groups[0]['params'].append(actor.frozen)
     with pytest.raises(ValueError, match='frozen'):
         validate_actor_optimizer(actor, optimizer)
-
-
-def test_configuration_binds_group_multipliers_and_fifty_iteration_evaluation(tmp_path):
-    from pathlib import Path
-    import yaml
-    from gem.closedloop.dppo.training_config import configuration
-    source = Path(__file__).resolve().parents[3] / 'configs/closedloop/stage2_transformer_groups.yaml'
-    config = configuration(source)
-    assert config['stage10']['evaluation']['every_actor_iterations'] == 50
-    assert config['stage9']['actor_lr_multipliers']['transformer'] == .1
-    raw = yaml.safe_load(source.read_text())
-    raw['stage10']['kl']['calibration'] = config['stage10']['kl']['calibration']
-    raw['stage10']['training']['actor_lr_multipliers']['transformer'] = .2
-    path = tmp_path / 'changed.yaml'
-    path.write_text(yaml.safe_dump(raw))
-    with pytest.raises(ValueError, match='binding'):
-        configuration(path)

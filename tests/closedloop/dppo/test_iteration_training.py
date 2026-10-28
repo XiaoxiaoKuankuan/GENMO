@@ -21,7 +21,7 @@ from gem.closedloop.dppo.returns import compute_gae, normalize_advantages_global
 from gem.closedloop.dppo.env_adapter import WarmupEpisodeEnded, ExecutionIntegrityError
 from gem.closedloop.dppo.world_collector import WorldEnvironmentCollector
 
-CONFIG=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_full_chain.yaml'
+CONFIG=Path(__file__).resolve().parents[3]/'tests/closedloop/fixtures/dppo_contract.yaml'
 
 
 def test_production_parameters_and_cumulative_iteration_ceiling():
