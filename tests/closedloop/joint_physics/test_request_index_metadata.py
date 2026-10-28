@@ -77,3 +77,19 @@ def test_metadata_path_keeps_original_root_escape_rejection(tmp_path):
         requests.PhysicsRequestStream(catalog, store, tuple(f"joint_{i}" for i in range(21)),
                                       32, 42, historical_mode="diagnostic")
     assert calls == []
+
+
+def test_persistent_request_index_preserves_sampling_and_restore(tmp_path, monkeypatch):
+    catalog, store, _, _, _ = _fixture(tmp_path)
+    names = tuple(f'joint_{i}' for i in range(21))
+    old = requests.PhysicsRequestStream(catalog,store,names,32,42,historical_mode='diagnostic')
+    cached = requests.PhysicsRequestStream(catalog,store,names,32,42,historical_mode='diagnostic',cache_directory=tmp_path/'requests')
+    monkeypatch.setattr(requests,'collate_joint_samples',lambda samples:{'samples':samples})
+    monkeypatch.setattr(requests,'batch_to_device',lambda batch,device:batch)
+    assert old.next(3,'cpu')[1] == cached.next(3,'cpu')[1]
+    assert old.state_dict() == cached.state_dict()
+    state = cached.state_dict()
+    monkeypatch.setattr(store,'episode',lambda meta: (_ for _ in ()).throw(AssertionError('不应重复扫描分片')))
+    restored = requests.PhysicsRequestStream(catalog,store,names,32,42,historical_mode='diagnostic',cache_directory=tmp_path/'requests')
+    restored.load_state_dict(state)
+    assert old.next(4,'cpu')[1] == restored.next(4,'cpu')[1]

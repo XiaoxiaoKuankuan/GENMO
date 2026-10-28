@@ -61,6 +61,11 @@ class JointTrainer:
             raise ValueError('GENMO主参数必须保持FP32，不能将模型整体转换为BF16')
         seed_all(cfg["training"]["seed"] + rank * 100003)
         self.stream = JointDataStream(cfg, rank=rank, world_size=world_size)
+        from .performance import Performance
+        self.performance = Performance(device)
+        self.interval_terms = None
+        self.interval_steps = 0
+        self.interval_physics_count = 0
         self.adapter = build_adapter(cfg, device) if cfg["physics"]["enabled"] or cfg["data"]["sidecar"] else None
         from .prepare_rollouts import asset_contract
         from .execution import ValidatedSupport
@@ -96,12 +101,24 @@ class JointTrainer:
             self.physics_stream = PhysicsRequestStream(self.stream.catalog, self.store, self.adapter.bundle.spec.joint_names,
                 cfg["physics"]["horizon"], cfg["training"]["seed"], rank, self.support,
                 historical_mode=cfg["physics"].get("historical_support_mode", "strict"),
-                noise_levels=cfg["physics"].get("noise_levels"))
+                noise_levels=cfg["physics"].get("noise_levels"),
+                cache_directory=cfg['data'].get('loading',{}).get('request_cache'))
             self.physics_levels = physics_noise_levels(self.actor.stage1.train_diffusion, cfg["physics"], self.support.report)
         if cfg.get("future_supervision", {}).get("enabled") and self.store is not None:
             from .requests import PhysicsRequestStream
             self.future_stream = PhysicsRequestStream(self.stream.catalog, self.store, self.adapter.bundle.spec.joint_names,
-                1, cfg["training"]["seed"]+100000, rank, historical_mode="diagnostic")
+                1, cfg["training"]["seed"]+100000, rank, historical_mode="diagnostic",
+                cache_directory=cfg['data'].get('loading',{}).get('request_cache'))
+        from .reference import pack_supervised_conditions
+        self.cpu_codec = self.stream.catalog.datasets[0].codec
+        def prepare_conditions(batch):
+            started = time.perf_counter()
+            before = self.store.cache_metrics()['cpu_wait_seconds'] if self.store else 0.
+            batch = pack_supervised_conditions(batch,self.store,self.cpu_codec,cfg['physics']['horizon'])
+            batch['_condition_seconds'] = time.perf_counter()-started
+            batch['_sidecar_seconds'] = (self.store.cache_metrics()['cpu_wait_seconds']-before) if self.store else 0.
+            return batch
+        self.stream.conditioner = prepare_conditions
         self.optimizer = torch.optim.AdamW((p for p in self.actor.parameters() if p.requires_grad), lr=cfg["training"]["learning_rate"],
                                            weight_decay=cfg["training"]["weight_decay"])
         tc = cfg["training"]
@@ -125,20 +142,25 @@ class JointTrainer:
             "validation_sha256": digest(report) if report else None}
         if resume:
             restore_trainer(self, resume, resume_value)
+        self.start_step = self.step
         self.network = DistributedDataParallel(self.actor, device_ids=[self.device.index] if self.device.type == "cuda" else None,
                                               find_unused_parameters=True, gradient_as_bucket_view=True) if world_size > 1 else self.actor
 
     def update(self):
-        from .reference import attach_sidecars, attach_supervised_sidecars
+        from .reference import attach_sidecars, attach_supervised_sidecars, unpack_supervised_conditions
+        from gem.closedloop.training import batch_to_device
         from .execution import execute_window
         from .diagnostics import sample_record, summarize
         started = time.perf_counter()
         self.actor.train()
         self.optimizer.zero_grad(set_to_none=True)
         batch = self.stream.next(self.cfg['training']['batch_size'], 'cpu')
+        self.performance.add('data_wait', self.stream.last_wait_seconds)
+        self.performance.add('condition_prepare', batch.pop('_condition_seconds'))
+        self.performance.add('sidecar_read', batch.pop('_sidecar_seconds'))
         # A/B完全相同的真实/代理历史；物理认证只影响执行分支，不能改变监督条件。
-        batch, contexts, missing = attach_supervised_sidecars(batch, self.store, self.adapter,
-            self.actor.stage1.endecoder.codec, self.cfg['physics']['horizon'], self.device)
+        batch = self.performance.call('host_to_device', batch_to_device, batch, self.device)
+        batch, contexts, missing = unpack_supervised_conditions(batch)
         data_ready = time.perf_counter()
         b = len(batch['decision_time'])
         timesteps = torch.randint(1000, (b,), generator=self.noise_rng).to(self.device)
@@ -173,7 +195,7 @@ class JointTrainer:
         if self.future_stream is not None and self.future_stream.keys and self.step % fcfg['every_steps'] == 0:
             future_batch, _ = self.future_stream.next(fcfg['batch_size'], 'cpu')
             future_batch, future_contexts, future_reasons = attach_supervised_sidecars(future_batch, self.store, self.adapter,
-                self.actor.stage1.endecoder.codec, 1, self.device)
+                self.cpu_codec, 1, self.device)
             if any(reason != 'available' for reason in future_reasons):
                 raise ValueError('已索引Future监督请求的持久缓存合同损坏: '+str(future_reasons))
             n = len(future_contexts)
@@ -181,7 +203,7 @@ class JointTrainer:
                 timesteps=torch.randint(1000,(n,),generator=self.future_noise_rng).to(self.device),
                 noise=torch.randn(n,60,30,generator=self.future_noise_rng).to(self.device),
                 drop_music_mask=(torch.rand(n,generator=self.future_noise_rng)<self.actor.stage1.music_mask_prob).to(self.device))
-        output = self.network(batch, contexts, timesteps=timesteps, noise=noise, drop_music_mask=drop,
+        output = self.performance.call('network_forward', self.network, batch, contexts, timesteps=timesteps, noise=noise, drop_music_mask=drop,
                               physics_inputs=physical_inputs, future_inputs=future_inputs)
         if future_inputs is not None:
             out, physical, future_out = output
@@ -189,8 +211,9 @@ class JointTrainer:
             out, physical = output if physical_inputs is not None else (output, None)
         future_loss = out['pred_x_start'].new_zeros(())
         if future_inputs is not None:
-            future_loss, _ = self.data_loss(future_batch, future_out['pred_x_start'], future_out['static_conf_logits'], self.step)
-        bc, components = self.data_loss(batch, out['pred_x_start'], out['static_conf_logits'], self.step)
+            future_loss, _ = self.performance.call('future_forward_loss', self.data_loss, future_batch, future_out['pred_x_start'], future_out['static_conf_logits'], self.step)
+        bc, components = self.performance.call('stage1_loss', self.data_loss, batch, out['pred_x_start'], out['static_conf_logits'], self.step)
+        physics_started = time.perf_counter()
         accepted, rows, coverage = [], [], []
         if physical is not None:
             alpha = torch.as_tensor(self.actor.stage1.train_diffusion.alphas_cumprod,device=self.device)[k]
@@ -237,6 +260,8 @@ class JointTrainer:
                     record.update(error.details)
                     record['historical_diagnostics'] = dict(getattr(support,'counts',{}))
                 rows.append(record)
+        if physical is not None:
+            self.performance.add('physical_forward_backward',time.perf_counter()-physics_started)
         global_rows = rows
         if self.world_size > 1 and probe:
             gathered = [None]*self.world_size
@@ -244,16 +269,23 @@ class JointTrainer:
             global_rows = [row for rank_rows in gathered for row in rank_rows]
         readiness = self.readiness.observe(global_rows,self.step)
         weight = self.readiness.weight(self.step)
-        count,scale = distributed_execution_scale(len(accepted),self.device,self.world_size)
+        # 已汇总逐样本记录，直接得到全局有效数，无需再发起一次GPU all_reduce。
+        count = sum(row['reason']=='execution_gradient_completed' for row in global_rows)
+        scale = self.world_size/max(1,count)
         zero = out['pred_x_start'].sum()*0.
         # 两次前向使用同一Actor，全部参数仍通过完整BC图参加DDP。拒绝的物理输出不乘零：
         # NaN*0仍是NaN，不能因物理子批失败阻断本来有限的数据监督。
         local_exec = sum((r['loss'] for r in accepted),zero)
         total = bc+fcfg.get('weight',0.)*future_loss+scale*weight*local_exec
-        finite = torch.tensor(int(torch.isfinite(total).all()),device=self.device)
+        pause = getattr(self, 'pause_control', None)
+        finite = torch.stack((torch.isfinite(total).all().to(torch.float32),
+            total.new_tensor(-pause.local_flag(self.step+1) if pause is not None else 0.)))
         if self.world_size>1:
             dist.all_reduce(finite,op=dist.ReduceOp.MIN)
-        if not bool(finite):
+        finite_value, pause_value = finite.tolist()
+        if pause is not None:
+            pause.accept_global_flag(-pause_value)
+        if not finite_value:
             raise FloatingPointError('数据或执行损失非有限，各rank同步停止')
         diagnostics, before = {}, {}
         diagnostic = (self.step % self.cfg['training']['diagnostics_every']==0 or self.step in self.cfg['training']['diagnostic_steps']
@@ -265,11 +297,11 @@ class JointTrainer:
                 key: weight*value/max(1e-12,diagnostics['data_gradient_norm'][key])
                 for key,value in diagnostics['execution_gradient_norm'].items()}
             before = {name:p.detach().clone() for name,p in self.actor.named_parameters() if p.requires_grad}
-        total.backward()
+        self.performance.call('backward_ddp', total.backward)
         norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(),self.cfg['training']['grad_clip'])
         if not torch.isfinite(norm):
             raise FloatingPointError('GENMO梯度非有限，未执行优化')
-        self.optimizer.step()
+        self.performance.call('optimizer_step', self.optimizer.step)
         self.scheduler.step()
         if before:
             diagnostics['actual_parameter_delta'] = {}
@@ -286,9 +318,6 @@ class JointTrainer:
         self.counters['physics_effective_updates'] += int(effective)
         self.counters['physics_updates'] += int(effective)
         self.counters['physics_samples'] += int(count) if effective else 0
-        reduced = torch.stack([bc.detach(),local_exec.detach(),future_loss.detach()])
-        if self.world_size>1:
-            dist.all_reduce(reduced)
         reasons = Counter(row['reason'] for row in global_rows if row['reason']!='execution_gradient_completed')
         horizons = Counter(str(row['effective_horizon']) for row in global_rows if row['reason']=='execution_gradient_completed' and effective)
         historical = Counter()
@@ -296,19 +325,32 @@ class JointTrainer:
             historical.update(row.get('historical_diagnostics', {}))
         for key, values in [('effective_horizon_counts',horizons), ('physics_rejections_total',reasons), ('historical_diagnostics_total',historical)]:
             cumulative = Counter(self.counters[key]); cumulative.update(values); self.counters[key] = dict(cumulative)
-        # 将同型损失一次性归约/拷回CPU，日志是八卡均值而非仅rank0样本值。
+        # 每步计算完整Loss，但仅在日志间隔归约汇总，Future指标包含区间内所有辅助更新。
         term_keys = [key for key,v in components.items() if isinstance(v,torch.Tensor)]
-        terms = torch.stack([components[key].detach().float().mean() for key in term_keys])
-        pause = getattr(self, 'pause_control', None)
-        if pause is not None:
-            # 暂停位复用原有日志归约；无请求时也不新增collective或GPU同步。
-            terms = torch.cat((terms, terms.new_tensor([pause.local_flag(self.step)])))
+        terms = torch.stack([bc.detach(),local_exec.detach(),future_loss.detach(),norm.detach()]+
+                            [components[key].detach().float().mean() for key in term_keys])
+        self.interval_terms = terms if self.interval_terms is None else self.interval_terms+terms
+        self.interval_steps += 1
+        self.interval_physics_count += count
+        self.performance.steps += 1
+        wall = time.perf_counter()-started
+        self.performance.add('total_step',wall)
+        emit = (self.step <= self.start_step+3 or self.step == getattr(self,'stop_step',None)
+                or self.step % self.cfg['training'].get('metrics_every',1)==0
+                or self.step % self.cfg['training'].get('log_every',1)==0)
+        physics_norm = max([row.get('x0_gradient_norm',0.) for row in global_rows] or [0.])
+        if not emit:
+            return {'step':self.step,'wall_seconds':wall,'physics_gradient_norm':physics_norm}
+        logging_started = time.perf_counter()
+        terms = self.interval_terms
         if self.world_size > 1:
             dist.all_reduce(terms)
-        term_values = (terms/self.world_size).cpu().tolist()
-        if pause is not None:
-            pause.accept_global_flag(term_values.pop())
-        data_terms = dict(zip(term_keys, term_values))
+        values = terms.cpu().tolist()
+        interval_mass = self.world_size*self.interval_steps
+        reduced = [values[0]/interval_mass, values[1]/max(1,self.interval_physics_count), values[2]/interval_mass]
+        norm_value = values[3]/interval_mass
+        data_terms = dict(zip(term_keys,[v/interval_mass for v in values[4:]]))
+        self.interval_terms = None; self.interval_steps = 0; self.interval_physics_count = 0
         detail_every = self.cfg['training'].get('sample_log_every',1)
         details = bool(detail_every and (self.step % detail_every == 0))
         if not details:
@@ -323,12 +365,14 @@ class JointTrainer:
             'execution_x0_gradient_norm':[r['x0_gradient_norm'] for r in accepted]} if details else {})
         readiness_summary = {key:value for key,value in readiness.items() if key not in ('sources','music_identities','types')}
         readiness_summary.update(source_count=len(readiness['sources']),music_count=len(readiness['music_identities']),type_count=len(readiness['types']))
+        self.performance.add('logging',time.perf_counter()-logging_started)
+        performance = self.performance.collect(self.rank,self.world_size,self.store.cache_metrics() if self.store else {})
         return {'step':self.step, 'lr':self.optimizer.param_groups[0]['lr'], 'precision':self.cfg['training']['precision'],
-            'future_supervised_loss':float(reduced[2]/self.world_size),
-            'physics_gradient_norm':max([row.get('x0_gradient_norm',0.) for row in global_rows] or [0.]),
+            'future_supervised_loss':reduced[2],
+            'physics_gradient_norm':physics_norm,
             'physics_gradient_tensor':'student_pred_x_start',
-            'effective_horizon_distribution':dict(horizons),**self.counters,'data_loss':float(reduced[0]/self.world_size),
-            'execution_loss':float(reduced[1]/count.clamp_min(1)),'execution_safety':0.,
+            'effective_horizon_distribution':dict(horizons),**self.counters,'data_loss':reduced[0],
+            'execution_loss':reduced[1],'execution_safety':0.,
             'physics_valid_rate':float(count)/max(1,len(global_rows)),'lambda_exec':weight,'lambda_safety':0.,
             'physics_update_fraction':self.counters['physics_effective_updates']/self.step,
             'data_samples_with_inactive_physics_curriculum':b*self.world_size if weight==0 else 0,
@@ -337,7 +381,7 @@ class JointTrainer:
             'data_sidecar_status':dict(Counter(missing)),**sample_details,
             'physics_source_count':len(self.physics_stream.keys) if self.physics_stream else 0,
             'future_source_count':len(self.future_stream.keys) if self.future_stream else 0,
-            'data_terms':data_terms,'gradient_norm':float(norm),**diagnostics,
+            'data_terms':data_terms,'gradient_norm':norm_value,'performance':performance,**diagnostics,
             'data_preparation_seconds':data_ready-started,
             'wall_seconds':time.perf_counter()-started,
             'peak_memory_bytes':torch.cuda.max_memory_allocated(self.device) if self.device.type=='cuda' else 0}
@@ -409,6 +453,7 @@ class JointTrainer:
 
     def run(self, output, stop_step):
         output = Path(output)
+        self.stop_step = stop_step
         self.pause_control = PauseControl(output, self.rank)
         pause_checkpoint = None
         saved_step = None
@@ -426,21 +471,25 @@ class JointTrainer:
         interval_seconds = 0.
         try:
             while self.step < stop_step:
+                refresh_started = time.perf_counter()
                 self.refresh_sidecars()
+                self.performance.add('sidecar_refresh',time.perf_counter()-refresh_started)
                 result = self.update()
                 interval_seconds += result['wall_seconds']
                 recent_physics_norm = max(recent_physics_norm, result['physics_gradient_norm'])
                 if self.rank == 0:
                     metric_every = self.cfg['training'].get('metrics_every',1)
-                    if self.step <= 3 or self.step % metric_every == 0 or self.step == stop_step:
+                    if self.step <= self.start_step+3 or self.step % metric_every == 0 or self.step == stop_step:
                         with (output/"metrics.jsonl").open("a") as file:
                             file.write(json.dumps(result, ensure_ascii=False, allow_nan=False)+"\n")
-                    if self.step <= 3 or self.step % self.cfg['training'].get('log_every',1)==0:
+                    if self.step <= self.start_step+3 or self.step % self.cfg['training'].get('log_every',1)==0 or self.step == stop_step:
                         keys = ('step','lr','data_loss','data_terms','future_supervised_loss','execution_loss','lambda_exec',
                                 'physics_attempts','physics_valid_samples','physics_effective_updates','physics_update_fraction',
                                 'effective_horizon_counts','physics_rejections_total','wall_seconds','peak_memory_bytes',
                                 'precision','physics_source_count','future_source_count','data_preparation_seconds')
                         brief = {k:result[k] for k in keys}
+                        brief['max_rank_step_seconds'] = result['performance']['max_step_seconds']
+                        brief['slowest_rank'] = result['performance']['slowest_rank']
                         brief['data_terms'] = {key:result['data_terms'][key] for key in (
                             'normalized_repr_root_pos_loss','normalized_repr_root_rot_loss','normalized_repr_joint_loss',
                             'normalized_contact_bce_loss','normalized_fk_body_pos_loss','normalized_joint_velocity_loss',
@@ -451,7 +500,7 @@ class JointTrainer:
                         recent_physics_norm = 0.
                         interval_seconds = 0.
                 if self.step % self.cfg["training"]["checkpoint_every"] == 0 or self.step == stop_step or self.step in self.cfg["training"]["diagnostic_steps"]:
-                    save_trainer(self, output/f"joint_{self.step:08d}.pt")
+                    self.performance.call('checkpoint_save',save_trainer,self,output/f"joint_{self.step:08d}.pt")
                     saved_step = self.step
                 if self.pause_control.requested:
                     pause_checkpoint = output/f"joint_{self.step:08d}.pt"

@@ -354,7 +354,7 @@ class SidecarStore:
             raise ValueError("sidecar的SM/WM、stats、FK或物理合同不匹配")
         self.cache, self.verified = OrderedDict(), set()
         self.metrics = dict(cache_hits=0, cache_misses=0, shard_load_count=0, mapped_bytes=0,
-                            disk_bytes_read=0, cpu_wait_seconds=0.)
+                            validated_bytes=0, cpu_wait_seconds=0.)
         self.shard_signatures = {}
         self.identity = snapshot["identity"] if snapshot is not None else hashlib.sha256(index_bytes).hexdigest()
 
@@ -409,7 +409,7 @@ class SidecarStore:
                 if digest(self.directory / shard) != self.index["shards"][shard]:
                     raise ValueError("sidecar分片内容身份已改变")
                 self.shard_signatures[shard] = signature
-                self.metrics['disk_bytes_read'] += stat.st_size
+                self.metrics['validated_bytes'] += stat.st_size
             payload = torch.load(self.directory / shard, weights_only=False, map_location="cpu", mmap=True)
             self.metrics['shard_load_count'] += 1
             self.metrics['mapped_bytes'] += stat.st_size
@@ -432,13 +432,16 @@ class SidecarStore:
             for field, identity in (("motion_path", "motion_sha256"), ("music_feature_path", "music_sha256")):
                 if digest(meta[field]) != episode[identity]:
                     raise ValueError("原音乐/动作与真实sidecar内容不一致")
+            for field in ('reference_qpos','state'):
+                if field in episode and not torch.isfinite(episode[field]).all():
+                    raise ValueError('真实sidecar含非有限数据: '+field)
             self.verified.add(key)
         self.metrics['cpu_wait_seconds'] += time.perf_counter()-started
         return episode
 
     def cache_metrics(self):
         values = [child.cache_metrics() for child in self.children] if self.children else [dict(self.metrics)]
-        names = ('cache_hits','cache_misses','shard_load_count','mapped_bytes','disk_bytes_read','cpu_wait_seconds')
+        names = ('cache_hits','cache_misses','shard_load_count','mapped_bytes','validated_bytes','cpu_wait_seconds')
         result = {name:sum(value[name] for value in values) for name in names}
         count = max(1, result['cache_hits']+result['cache_misses'])
         result.update(cache_hit_rate=result['cache_hits']/count, cache_miss_rate=result['cache_misses']/count)
