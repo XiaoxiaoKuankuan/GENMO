@@ -22,7 +22,7 @@ def write_json(path, value):
 
 def main(kind):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/closedloop/stage2_supermimic_adapter.yaml")
+    parser.add_argument("--config", required=True)
     parser.add_argument("--output", required=True, help="必须为不存在的新目录，恢复也使用新目录")
     parser.add_argument("--torch-device", default="cpu" if kind == "audit" else "cuda:0")
     parser.add_argument("--tasks")

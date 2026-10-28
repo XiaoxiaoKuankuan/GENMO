@@ -82,7 +82,7 @@ def test_batch_condition_exact_against_scalar_reference():
 
 
 def test_gpu_config_declares_fixed_profile_and_batched_pipeline():
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_full_chain.yaml')
+    config=configuration(Path(__file__).resolve().parents[3]/'tests/closedloop/fixtures/dppo_contract.yaml')
     assert config['runtime']['timing_contract']==MODELED_CLOCK
     assert DeploymentClock(config['timing']['deployment_profile']).budget_seconds==.32
 

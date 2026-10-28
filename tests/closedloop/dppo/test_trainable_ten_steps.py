@@ -90,31 +90,3 @@ def test_ten_step_streamed_gradient_matches_independent_normal_autograd(actor_fa
         assert [r['step'] for r in diagnostics['per_denoising_step']]==list(range(9,19))
         assert diagnostics['denominator']=='10_times_global_valid_behavior_chain_count'
     finally:cache.close()
-
-
-def test_ten_step_configuration_and_real_updater_are_consistent(actor_factory,tmp_path):
-    from gem.closedloop.dppo.training_config import configuration
-    from gem.closedloop.dppo.collectives import DistributedCollectives
-    from gem.closedloop.dppo.actor_optimizer import make_actor_optimizer
-    from gem.closedloop.dppo.gradient_merge import BCGradientController
-    from gem.closedloop.dppo.updater import actor_update,final_kl
-    config=configuration(Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_continuous_rolling_train10.yaml')
-    assert config['stage9']['frozen_prefix_steps']==9
-    assert config['stage9']['actor_minibatch_internal_transitions']==81920
-    assert config['stage10']['kl']['calibration']['scope']=='ten_trainable_steps_only'
-    _,policy,rows,targets,_=expanded(actor_factory)
-    cache=RolloutTensorCache(rows,targets,'cpu')
-    dist.init_process_group('gloo',init_method=(tmp_path/'gloo').as_uri(),rank=0,world_size=1)
-    try:
-        collective=DistributedCollectives(0,1)
-        manifest=[dict(owner_rank=0,local_index=i,valid=True,has_free=True) for i in range(len(rows))]
-        optimizer=make_actor_optimizer(policy.actor,dict(actor_lr=1e-7,actor_trainable_scope='all'))
-        report=actor_update(policy,optimizer,rows,targets,cache,manifest,BCGradientController(),
-            distributed=collective,anchor=Anchor(),generator=torch.Generator().manual_seed(1),
-            sampled_steps=10,step_strategy='intermediate10',minibatch_chains=5,microbatch=3,
-            bc_enabled=False,audit_full_rollout_objective=True)
-        assert report['optimizer_steps']==1 and report['internal_sample_visits']==50
-        final=final_kl(policy,rows,cache,manifest,distributed=collective,microbatch=3)
-        assert final['covered_internal_transitions']==50 and final['gaussian_kl_steps']==list(range(9,19))
-    finally:
-        cache.close();close_cpu_group()

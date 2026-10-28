@@ -41,7 +41,7 @@ def main():
     from gem.closedloop.reference_adapter.application import read_tasks
     bundle = load_bundle(args.sm_checkpoint, "cpu", robot_asset_dir=args.robot_asset_dir)
     stage, data, output = Path(args.stage1_dir).resolve(), Path(args.dataset_root).resolve(), Path(args.output).resolve()
-    cfg = OmegaConf.load(ROOT/"configs/closedloop/stage2_supermimic_adapter.yaml")
+    cfg = OmegaConf.load(ROOT/"configs/closedloop/stage2_alternating/gpu0.yaml")
     cfg.genmo.checkpoint = str(stage/"s595000.pt")
     cfg.genmo.stats = str(stage/"qpos30_train_stats.json")
     cfg.genmo.kinematics = str(stage/"bumi_kinematics_robot_retargeter_fe934_v1.json")

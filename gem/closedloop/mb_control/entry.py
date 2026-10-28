@@ -15,7 +15,7 @@ import time
 
 def main(kind):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/closedloop/stage2_supermimic_worldmodel.yaml")
+    parser.add_argument("--config", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--torch-device", default="cuda:0")
     parser.add_argument("--updates", type=int, default=4)

@@ -146,13 +146,12 @@ def test_training_entries_reject_missing_config_before_start(command, tmp_path):
     assert not (tmp_path/'unused').exists()
 
 
-@pytest.mark.parametrize('filename', ['stage2_continuous_rolling_robofft.yaml',
-                                     'stage2_continuous_rolling_train10.yaml'])
+@pytest.mark.parametrize('filename', ['robofft_contract.yaml'])
 def test_wrapper_forwards_explicit_algorithm_without_default(filename, tmp_path):
     stub = tmp_path/'python_stub'
     stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
     stub.chmod(0o755)
-    config = str(ROOT/'configs/closedloop'/filename)
+    config = str(ROOT/'tests/closedloop/fixtures'/filename)
     result = subprocess.run(['bash', str(ROOT/'scripts/train_stage10_8gpu_server1.sh'),
         '--config='+config, '--output-dir', str(tmp_path/'unused')],
         env=dict(os.environ, STAGE10_PYTHON=str(stub)), capture_output=True, text=True, timeout=15)

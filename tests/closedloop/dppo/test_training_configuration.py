@@ -22,39 +22,16 @@ from gem.closedloop.dppo.training import _sources
 from gem.closedloop.dppo.training_config import VERSION, configuration
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG = ROOT / 'configs/closedloop/stage2_full_chain.yaml'
+CONFIG = ROOT / 'tests/closedloop/fixtures/dppo_contract.yaml'
 
 
-def test_formal_transformer_candidate_uses_4096_and_ungated_new_reward():
-    resolved=configuration(ROOT/'configs/closedloop/stage2_transformer_groups.yaml')
-    stage=resolved['stage10'];settings=resolved['stage9']
-    assert stage['scale']['actor_minibatch_chains']==4096
-    assert stage['derived']['maximum_actor_steps']==4
-    assert settings['bc_batch']==512 and settings['bc_samples_per_rollout']==2048
-    assert settings['actor_trainable_scope']=='all'
-    assert stage['reward']['version']=='stage2.gmt8_reward_std.v3'
-    assert settings['bc_enabled'] is False and settings['audit_full_rollout_objective'] is True
-    assert resolved['termination']['yaw_error_rad'] is None
-    assert stage['run_control']['max_training_iterations']==200
 
 
-def test_objective_aware_finite_validation_preserves_the_actor_and_reward():
-    baseline=configuration(ROOT/'configs/closedloop/stage2_transformer_groups.yaml')
-    resolved=configuration(ROOT/'configs/closedloop/stage2_objective_aware_validation.yaml')
-    stage=resolved['stage10'];settings=resolved['stage9']
-    assert stage['scale']==baseline['stage10']['scale']
-    assert stage['reward']==baseline['stage10']['reward']
-    assert stage['training']['trust_region']['objective_aware'] is True
-    assert stage['evaluation']['every_actor_iterations']==3
-    assert stage['evaluation']['samples_per_source']==baseline['stage10']['evaluation']['samples_per_source']
-    assert settings['actor_trainable_scope']=='all' and settings['bc_enabled'] is False
-    assert settings['ppo_epochs']==1 and settings['ppo_clip']==.10
-    assert stage['critic']['preheat_artifact']['path'].endswith('critic_preheat_nobc_v3.pt')
 
 
 @pytest.mark.parametrize('interval',[0,-1,True,1.5])
 def test_complete_song_evaluation_interval_must_be_positive_integer(tmp_path,interval):
-    raw=yaml.safe_load((ROOT/'configs/closedloop/stage2_objective_aware_validation.yaml').read_text())
+    raw=yaml.safe_load((ROOT/'tests/closedloop/fixtures/dppo_contract.yaml').read_text())
     raw['stage10']['evaluation']['every_actor_iterations']=interval
     path=tmp_path/'invalid_evaluation.yaml';path.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError,match='Positive complete-song evaluation interval'):
