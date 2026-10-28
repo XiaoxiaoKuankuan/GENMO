@@ -251,11 +251,20 @@ def main():
             '--num-envs', str(actual_envs), '--adapter-updates', str(state['accepted_updates'])]
         if budget is not None:
             command += ['--max-steps', str(budget)]
+        for split in ('validation', 'evaluation'):
+            cached = extra['zero_evaluations'].get(split+'_'+scope)
+            cache_path = output/f'{split}_{scope}_zero_dedicated{actual_envs}.json'
+            if (cached is not None and cached.get('evaluation_backend') == 'dedicated_physics'
+                    and cached['num_envs'] == actual_envs and not cache_path.exists()):
+                json_write(cache_path, cached)
         publish('dedicated_fixed_physics', evaluation_scope=scope, actual_evaluation_envs=actual_envs)
         with (output/f'evaluation_{state["accepted_updates"]:06d}.log').open('w') as log:
             subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
         reports = {split: json.loads((output/f'{split}_{state["accepted_updates"]:06d}.json').read_text())
                    for split in ('validation', 'evaluation')}
+        for split in ('validation', 'evaluation'):
+            extra['zero_evaluations'][split+'_'+scope] = json.loads(
+                (output/f'{split}_{scope}_zero_dedicated{actual_envs}.json').read_text())
         zero = json.loads((output/f'validation_{scope}_zero_dedicated{actual_envs}.json').read_text())
         key = 'best' if full else 'best_short'
         extra[key] = select_validation_best(extra[key], zero, reports['validation'], extra['zero_checkpoint'],

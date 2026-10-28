@@ -13,21 +13,29 @@ import time
 import torch
 
 _active = ContextVar('adapter_timeline', default=None)
-_phase = ContextVar('adapter_timing_phase', default='forward')
+_phase = ContextVar('adapter_timing_phase', default=None)
+# PyTorch自定义autograd可能在引擎线程执行，Python ContextVar不会自动传播。
+# 每进程只有一个串行策略更新，使用进程级只读回退覆盖这些反向区域。
+_global_active = None
+_global_phase = 'forward'
 
 
 @contextmanager
 def phase(name):
+    global _global_phase
+    old = _global_phase
+    _global_phase = name
     token = _phase.set(name)
     try:
         yield
     finally:
         _phase.reset(token)
+        _global_phase = old
 
 
 @contextmanager
 def scope(name):
-    timer = _active.get()
+    timer = _active.get() or _global_active
     with torch.profiler.record_function(name):
         if timer is None:
             yield
@@ -42,7 +50,7 @@ def scope(name):
             finally:
                 if end is not None:
                     end.record()
-                timer.events.append((_phase.get(), name, start, end, time.perf_counter()-begin))
+                timer.events.append((_phase.get() or _global_phase, name, start, end, time.perf_counter()-begin))
 
 
 class Timeline:
@@ -52,17 +60,22 @@ class Timeline:
         self.events = []
 
     def __enter__(self):
+        global _global_active
         if self.cuda:
             torch.cuda.synchronize(self.device)
         self.begin = time.perf_counter()
         self.token = _active.set(self)
+        self.previous_global = _global_active
+        _global_active = self
         return self
 
     def __exit__(self, *args):
+        global _global_active
         if self.cuda:
             torch.cuda.synchronize(self.device)
         self.seconds = time.perf_counter()-self.begin
         _active.reset(self.token)
+        _global_active = self.previous_global
 
     def report(self):
         result = {}

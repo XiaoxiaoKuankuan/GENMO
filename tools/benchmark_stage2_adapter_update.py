@@ -38,7 +38,6 @@ def main():
     p.add_argument('--microbatches', type=int, nargs='+', default=[32, 64, 128, 256])
     p.add_argument('--implementations', nargs='+', default=['baseline', 'optimized'])
     p.add_argument('--no-compile-derivatives', action='store_true')
-    p.add_argument('--sparse-derivatives', action='store_true', help='实验性精确局部导数；默认使用已测量的原30维融合核')
     p.add_argument('--compile-components', action='store_true')
     p.add_argument('--aux-weight', type=float, default=0.)
     p.add_argument('--profile', action='store_true', help='额外H1 Kineto算子分析，不计入吞吐墙钟')
@@ -113,7 +112,6 @@ def main():
         cls = old_projection.ReferenceProjection if implementation == 'baseline' else ReferenceProjection
         control.projection = cls(control.bundle.spec, control.adapter.bounds, **cfg['alternating']['projection']).cuda()
         control.projection.compile_derivatives = not args.no_compile_derivatives
-        control.projection.sparse_derivatives = args.sparse_derivatives
         if implementation == 'baseline':
             def old_project(self, *inputs):
                 return old_so3.project_rotation_implicit(self, *inputs)
@@ -190,14 +188,14 @@ def main():
                     else:
                         g, params, m = ref
                         row['comparison'] = dict(gradient_relative_l2=float((gradient-g).norm()/g.norm().clamp_min(1e-20)),
-                            gradient_cosine=float(torch.nn.functional.cosine_similarity(gradient, g, dim=0)),
+                            gradient_cosine=float(torch.nn.functional.cosine_similarity(gradient.double(), g.double(), dim=0)),
                             parameter_max_abs=float((parameters-params).abs().max()),
                             objective_abs=abs(metrics['objective']-m['objective']),
                             same_accepted_samples=metrics['accepted_samples']==m['accepted_samples'])
                     if implementation == 'optimized' and ('baseline', horizon) in vectors:
                         g, params, m = vectors[('baseline', horizon)]
                         row['baseline_comparison'] = dict(gradient_relative_l2=float((gradient-g).norm()/g.norm().clamp_min(1e-20)),
-                            gradient_cosine=float(torch.nn.functional.cosine_similarity(gradient, g, dim=0)),
+                            gradient_cosine=float(torch.nn.functional.cosine_similarity(gradient.double(), g.double(), dim=0)),
                             parameter_max_abs=float((parameters-params).abs().max()), objective_abs=abs(metrics['objective']-m['objective']))
                 except Exception as error:
                     import traceback
