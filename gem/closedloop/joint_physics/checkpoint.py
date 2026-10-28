@@ -59,6 +59,12 @@ def read_checkpoint(path):
 
 def save_trainer(trainer, path):
     from torch import distributed as dist
+    if any(p.dtype != torch.float32 for p in trainer.actor.parameters()):
+        raise ValueError('完整断点要求GENMO主参数FP32')
+    if any(value.is_floating_point() and value.dtype != torch.float32
+           for state in trainer.optimizer.state.values() for value in state.values()
+           if isinstance(value,torch.Tensor)):
+        raise ValueError('AdamW状态必须保持FP32')
     rank_state = {"data": trainer.stream.state_dict(), "noise": trainer.noise_rng.get_state(),
                   "window": trainer.window_rng.bit_generator.state, "rng": rng_state(),
                   "physics_data": trainer.physics_stream.state_dict() if trainer.physics_stream is not None else None,
@@ -77,6 +83,8 @@ def save_trainer(trainer, path):
                                                         "readiness": trainer.readiness.state_dict()},
             "rank_states": states, "contract": trainer.contract, "counters": trainer.counters,
             "config": trainer.cfg, "sidecar_snapshot": trainer.store.snapshot() if trainer.store else None,
+            "precision_contract": {"network_autocast": trainer.cfg['training']['precision'],
+                                   "parameters": "float32", "optimizer_states": "float32", "physics": "float32"},
             "initialization": trainer.actor.initialization}, path)
     if trainer.world_size > 1:
         dist.barrier()

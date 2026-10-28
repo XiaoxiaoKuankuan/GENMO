@@ -51,8 +51,8 @@ def read_config(path, overrides=()):
     if policy is not None and (not 8 <= policy["min_effective_horizon"] <= physics["horizon"]
                                or physics.get("historical_support_mode") != "diagnostic"):
         raise ValueError("有效前缀仅用于显式正式训练，至少8步且不超过目标H")
-    if cfg["training"]["precision"] != "fp32":
-        raise ValueError("本版先完成FP32导数验收，尚未开放混合精度")
+    if cfg["training"]["precision"] not in ("fp32", "bf16_mixed"):
+        raise ValueError("仅支持fp32或网络BF16/物理FP32的bf16_mixed")
     return cfg
 
 
@@ -86,6 +86,7 @@ def build_actor(cfg, device):
     # 这里故意不调用initialize_stage1_weights/warm_start/load_stage1_checkpoint。
     base = build_stage1_actor(stage, data_config(cfg))
     actor = JointPhysicsActor(base).to(device)
+    actor.precision = cfg["training"]["precision"]
     losses = build_stage1_losses(base, stage).to(device)
     return actor, losses
 

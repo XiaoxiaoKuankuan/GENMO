@@ -4,6 +4,9 @@
 物理样本数归一化，各rank含零有效样本时仍执行同一backward。保存数据、噪声与窗口游标，
 课程从零推进；诊断间隔才计算两条损失的参数梯度分解，日常仅测小型x0执行梯度。
 真实学生无合法参考时如实记录physics_updates=0，绝不用GT替换学生预测。
+bf16_mixed只由Actor包围神经网络；参数、AdamW、原Stage1 FK/损失和SM/WM执行链保持FP32。
+大batch预取只提交已消费的数据游标；增量sidecar由rank0广播同一索引快照后共同换代。
+常规日志只保留标量/聚合计数，样本身份按显式诊断间隔记录，避免每步输出2048条身份。
 """
 
 from collections import Counter
@@ -51,6 +54,10 @@ class JointTrainer:
         resume_value = read_checkpoint(resume) if resume else None
         seed_all(cfg["training"]["seed"])
         self.actor, self.data_loss = build_actor(cfg, device)
+        if cfg['training']['precision'] == 'bf16_mixed' and self.device.type == 'cuda' and not torch.cuda.is_bf16_supported():
+            raise ValueError('目标CUDA设备不支持BF16')
+        if any(p.dtype != torch.float32 for p in self.actor.parameters()):
+            raise ValueError('GENMO主参数必须保持FP32，不能将模型整体转换为BF16')
         seed_all(cfg["training"]["seed"] + rank * 100003)
         self.stream = JointDataStream(cfg, rank=rank, world_size=world_size)
         self.adapter = build_adapter(cfg, device) if cfg["physics"]["enabled"] or cfg["data"]["sidecar"] else None
@@ -60,9 +67,18 @@ class JointTrainer:
             "stats_sha256": digest(cfg["stage1"]["endecoder"]["stats_path"]),
             "fk_sha256": self.actor.stage1.endecoder.kinematics.kinematics_sha256}
         self.frozen = self.adapter.bundle.frozen_snapshot() if self.adapter is not None else None
-        self.store = SidecarStore(cfg["data"]["sidecar"], "train", self.assets,
-            sample_contract=cfg["data"]["sample_contract"],
-            snapshot=resume_value.get("sidecar_snapshot") if resume_value else None) if cfg["data"]["sidecar"] else None
+        self.store = None
+        if cfg['data']['sidecar']:
+            snapshot = resume_value.get('sidecar_snapshot') if resume_value else None
+            if rank == 0:
+                self.store = SidecarStore(cfg['data']['sidecar'],'train',self.assets,
+                    sample_contract=cfg['data']['sample_contract'],snapshot=snapshot)
+            if world_size > 1:
+                payload = [self.store.snapshot() if rank == 0 else None]
+                dist.broadcast_object_list(payload,src=0)
+                if rank != 0:
+                    self.store = SidecarStore(cfg['data']['sidecar'],'train',self.assets,
+                        sample_contract=cfg['data']['sample_contract'],snapshot=payload[0])
         report = cfg["physics"].get("validation_report") if cfg["physics"]["enabled"] else None
         self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device, execution_contract(cfg)) if report else None
         self.noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+1000+rank)
@@ -108,7 +124,7 @@ class JointTrainer:
         if resume:
             restore_trainer(self, resume, resume_value)
         self.network = DistributedDataParallel(self.actor, device_ids=[self.device.index] if self.device.type == "cuda" else None,
-                                              find_unused_parameters=True) if world_size > 1 else self.actor
+                                              find_unused_parameters=True, gradient_as_bucket_view=True) if world_size > 1 else self.actor
 
     def update(self):
         from .reference import attach_sidecars
@@ -197,9 +213,10 @@ class JointTrainer:
                     support = (DiagnosticSupport(self.support, metadata['tags'])
                                if pcfg.get('historical_support_mode') == 'diagnostic' else self.support.for_tags(metadata['tags']))
                     record['stages'].append('execution_attempted')
-                    result = execute_window(windows[i], physical['pred_x_start'][i:i+1], physical['static_conf_logits'][i:i+1],
-                                            self.actor,self.adapter,self.cfg['execution_loss'],support=support,
-                                            training_policy=pcfg.get('training_safety'))
+                    with torch.autocast(device_type=self.device.type, enabled=False):
+                        result = execute_window(windows[i], physical['pred_x_start'][i:i+1].float(), physical['static_conf_logits'][i:i+1].float(),
+                                                self.actor,self.adapter,self.cfg['execution_loss'],support=support,
+                                                training_policy=pcfg.get('training_safety'))
                     derivative, = torch.autograd.grad(result['loss'],physical['pred_x_start'],retain_graph=True)
                     if not torch.isfinite(derivative).all() or not bool(derivative.norm()>0):
                         raise PhysicsRejected('zero_or_nonfinite_execution_gradient')
@@ -218,7 +235,7 @@ class JointTrainer:
                     record['historical_diagnostics'] = dict(getattr(support,'counts',{}))
                 rows.append(record)
         global_rows = rows
-        if self.world_size > 1:
+        if self.world_size > 1 and probe:
             gathered = [None]*self.world_size
             dist.all_gather_object(gathered, rows)
             global_rows = [row for rank_rows in gathered for row in rank_rows]
@@ -276,7 +293,24 @@ class JointTrainer:
             historical.update(row.get('historical_diagnostics', {}))
         for key, values in [('effective_horizon_counts',horizons), ('physics_rejections_total',reasons), ('historical_diagnostics_total',historical)]:
             cumulative = Counter(self.counters[key]); cumulative.update(values); self.counters[key] = dict(cumulative)
-        return {'step':self.step, 'lr':self.optimizer.param_groups[0]['lr'],
+        # 将同型损失一次性归约/拷回CPU，日志是八卡均值而非仅rank0样本值。
+        term_keys = [key for key,v in components.items() if isinstance(v,torch.Tensor)]
+        terms = torch.stack([components[key].detach().float().mean() for key in term_keys])
+        if self.world_size > 1:
+            dist.all_reduce(terms)
+        data_terms = dict(zip(term_keys, (terms/self.world_size).cpu().tolist()))
+        detail_every = self.cfg['training'].get('sample_log_every',1)
+        details = bool(detail_every and (self.step % detail_every == 0))
+        sample_details = ({'timesteps':timesteps.tolist(),
+            'sample_ids':[(m['sample_id'],m['decision_frame']) for m in batch['meta']],
+            'music_dropout_mask':drop.tolist(),'history_sources':[m['proprio_source'] for m in batch['meta']],
+            'physics_sample_ids':[(m['source'],m['frame']) for m in physics_meta],
+            'physics_timesteps':k.tolist() if physical is not None else [],
+            'sample_diagnostics':summarize(global_rows),'coverage':coverage,
+            'execution_x0_gradient_norm':[r['x0_gradient_norm'] for r in accepted]} if details else {})
+        readiness_summary = {key:value for key,value in readiness.items() if key not in ('sources','music_identities','types')}
+        readiness_summary.update(source_count=len(readiness['sources']),music_count=len(readiness['music_identities']),type_count=len(readiness['types']))
+        return {'step':self.step, 'lr':self.optimizer.param_groups[0]['lr'], 'precision':self.cfg['training']['precision'],
             'future_supervised_loss':float(reduced[2]/self.world_size),
             'physics_gradient_norm':max([row.get('x0_gradient_norm',0.) for row in global_rows] or [0.]),
             'physics_gradient_tensor':'student_pred_x_start',
@@ -286,15 +320,11 @@ class JointTrainer:
             'physics_update_fraction':self.counters['physics_effective_updates']/self.step,
             'data_samples_with_inactive_physics_curriculum':b*self.world_size if weight==0 else 0,
             'physics_selection_status':selection_reason if not global_rows else 'independent_student_probe' if not weight else 'independent_student_training',
-            'readiness':readiness,'rejections':dict(reasons),'physics_rejection_categories':dict(reasons),
-            'sample_diagnostics':summarize(global_rows),'data_sidecar_status':dict(Counter(missing)),
-            'timesteps':timesteps.tolist(),'sample_ids':[(m['sample_id'],m['decision_frame']) for m in batch['meta']],
-            'music_dropout_mask':drop.tolist(),'history_sources':[m['proprio_source'] for m in batch['meta']],
-            'physics_sample_ids':[(m['source'],m['frame']) for m in physics_meta],
-            'physics_timesteps':k.tolist() if physical is not None else [],
-            'data_terms':{key:float(v.detach().mean()) for key,v in components.items() if isinstance(v,torch.Tensor)},
-            'gradient_norm':float(norm),**diagnostics,'coverage':coverage,
-            'execution_x0_gradient_norm':[r['x0_gradient_norm'] for r in accepted],
+            'readiness':readiness if details else readiness_summary,'physics_rejection_categories':dict(reasons),
+            'data_sidecar_status':dict(Counter(missing)),**sample_details,
+            'physics_source_count':len(self.physics_stream.keys) if self.physics_stream else 0,
+            'future_source_count':len(self.future_stream.keys) if self.future_stream else 0,
+            'data_terms':data_terms,'gradient_norm':float(norm),**diagnostics,
             'wall_seconds':time.perf_counter()-started,
             'peak_memory_bytes':torch.cuda.max_memory_allocated(self.device) if self.device.type=='cuda' else 0}
 
@@ -302,12 +332,15 @@ class JointTrainer:
         interval = self.cfg['data'].get('sidecar_refresh_every',0)
         if not interval or not self.step or self.step % interval or self.store is None:
             return
-        changed = self.store.refresh()
+        # 只有rank0读取正在原子发布的live索引，其余rank使用同一个快照。
+        changed = self.store.refresh() if self.rank == 0 else False
         if self.world_size > 1:
-            identities = [None]*self.world_size
-            dist.all_gather_object(identities, self.store.identity)
-            if any(value != identities[0] for value in identities):
-                raise ValueError('各rank看到的离线缓存索引不一致，拒绝静默改变采样合同')
+            payload = [self.store.snapshot() if self.rank == 0 and changed else None]
+            dist.broadcast_object_list(payload,src=0)
+            changed = payload[0] is not None
+            if changed and self.rank != 0:
+                self.store = SidecarStore(self.cfg['data']['sidecar'],'train',self.assets,
+                    sample_contract=self.cfg['data']['sample_contract'],snapshot=payload[0])
         if not changed:
             return
         from .requests import PhysicsRequestStream
@@ -372,26 +405,34 @@ class JointTrainer:
         if self.rank == 0 and self.physics_stream is not None:
             (output/"physics_inventory.json").write_text(json.dumps(self.physics_stream.inventory, ensure_ascii=False, indent=2))
         recent_physics_norm = 0.
+        interval_seconds = 0.
         try:
             while self.step < stop_step:
                 self.refresh_sidecars()
                 result = self.update()
+                interval_seconds += result['wall_seconds']
                 recent_physics_norm = max(recent_physics_norm, result['physics_gradient_norm'])
                 if self.rank == 0:
-                    with (output/"metrics.jsonl").open("a") as file:
-                        file.write(json.dumps(result, ensure_ascii=False, allow_nan=False)+"\n")
+                    metric_every = self.cfg['training'].get('metrics_every',1)
+                    if self.step <= 3 or self.step % metric_every == 0 or self.step == stop_step:
+                        with (output/"metrics.jsonl").open("a") as file:
+                            file.write(json.dumps(result, ensure_ascii=False, allow_nan=False)+"\n")
                     if self.step <= 3 or self.step % self.cfg['training'].get('log_every',1)==0:
                         keys = ('step','lr','data_loss','data_terms','future_supervised_loss','execution_loss','lambda_exec',
                                 'physics_attempts','physics_valid_samples','physics_effective_updates','physics_update_fraction',
-                                'effective_horizon_counts','physics_rejections_total','wall_seconds','peak_memory_bytes')
-                        print(json.dumps({**{k:result[k] for k in keys},'interval_max_physics_x0_gradient_norm':recent_physics_norm},ensure_ascii=False),flush=True)
+                                'effective_horizon_counts','physics_rejections_total','wall_seconds','peak_memory_bytes',
+                                'precision','physics_source_count','future_source_count')
+                        print(json.dumps({**{k:result[k] for k in keys},'interval_max_physics_x0_gradient_norm':recent_physics_norm,
+                            'interval_wall_seconds':interval_seconds},ensure_ascii=False),flush=True)
                         recent_physics_norm = 0.
+                        interval_seconds = 0.
                 if self.step % self.cfg["training"]["checkpoint_every"] == 0 or self.step == stop_step or self.step in self.cfg["training"]["diagnostic_steps"]:
                     save_trainer(self, output/f"joint_{self.step:08d}.pt")
                 every = self.cfg['training'].get('numerical_diagnostics_every',0)
                 if every and self.step % every == 0:
                     self.numerical_diagnostics(output)
         finally:
+            self.stream.close()
             if self.adapter is not None:
                 self.adapter.bundle.assert_unchanged(self.frozen)
         if self.rank == 0:

@@ -4,12 +4,19 @@
 保存每步真实state55/obs75/proprio48/action与接触，历史按索引还原而非重复整首数据。
 旧teacher-forced计划以120源帧启动，按已记录时间只扩展可见后缀；请求时可见范围和版本
 独立存储。音乐只记录文件身份，不在每个anchor重复保存。分片只新建、不覆盖。
+增量生产与八卡训练分属独立进程：单写者文件锁防止重复采集；完整分片先落盘，再原子发布
+索引，读者只看到完整版本。可先初始化空索引并按数据来源交错扩充；断点跳过已验证来源，
+保留失败和提前终止，不为获得有效窗口重置拼接，也不在训练进程中重新执行Newton。
 """
 
 import json
+from contextlib import contextmanager
+import fcntl
 from functools import lru_cache
+import os
 from pathlib import Path
 import time
+import uuid
 
 import torch
 
@@ -105,12 +112,73 @@ def collect_source(dataset, row_index, cfg, adapter, env):
     return episode
 
 
-def prepare(cfg, split, output, adapter, env):
+@contextmanager
+def preparation_lock(output):
+    """同一目录仅允许一个生产者；锁文件持久保留，进程退出由内核释放锁。"""
+    with (Path(output)/".prepare.lock").open("a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("该sidecar目录已有采集进程，禁止并发写入或重复启动") from error
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def publish_index(output, index):
+    """先持久化临时索引，再原子替换；训练不会读到半个JSON或未完成分片。"""
+    output = Path(output)
+    temporary = output/f".index_{uuid.uuid4().hex}.partial"
+    try:
+        with temporary.open("x") as handle:
+            json.dump(index, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(output/"index.json")
+        descriptor = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def preparation_sources(catalog, options):
+    """固定seed打乱每个来源并轮流取样，防止增量预算全部消耗在第一种数据上。"""
+    if not options.get("balanced_sources", False):
+        yield from catalog.sources()
+        return
+    import numpy as np
+    generators = []
+    seed = int(options.get("source_seed", 42))
+    for i, (dataset, rows) in enumerate(zip(catalog.datasets, catalog.rows)):
+        permutation = np.random.default_rng(seed+i*100003).permutation(rows).tolist()
+        generators.append((dataset, iter(permutation)))
+    while generators:
+        active = []
+        for dataset, iterator in generators:
+            row = next(iterator, None)
+            if row is not None:
+                yield dataset, row
+                active.append((dataset, iterator))
+        generators = active
+
+
+def prepare(cfg, split, output, adapter, env, *, initialize_only=False):
+    """创建或继续独立v2目录，持锁覆盖身份检查、真实采集及原子发布全过程。"""
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=cfg["prepare"].get("resume", False))
+    with preparation_lock(output):
+        return _prepare_locked(cfg, split, output, adapter, env, initialize_only)
+
+
+def _prepare_locked(cfg, split, output, adapter, env, initialize_only):
     from .offline import cache_requests, preprocessing_codec, source_provenance
     catalog = SourceCatalog(cfg, split)
     output = Path(output)
     resume = cfg["prepare"].get("resume", False)
-    output.mkdir(parents=True, exist_ok=resume)
     started = time.perf_counter()
     index = {"schema": SIDECAR_SCHEMA, "split": split, "assets": asset_contract(cfg, adapter),
              "dataset": catalog.identity, "sources": {}, "shards": {}, "episodes": [],
@@ -123,6 +191,12 @@ def prepare(cfg, split, output, adapter, env):
             if digest(output/shard) != sha:
                 raise ValueError("已保存分片身份改变，禁止重复采集或覆盖")
         index = previous
+    if initialize_only:
+        if not (output/"index.json").exists():
+            publish_index(output, index)
+        return index
+    if env is None:
+        raise ValueError("真实增量采集必须提供Newton环境；空索引初始化才可不启动环境")
     skip = set(index["sources"])
     for directory in cfg["prepare"].get("exclude_sidecars", []):
         from .data import SidecarStore
@@ -132,20 +206,22 @@ def prepare(cfg, split, output, adapter, env):
     pending = []
     frozen = adapter.bundle.frozen_snapshot()
     def flush():
-        import uuid
+        adapter.bundle.assert_unchanged(frozen)
         name = f"shard_{len(index['shards']):05d}_{uuid.uuid4().hex[:8]}.pt"
         with (output/name).open("xb") as file:
             torch.save(pending, file)
+            file.flush()
+            os.fsync(file.fileno())
         index["shards"][name] = digest(output/name)
         for i, episode in enumerate(pending):
             index["sources"][episode["source_key"]] = {"shard": name, "episode": i}
         pending.clear()
-        temporary = output/"index.json.partial"
-        temporary.write_text(json.dumps(index, ensure_ascii=False, indent=2))
-        temporary.replace(output/"index.json")
+        index["published_sources"] = len(index["sources"])
+        index["last_publish_unix_seconds"] = time.time()
+        publish_index(output, index)
     from collections import Counter
     per_dataset = Counter(json.loads(key)[0] for key in index['sources'])
-    for dataset, row in catalog.sources():
+    for dataset, row in preparation_sources(catalog, cfg["prepare"]):
         limit = cfg["prepare"].get("max_sources")
         if limit is not None and len(index["episodes"]) >= limit:
             break
@@ -158,6 +234,11 @@ def prepare(cfg, split, output, adapter, env):
         per_dataset[dataset.dataset_name] = per_dataset.get(dataset.dataset_name,0)+1
         episode = collect_source(dataset, row, cfg, adapter, env)
         preprocessing = cache_requests(episode, dataset, row, adapter, codec)
+        from .requests import static_request
+        preprocessing["legal_windows"] = {str(horizon): sum(
+            static_request(episode, request_index, horizon)[1] is None
+            for request_index in range(len(episode["offline_requests"]["frames"])))
+            for horizon in (16, 32, 64)}
         pending.append(episode)
         index["episodes"].append({k: episode[k] for k in ("source_key", "control_steps", "termination_reason", "wall_seconds")})
         index["episodes"][-1]["offline_preprocessing"] = preprocessing
@@ -168,7 +249,5 @@ def prepare(cfg, split, output, adapter, env):
         flush()
     adapter.bundle.assert_unchanged(frozen)
     index.update(wall_seconds=time.perf_counter()-started, frozen_unchanged=True)
-    temporary = output/'index.json.partial'
-    temporary.write_text(json.dumps(index, ensure_ascii=False, indent=2))
-    temporary.replace(output/'index.json')
+    publish_index(output, index)
     return index

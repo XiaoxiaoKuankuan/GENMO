@@ -81,3 +81,56 @@ def test_random_static_construction_never_loads_genmo(monkeypatch):
         assert actor.initialization == "static_config_random_no_genmo_checkpoint"
     assert torch.equal(values[0], values[1])
     assert not torch.equal(values[0], values[2])
+
+
+def test_future_batch_preserves_independent_times_masks_and_gradients(actor_factory):
+    base, batch = actor_factory(motion_frames=60, starts=(45, 48, 51))
+    actor = JointPhysicsActor(base).eval()
+    with torch.no_grad():
+        actor.future_encoder.output.weight.normal_(0, .01)
+        actor.future_encoder.output.bias.fill_(.1)
+    individual = copy.deepcopy(actor.future_encoder)
+    contexts = [ForecastContext(torch.randn(1, 58, requires_grad=True), torch.tensor([valid]),
+                                tick, tick + advance)
+                for valid, tick, advance in ((True, 900, 120), (False, 960, 60), (True, 1020, 240))]
+    legacy_contexts = [ForecastContext(c.features.detach().clone().requires_grad_(True),
+                                      c.valid, c.request_tick, c.forecast_tick) for c in contexts]
+    calls = []
+    hook = actor.future_encoder.input.register_forward_hook(lambda *args: calls.append(1))
+    batched = actor.future_residual(batch, contexts)
+    hook.remove()
+    expected = torch.cat([individual(c, batch["future_times"][i:i+1])
+                          for i, c in enumerate(legacy_contexts)])
+    assert len(calls) == 1
+    torch.testing.assert_close(batched, expected, rtol=2e-5, atol=1e-6)
+    assert batched[1].count_nonzero() == 0
+    weights = torch.randn_like(batched)
+    (batched * weights).sum().backward()
+    (expected * weights).sum().backward()
+    for actual, old in zip(actor.future_encoder.parameters(), individual.parameters()):
+        torch.testing.assert_close(actual.grad, old.grad, rtol=2e-5, atol=2e-5)
+    for actual, old in zip(contexts, legacy_contexts):
+        torch.testing.assert_close(actual.features.grad, old.features.grad, rtol=2e-5, atol=1e-6)
+
+
+def test_bf16_neural_autocast_keeps_physical_outputs_and_parameters_fp32(actor_factory):
+    base, batch = actor_factory(motion_frames=60, starts=(45,))
+    actor = JointPhysicsActor(base).train()
+    actor.precision = "bf16_mixed"
+    context = ForecastContext(torch.randn(1, 58), torch.ones(1, dtype=torch.bool), 900, 1020)
+    observed = []
+    hook = actor.future_encoder.output.register_forward_hook(
+        lambda module, inputs, output: observed.append(output.dtype))
+    out = actor.denoise_supervised(batch, [context], torch.tensor([100]),
+                                  torch.randn(1, 60, 30), torch.tensor([False]))
+    hook.remove()
+    assert observed == [torch.bfloat16]
+    for key in ("pred_x_start", "static_conf_logits", "target_x_start", "xt", "noise"):
+        assert out[key].dtype == torch.float32
+        assert torch.isfinite(out[key]).all()
+    known = batch["known_qpos30_mask"]
+    torch.testing.assert_close(out["pred_x_start"][known], out["target_x_start"][known], rtol=0, atol=0)
+    (out["pred_x_start"].square().mean() + out["static_conf_logits"].square().mean()).backward()
+    assert actor.future_encoder.output.weight.grad.norm() > 0
+    assert all(p.dtype == torch.float32 for p in actor.parameters())
+    assert all(torch.isfinite(p.grad).all() for p in actor.parameters() if p.grad is not None)

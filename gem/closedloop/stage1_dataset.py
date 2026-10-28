@@ -494,7 +494,8 @@ class BumiClosedLoopStage1Dataset(Dataset):
         qpos_halo = qpos[
             decision_frame : min(sequence_length, decision_frame + self.motion_frames + 1)
         ]
-        encoded_halo = self.codec.encode(qpos_halo).physical_features
+        # 此处仅使用qpos30，不消费encode返回的22体FK；原条件编码器保留相同anchor与运算顺序。
+        encoded_halo, _ = self.codec.encode_condition_features(qpos_halo)
         target_qpos30 = torch.zeros(self.motion_frames, QPOS30_DIM, dtype=torch.float32)
         target_qpos30_valid = torch.zeros(self.motion_frames, QPOS30_DIM, dtype=torch.bool)
         target_qpos30[:future_count] = encoded_halo[:future_count]

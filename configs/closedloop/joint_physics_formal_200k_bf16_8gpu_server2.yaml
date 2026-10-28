@@ -1,0 +1,49 @@
+# Server-2二十万步八卡正式run：全新随机GENMO，1024维16层，完整Stage1 v5监督。
+# 每卡普通监督256（全局2048）；物理与Future子批各4，不改变1000步均匀监督噪声。
+# bf16_mixed只作用于GENMO网络，主参数/AdamW/codec/FK/SM/WM/所有物理损失保持FP32。
+# 原10首真实缓存保留，新第三目录按完整不可变分片增量发布，每500步全rank同快照刷新。
+# 预取只推进已消费游标；不保存queued大张量，断点由RNG确定性重建下一批。
+# 训练不运行Newton评价；独立离线增量生产可持续补充四来源真实请求，旧轨迹不重算。
+base_config: joint_physics_formal_8gpu_server2.yaml
+data:
+  source_ids: null
+  sidecar:
+    - /data0/user/liwei/GENMO_outputs/joint_physics_acceptance_20261027/sidecar_train_offline_v2
+    - /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/train_increment_8
+    - /data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_bf16_20261028/sidecar_increment
+  sidecar_refresh_every: 500
+  loading: {workers: 4, prefetch_batches: 1, sequence_cache_mb: 4096}
+physics:
+  horizon: 32
+  subbatch: 4
+  start_step: 20000
+  warmup_steps: 30000
+  lambda_exec: 0.02
+  every_steps: 4
+  readiness_hard_gate: false
+  historical_support_mode: diagnostic
+future_supervision: {enabled: true, every_steps: 4, batch_size: 4, weight: 0.1}
+training:
+  seed: 42
+  batch_size: 256
+  precision: bf16_mixed
+  learning_rate: 0.00001
+  lr_warmup_steps: 1000
+  max_steps: 200000
+  checkpoint_every: 5000
+  log_every: 100
+  metrics_every: 100
+  sample_log_every: 5000
+  diagnostics_every: 10000
+  numerical_diagnostics_every: 10000
+  diagnostic_steps: []
+prepare:
+  resume: true
+  balanced_sources: true
+  source_seed: 42
+  shard_episodes: 1
+  max_sources: 128
+  max_control_steps: 1000
+  exclude_sidecars:
+    - /data0/user/liwei/GENMO_outputs/joint_physics_acceptance_20261027/sidecar_train_offline_v2
+    - /data0/user/liwei/GENMO_outputs/joint_physics_repair_20261027/train_increment_8
