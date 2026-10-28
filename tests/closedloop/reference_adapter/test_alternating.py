@@ -99,8 +99,8 @@ def test_noisy_action_is_the_replay_and_history_action(system):
     torch.testing.assert_close(restored.data['applied_action'][0], actual)
 
 
-@pytest.mark.parametrize('enabled', [False, True])
-def test_policy_freezes_WM_Actor_and_optional_critic(system, enabled):
+@pytest.mark.parametrize('horizon,enabled', [(8, False), (8, True), (64, False)])
+def test_policy_freezes_WM_Actor_and_optional_critic(system, horizon, enabled):
     engine, control, z = setup(system)
     critic = Critic(2835)
     critic.requires_grad_(enabled)
@@ -108,7 +108,7 @@ def test_policy_freezes_WM_Actor_and_optional_critic(system, enabled):
     wm = {k: v.clone() for k, v in engine.dynamics.state_dict().items()}
     actor = control.bundle.frozen_snapshot()
     calls = []
-    report, trajectory = policy_update(control, engine.dynamics, critic, optimizer, z, 8,
+    report, trajectory = policy_update(control, engine.dynamics, critic, optimizer, z, horizon,
         terminal_value=enabled, microbatch=1, diagnostics=True, on_step=lambda r: calls.append(r.copy()))
     assert len(calls) == 1 and report['optimizer_step_completed']
     assert report['adapter_gradient_norm'] > 0 and report['parameter_delta'] > 0
@@ -121,7 +121,7 @@ def test_policy_freezes_WM_Actor_and_optional_critic(system, enabled):
         assert trajectory is None and report['terminal'] == 0
         assert critic_update(critic, None, None)['critic_optimizer_steps'] == 0
     else:
-        assert trajectory['features'].shape == (9, 2, 2835)
+        assert trajectory['features'].shape == (horizon+1, 2, 2835)
         assert not trajectory['features'].requires_grad
         original = copy.deepcopy(critic)
         original.norm.update(trajectory['features'])
@@ -130,7 +130,7 @@ def test_policy_freezes_WM_Actor_and_optional_critic(system, enabled):
         opt = torch.optim.Adam(critic.parameters(), lr=1e-4)
         v = critic_update(critic, opt, trajectory, epochs=1, minibatches=2)
         assert v['critic_optimizer_steps'] == 2
-        assert v['critic_norm_count'] == 18
+        assert v['critic_norm_count'] == (horizon+1)*2
         assert v['critic_target_mean'] == pytest.approx(float(expected.mean()), abs=1e-6)
 
 

@@ -3,7 +3,8 @@
 数据流是当前Adapter真实采集(含实际动作探索)→原SM H8世界模型十次更新→冻结
 Actor/WM后的逐步BPTT→可选想象GAE Critic。100个WM-only交替循环后直接策略
 更新，不加载旧Adapter，不运行Oracle/方向审计/物理候选回滚。GPU配置决定H8、
-H16或H32及动作探索消融；未经真实回报校准的Critic暂不参与训练或终端梯度。
+H16、H32或H64及动作探索消融；WM仍固定真实H8递归监督，十帧参考不随BPTT
+增长。未经真实回报校准的Critic暂不参与训练或终端梯度。
 
 每次有限Adam完成立即计数并记录修正传播及投影梯度；0/5/10更新固定短时对照，
 20更新起执行无探索整歌validation和evaluation，只有validation选择best。评价下降只
@@ -109,8 +110,8 @@ def main():
     settings, train, vector = cfg['alternating'], cfg['training'], cfg['vector']
     if settings['method'] != 'supermimic_alternating_WM_BPTT' or train['wm_fit_window'] != 8:
         raise ValueError('正式入口只允许原SM H8监督交替算法')
-    if cfg['bptt_steps'] not in (8, 16, 32):
-        raise ValueError('本次正式BPTT配置只使用H8/H16/H32')
+    if cfg['bptt_steps'] not in (8, 16, 32, 64):
+        raise ValueError('本次正式BPTT配置只使用H8/H16/H32/H64')
     if settings['critic_enabled']:
         raise ValueError('10月28日修复实验暂时关闭未经独立真实回报校准的Critic；不能使用旧想象EV放行')
     if torch.cuda.device_count() != 1 or int(os.environ.get('WORLD_SIZE', '1')) != 1:

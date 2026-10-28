@@ -1,0 +1,114 @@
+# H16/H32/H64独立时域对照：每卡2048环境、零Adapter与相同原预训练WM。
+# 三组仅改变BPTT时域；统一Adapter LR1e-5、实际采集无探索噪声、seed42。
+# 冻结GENMO及SM Actor，WM固定H8真实动作递归监督，Critic关、根XY关、根姿态开。
+# GPU4沿用已启动的同配置H16，不重复启动；GPU5/6保存旧任务后在新目录从零启动。
+# 长时域属于正式探索，不预称方向可靠；保留数值/投影保护，validation选best。
+algorithm: genmo_supermimic_reference_adapter10
+alternating:
+  action_noise: 0.0
+  calibration: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/oracle64_flexible03/zero_train_calibration.json
+  critic_enabled: false
+  critic_epochs: 5
+  critic_minibatches: 4
+  early_evaluation_steps: 256
+  evaluation_updates:
+  - 0
+  - 5
+  - 10
+  - 20
+  - 50
+  - 100
+  - 200
+  - 400
+  - 700
+  - 1000
+  experiment_label: horizon_H32_lr1e-05_noise0_rootR1_seed42
+  exploration_fraction: 0.0
+  exploration_std: 0.1
+  full_song_from_update: 20
+  log_every: 10
+  max_consecutive_projection_rejections: 5
+  method: supermimic_alternating_WM_BPTT
+  objective_version: q_qd_body_R_local_root_strict_root_alpha3_v4
+  precision:
+    acceleration_weight: 0.0002
+    action_weight: 0.01
+    velocity_weight: 0.002
+    weight: 0.446714796317961
+  projection:
+    ankle_acceleration: 5.0
+    ankle_velocity: 0.5
+    constrain_root_angular_acceleration: true
+    height_acceleration: 1.2
+    height_velocity: 0.12
+    joint_acceleration: 10.0
+    joint_velocity: 1.0
+    rotation_acceleration: 3.0
+    rotation_velocity: 0.3
+  projection_recovery_attempts: 2
+  root_orientation: true
+  root_xy: false
+  soft_joint_limit: false
+  stage_budget: 1000_finite_Adam_updates_with_independent_real_evaluation_not_quality_certificate
+  utd: 0.4
+  warmup_vector_steps: 64
+  wm_only_iterations: 100
+bptt_steps: 32
+control_hz: 50
+genmo:
+  bootstrap_latency_ticks: 180
+  checkpoint: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/s595000.pt
+  kinematics: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/bumi_kinematics_robot_retargeter_fe934_v1.json
+  latency_margin_ticks: 60
+  stats: /data0/user/liwei/closedloop_stage10_v3_assets/20261012/stage1_s595000/qpos30_train_stats.json
+hidden_dims:
+- 512
+- 512
+- 256
+music:
+  activity_floor: 0.05
+  activity_fraction: 0.7
+  event_activity_floor: 0.1
+  extra_event_weight: 1.0
+  lag_steps: 2
+  margin: 0.01
+  match_tolerance_s: 0.06
+  sigma_s: 0.04
+  tau: 0.05
+music_baseline: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/acceptance_20261026/music_baseline_all.pt
+observation_noise: false
+output_dim: 270
+physics_backend: isaaclab3_newton_mujoco_warp
+reference_steps: 10
+rewards:
+  activity: 0.05
+  magnitude: 0.02
+  music: 0.0001
+  overlap: 0.02
+  reference_limit: 0.0
+  smooth: 0.01
+supermimic:
+  checkpoint: /data0/user/liwei/GENMO_assets/adapter_20261026/ckpt_024000.pt
+  repo: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/source_supermimic
+  robot_asset_dir: /data0/user/liwei/GENMO_assets/adapter_20261026/sm/data/bumi3_4340/robot
+tasks: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_projection_20261027_01/tasks_64_generated.json
+training:
+  actor_batch: 1024
+  adapter_lr: 1.0e-05
+  backward_microbatch: 32
+  batch_size: 1024
+  critic_lr: 0.0001
+  gamma_per_control: 0.99
+  grad_clip_norm: 1.0
+  lambda_return_per_control: 0.95
+  replay_capacity: 1000000
+  seed: 42
+  wm_batch: 2048
+  wm_fit_window: 8
+  wm_lr: 3.0e-05
+  wm_updates_per_iteration: 10
+vector:
+  checkpoint_every: 50
+  num_envs: 2048
+  sampling_seed: 42
+  target_accepted_updates: 1000
