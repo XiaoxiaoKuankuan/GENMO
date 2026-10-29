@@ -138,3 +138,19 @@ seed43从同样零初始化独立复现。不能把预热、队列、WM更新称
 本轮所有性能/原失败现场/原实验快照证据根：
 `/data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/so3_modes_20261029_1050`。
 实际新启动目录、PID、首更与新尺度物理结果在完成后追加，当前本节不冒称已启动。
+
+
+## 启动后发现的公平性耦合与纠正
+
+首次新目录`formal_so3_modes_20261029_1155`已经实际启动八组并产生更新，但再次逐行
+审查发现旧`PrecisionObjective`以`projection.acceleration`归一化罚项：relaxed硬预算
+从3改6会把相同根角加速度成本降为1/4。只有YAML里的weight相同并不保证奖励相同。
+因此该目录完整保留为错误配置证据，不作为最终四模式公平比较；主动停止本轮自己的
+八个PID，保存完整状态后另建r2目录从零重跑。旧u700候选复评不受此项影响，因为
+其strict正则本来就是3；非relaxed首次结果也只能单独作为早期探索，不混入最终矩阵。
+
+修正：`PrecisionObjective`增加显式`rotation_velocity_scale=0.3`、
+`rotation_acceleration_scale=3.0`、`rotation_acceleration_penalty=true`，八组完全相同，
+与硬预算/硬开关解耦。只读正则向量按投影设备/精度缓存，不增加每步GPU同步。
+未声明参数的旧研究配置保留其旧语义，不能冒充新公平对照。新增同一轨迹在四模式及
+硬约束关闭时的成本/梯度逐位一致测试，随后重新运行完整回归及GPU完整更新检查。

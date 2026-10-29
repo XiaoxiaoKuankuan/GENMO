@@ -35,12 +35,41 @@ def calibrate(error_rows):
 
 
 class PrecisionObjective:
-    def __init__(self, scales=None, *, weight=1., action_weight=.01, velocity_weight=.002, acceleration_weight=.0002):
+    def __init__(self, scales=None, *, weight=1., action_weight=.01, velocity_weight=.002, acceleration_weight=.0002,
+                 rotation_velocity_scale=None, rotation_acceleration_scale=None, rotation_acceleration_penalty=None):
         self.scales = dict(zip(NAMES, FLOORS)) if scales is None else {name: scales[name] for name in NAMES}
         self.weight = weight
         self.action_weight, self.velocity_weight, self.acceleration_weight = action_weight, velocity_weight, acceleration_weight
+        self.rotation_velocity_scale = rotation_velocity_scale
+        self.rotation_acceleration_scale = rotation_acceleration_scale
+        self.rotation_acceleration_penalty = rotation_acceleration_penalty
+        self._reference_scale_cache = None
         if set(self.scales) != set(NAMES) or any(v <= 0 for v in self.scales.values()):
             raise ValueError('精度标尺必须是训练集固定正数且完整包含四项')
+        from math import isfinite
+        if any(v is not None and (not isfinite(v) or v <= 0)
+               for v in (rotation_velocity_scale, rotation_acceleration_scale)):
+            raise ValueError('参考旋转正则标尺必须为独立的有限正数')
+
+    def reference_cost_scales(self, budget):
+        """缓存只读正则标尺，四模式显式解耦硬预算与奖励强度/开关。
+
+        None仅保留旧实验复现语义；新八组固定角速度0.3、角加速度3及惩罚开启。
+        放宽硬约束到6不会再把加速度罚项除以6，关硬约束也不会隐式关奖励。
+        非旋转预算跨组相同，沿用RobotSpec构造的对应通道，不另复制关节常量。
+        """
+        key = (id(budget), budget.velocity.device, budget.velocity.dtype)
+        if self._reference_scale_cache is None or self._reference_scale_cache[0] != key:
+            velocity, acceleration, mask = (x.clone() for x in
+                (budget.velocity, budget.acceleration, budget.acceleration_mask))
+            if self.rotation_velocity_scale is not None:
+                velocity[3:6] = self.rotation_velocity_scale
+            if self.rotation_acceleration_scale is not None:
+                acceleration[3:6] = self.rotation_acceleration_scale
+            if self.rotation_acceleration_penalty is not None:
+                mask[3:6] = self.rotation_acceleration_penalty
+            self._reference_scale_cache = (key, velocity, acceleration, mask)
+        return self._reference_scale_cache[1:]
 
     def __call__(self, control, z, proposal, state, nominal, sm):
         values = errors(control, z, state, nominal, sm)
@@ -65,10 +94,10 @@ class PrecisionObjective:
         v = torch.cat((v[..., :3], angular-nominal_angular, v[..., 6:]), -1)
         a = v.diff(dim=1)/.02
         budget = control.projection
-        velocity = (v/budget.velocity).square().mean((1, 2))
-        # 用户关闭根角加速度时，不能仍通过稳定性成本间接优化它。
-        # 保持原27通道平均分母，其余通道权重不因去掉三个旋转通道而增大。
-        acceleration = ((a/budget.acceleration).square()*budget.acceleration_mask).mean((1, 2))
+        velocity_scale, acceleration_scale, acceleration_mask = self.reference_cost_scales(budget)
+        velocity = (v/velocity_scale).square().mean((1, 2))
+        # 保持27通道平均分母；硬预算变化不改变显式固定的正则尺度及奖励开关。
+        acceleration = ((a/acceleration_scale).square()*acceleration_mask).mean((1, 2))
         raw.update(action_deviation=action, added_reference_velocity=velocity, added_reference_acceleration=acceleration)
         weighted.update(action_deviation=-.02*self.action_weight*action,
                         added_reference_velocity=-.02*self.velocity_weight*velocity,

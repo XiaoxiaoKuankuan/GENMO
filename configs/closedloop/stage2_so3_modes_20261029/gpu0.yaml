@@ -26,9 +26,12 @@ alternating:
   log_every: 10
   max_consecutive_projection_rejections: 5
   method: supermimic_alternating_WM_BPTT
-  objective_version: sm_tighter_scales_height02_tilt06_q_qd_body_R_v5
+  objective_version: sm_tighter_scales_fixed_reference_regularization_v6
   precision:
     acceleration_weight: 0.0002
+    rotation_velocity_scale: 0.3
+    rotation_acceleration_scale: 3.0
+    rotation_acceleration_penalty: true
     action_weight: 0.01
     velocity_weight: 0.002
     weight: 0.446714796317961
