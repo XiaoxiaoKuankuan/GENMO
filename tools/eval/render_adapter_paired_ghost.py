@@ -5,8 +5,9 @@
 参考第一帧；原始GENMO名义目标仍用于误差和世界坐标轨迹图。两侧保持同一音乐时间、
 相同相机，镜头共同容纳名义目标及两侧真实位置，不单独跟随各自机器人而掩盖漂移。
 只通过mj_forward重建渲染几何，不推进MuJoCo动力学，不修改/平滑/插值轨迹。真实执行
-提前结束的面板显示终止信息，不补机器人姿态；视频保留原音乐，图片选择配对根误差
-差异的一秒滑动平均峰值，并写明选择时刻。文件SHA、关节名称、初态、物理参数、音频
+提前结束的面板显示终止信息，不补机器人姿态；视频保留原音乐，完整案例图片选择配对
+根误差差异的一秒滑动平均峰值，失败案例选择终止前最后共同有效帧并标明终止原因。
+文件SHA、关节名称、初态、物理参数、音频
 和50Hz时钟在输入边界检查，所有产物写入新路径，禁止覆盖已有视频或图片。
 """
 
@@ -97,6 +98,10 @@ def main():
         snapshot = int(np.argmax(np.convolve(delta, np.ones(window)/window, mode='valid'))+window//2)
     else:
         snapshot = frames//2
+    snapshot_rule = 'one_second_smoothed_absolute_root_error_difference_peak'
+    if common and frames >= common and any(m['end_reason'] in ('constraint_failure', 'physical_failure') for m in metadata):
+        snapshot = common-1
+        snapshot_rule = 'last_common_real_frame_before_failure_with_explicit_end_reason'
     model = mujoco.MjModel.from_xml_path(str(mjcf))
     names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i)
              for i in range(model.njnt) if model.jnt_qposadr[i] >= 7]
@@ -184,7 +189,12 @@ def main():
                     draw.text((left+18, header+height+7), f'根位置误差 {root_error*100:.2f} cm    关节RMSE {q_error:.4f} rad', font=font, fill='white')
                     draw.text((left+18, header+height+39), f"本帧Tracking {row['raw_track'][index]:.5f}    已执行 {(index+1)/50:.2f} s", font=font, fill='#bdcadd')
                     full_root = np.sqrt(np.mean(row['raw_error_root_pos']))
-                    draw.text((left+18, header+height+71), f'执行段根RMSE {full_root*100:.2f} cm    {meta["end_reason"]}', font=small, fill=ink[column])
+                    reason = {'music_end': '完整结束', 'constraint_failure': '参考约束失败',
+                              'physical_failure': '物理失败', 'administrative_truncation': '评估截断'}[meta['end_reason']]
+                    failed = meta['end_reason'] in ('constraint_failure', 'physical_failure')
+                    draw.text((left+18, header+height+71),
+                        f'执行段根RMSE {full_root*100:.2f} cm | {len(row["tick"])/50:.2f}s {reason}',
+                        font=small, fill='#ff8a88' if failed else ink[column])
                     mx, my = left+width-190, header+height-175
                     draw.rectangle((mx, my, mx+176, my+161), fill='#152334', outline='#6d839b')
                     draw.text((mx+8, my+5), '世界位置 / 同一比例', font=small, fill='white')
@@ -197,7 +207,9 @@ def main():
                         x, y = points[-1]
                         draw.ellipse((x-3, y-3, x+3, y+3), fill=color)
                 else:
-                    draw.text((left+40, header+height//2), f'执行已结束：{meta["end_reason"]}', font=title_font, fill=ink[column])
+                    reason = {'music_end': '音乐结束', 'constraint_failure': '参考约束失败',
+                              'physical_failure': '物理失败', 'administrative_truncation': '评估截断'}[meta['end_reason']]
+                    draw.text((left+40, header+height//2), f'执行已结束：{reason}', font=title_font, fill=ink[column])
                     draw.text((left+40, header+height//2+42), f'实际执行 {len(row["tick"])/50:.2f} 秒，结束后不补姿态', font=font, fill='white')
                 draw.line((left, 101, left, size[1]), fill='#58718b', width=2)
             if index == snapshot:
@@ -223,7 +235,7 @@ def main():
         renderer.close()
     manifest = dict(task=first['task'], labels=args.labels, frames=frames, fps=50, duration_seconds=frames/50,
         panel_actual_seconds=[len(row['tick'])/50 for row in arrays], snapshot_seconds=(snapshot+1)/50,
-        snapshot_selection='one_second_smoothed_absolute_root_error_difference_peak',
+        snapshot_selection=snapshot_rule,
         camera=dict(min_distance=2.1, azimuth=135, elevation=-17,
                     shared_center_and_distance_cover_both_actual_and_reference=True),
         scope='kinematic_render_of_actual_Newton_physics_and_committed_reference_no_new_dynamics',
