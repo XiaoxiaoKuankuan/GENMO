@@ -135,11 +135,13 @@ def main():
         raise ValueError('每组必须仅可见一张GPU；禁止DDP/跨GPU通信')
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
+    revision = subprocess.run(['git', '-C', str(Path(__file__).resolve().parents[3]), 'rev-parse', 'HEAD'],
+                              capture_output=True, text=True, check=False)
     state = dict(pid=os.getpid(), gpu=os.environ.get('CUDA_VISIBLE_DEVICES'), phase='initializing',
         accepted_updates=0, adapter_optimizer_updates=0, wm_updates=0, critic_optimizer_updates=0,
         iterations=0, real_transitions=0, num_envs=vector['num_envs'], started_unix=time.time(),
         horizon=cfg['bptt_steps'], critic_enabled=settings['critic_enabled'], method=settings['method'],
-        source=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), formal=True)
+        source=revision.stdout.strip() if revision.returncode == 0 else 'unversioned_source_snapshot', formal=True)
     runtime_source = state['source']  # 恢复旧实验后仍记录这次实际执行源码，而非覆盖历史身份。
     json_write(output/'manifest.json', dict(config=cfg, command=[sys.executable, *sys.argv], state=state.copy(),
         initialization='full_resume_same_experiment' if args.resume else 'zero_Adapter_original_pretrained_WM_no_old_policy', communication='none',
@@ -302,8 +304,7 @@ def main():
     try:
         publish('loading_frozen_assets')
         seed_all(train['seed']); torch.set_num_threads(1)
-        # SM原式没有本项目的SO(3)投影。全局TF32会让旋转小差分的加速度失真，
-        # 并破坏QP精化；原FP32数学/投影阈值不变，不能以增大容差掩盖误差。
+        # 延续原FP32数值口径，保留旋转差分与跟踪度量精度；这里没有导数投影。
         torch.backends.cuda.matmul.allow_tf32 = False
         engine = build_engine(cfg, 'cuda:0')
         enable_wm_normalization(engine.dynamics)
