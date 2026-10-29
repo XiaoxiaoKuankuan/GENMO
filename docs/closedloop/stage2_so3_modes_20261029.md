@@ -247,3 +247,16 @@ seed43从同样零初始化独立复现。不能把预热、队列、WM更新称
 逐GPU完整环境变量/命令/配置在`ROOT/launch_manifest.json`，初始身份在`initial_identity_verification.json`，首更在`launch_verification.json`，保存读回在`checkpoint_verification.json`，本次同预算结果与实时快照在`delivery_snapshot.json`。
 
 新尺度/独立正则下GPU H32/1024最终检查：strict32.62秒、relaxed25.07秒，均1024有效/0拒样。完整CPU139通过；本地/tmp/pytest-of-weili/pytest-4、5、6均逐路径核验无打开文件后清理，约2.37GB测试产物已删除，正式模型/日志及用户要求的物理/性能证据保留。
+
+
+## 交付时进度补记（2026-10-29 12:41:44）
+
+最终r2的实际Adapter更新为50/54/200/200/50/59/136/194；GPU3完成200更新并正常退出，
+GPU2已完成200更新、正在最后独立物理评价，其余训练继续。不是启动失败或无故停机，
+CPU选择器仍等待全部组的200更新对照，再按既定validation条件决定扩展。
+
+GPU2（H16 smooth）/GPU3（H16 no-root）的200更新validation均4/4完成、约束0：
+q误差分别下降10.98%/10.86%，身体姿态下降7.10%/7.19%，根RMSE下降11.61%/10.36%，
+Tracking提高1.14%/1.17%；jerk增加3.55%/2.89%，脚滑下降2.60%/3.20%。这些较长预算
+结果不与仍在50更新的strict/relaxed直接排名，也不取代最终两时域完整矩阵与seed43复现。
+实际身份/进度及当前指针保存在ROOT/handoff_status.json，本地交付镜像同名文件可直接读取。
