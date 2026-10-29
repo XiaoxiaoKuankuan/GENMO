@@ -17,7 +17,7 @@ def update_report(root):
     root = Path(root)
     result = dict(captured_unix=time.time(), source='completed_real_physics_reports_not_imagined_reward', runs=[])
     keys = ['completion_rate', 'mean_tracking', 'mean_joint_q_rmse_rad', 'mean_joint_qd_rmse_rad_s',
-            'mean_body_orientation_rmse_rad', 'mean_root_position_rmse_m', 'mean_jerk_rms',
+            'mean_body_orientation_rmse_rad', 'mean_root_position_rmse_m', 'mean_root_xy_rmse_m', 'mean_jerk_rms',
             'mean_contact_foot_slip_mps', 'mean_beat_f1']
     for gpu in range(8):
         directory = root/f'gpu{gpu}'
@@ -49,9 +49,10 @@ def update_report(root):
             if not baseline.exists():
                 continue
             zero = json.loads(baseline.read_text())
-            changes = {key: 100*(report[key]/zero[key]-1) if zero.get(key) else None for key in keys}
+            changes = {key: 100*(report[key]/zero[key]-1)
+                       if zero.get(key) and report.get(key) is not None else None for key in keys}
             info = dict(path=str(path), adapter_updates=report['adapter_updates'], scope=scope,
-                metrics={key: report[key] for key in keys}, change_percent_vs_own_zero=changes,
+                metrics={key: report.get(key) for key in keys}, change_percent_vs_own_zero=changes,
                 actual_physics_envs=count, constraint_failures=report['constraint_failure_count'])
             row['latest_full_song' if report['full_song_evaluation'] else 'latest_prefix'] = info
         result['runs'].append(row)

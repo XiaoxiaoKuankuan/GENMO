@@ -2,9 +2,10 @@
 
 只读既有checkpoint中的零Adapter真实采集起点，按64首train歌曲等量抽样，
 所有组使用原始预训练WM/零Adapter；不加载旧退化策略，不拟合validation/evaluation。
-根XY权重按零策略下参数梯度相对原SM六项Tracking的10%/30%标定。连续性在零
+根XY权重取H32/H64相对SM六项Tracking的10%～30%区间交集，两档权重跨时域相同。连续性在零
 残差处理论梯度为零，因此使用预先声明的微小非零网络偏置探针，六项各自平衡后
-将合计梯度定为Tracking的5%/15%。探针仅用于标定，完成即恢复零Adapter。
+将H32合计梯度定为Tracking的5%/15%，H64沿用同一权重以免混淆时域因素。
+探针仅用于标定，完成即恢复零Adapter。
 物理量纲标尺取训练名义运动P75和数值下限，记录抽样身份、固定探针和完整梯度。
 这些只是目标尺度校准，不能证明WM方向或长期物理改善。八组配置固定为
 H32/H64 × 根辅助弱/强 × 连续性弱/强，Critic全部关闭，10000更新，不因评价退化退出。
@@ -119,7 +120,21 @@ def main():
             probe_bias=probe.tolist())
         del probe_grads, combined
         control.adapter.load_state_dict(initial_adapter)
-        for i, root_ratio in enumerate((.1, .3)):
+        (out/'calibration.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False))
+        print(json.dumps(dict(horizon=h, root_unit_ratio=root_base, scales=scales, zero=zero_report,
+                             nonzero=probe_report), ensure_ascii=False), flush=True)
+    # 跨时域使用相同损失，保证H32/H64对比只改变展开长度；不读任何评价数据。
+    root_low = max(.1*v['root_unit_ratio'] for v in metadata['horizons'].values())
+    root_high = min(.3*v['root_unit_ratio'] for v in metadata['horizons'].values())
+    if root_low > root_high:
+        raise ValueError('两个时域没有共同的10%～30%梯度权重区间，不能伪称公平矩阵已标定')
+    metadata['shared_root_weights'] = [root_low, root_high]
+    metadata['shared_soft_unit_weights'] = metadata['horizons']['32']['soft_unit_weights']
+    metadata['root_gradient_ratios_by_horizon'] = {h: [v['zero']['parameter_gradient_norms']['root_non_saturating']*w/
+        v['zero']['parameter_gradient_norms']['sm_tracking'] for w in (root_low, root_high)]
+        for h,v in metadata['horizons'].items()}
+    for h in (32,64):
+        for i, root_weight in enumerate((root_low, root_high)):
             for j, soft_ratio in enumerate((.05, .15)):
                 gpu = (0 if h == 32 else 4)+i*2+j
                 new = copy.deepcopy(cfg)
@@ -127,21 +142,19 @@ def main():
                 a.update(critic_enabled=False, root_xy=False, root_orientation=True, action_noise=0., exploration_fraction=0.,
                     objective_version='sm_music_absolute_xy_goal_continuity_v9',
                     stage_budget='10000_Adam_updates_metrics_never_stop_training',
-                    experiment_label=f'H{h}_rootgrad{root_ratio:g}_softgrad{soft_ratio:g}_seed42',
+                    experiment_label=f'H{h}_root_{"low" if i==0 else "high"}_soft_{"low" if j==0 else "high"}_seed42',
                     objective_gradient_every=100, objective_gradient_samples=32,
                     gradient_calibration=str(out/'calibration.json'),
                     evaluation_updates=[0,10,20,50,100,200,500]+list(range(1000,10001,1000)))
-                a['precision'] = dict(weight=precision_weight, root_xy_scale=.2, root_xy_weight=root_ratio*root_base,
-                    soft_reference_weights={name.removeprefix('reference_soft_'): soft_ratio*equal[name]*soft_base for name in names},
+                a['precision'] = dict(weight=precision_weight, root_xy_scale=.2, root_xy_weight=root_weight,
+                    soft_reference_weights={name: soft_ratio*value for name,value in metadata['shared_soft_unit_weights'].items()},
                     soft_reference_scales=scales)
                 t.update(seed=42, adapter_lr=1e-5, wm_lr=3e-5, actor_batch=1024, backward_microbatch=256,
                          wm_batch=2048, wm_fit_window=8, wm_updates_per_iteration=10)
                 v.update(num_envs=2048, target_accepted_updates=10000, checkpoint_every=200, sampling_seed=42)
                 new['bptt_steps'] = h
                 (out/'configs'/f'gpu{gpu}.yaml').write_text('# 训练集梯度标定的独立根XY/软连续性对照；不恢复硬投影，不按评价退化停止。\n'+yaml.safe_dump(new, allow_unicode=True, sort_keys=False))
-        (out/'calibration.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False))
-        print(json.dumps(dict(horizon=h, root_unit_ratio=root_base, scales=scales, zero=zero_report,
-                             nonzero=probe_report), ensure_ascii=False), flush=True)
+    (out/'calibration.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False))
     control.bundle.assert_unchanged(frozen)
     print('八组标定完成；Adapter恢复零初始化，未执行优化器更新或物理验收。', flush=True)
 

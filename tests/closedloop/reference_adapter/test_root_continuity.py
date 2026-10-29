@@ -6,6 +6,7 @@
 """
 
 from types import SimpleNamespace
+from pathlib import Path
 import torch
 
 from supermimic.rotations import so3_exp
@@ -15,6 +16,23 @@ from gem.closedloop.reference_adapter.precision import (
 from gem.closedloop.reference_adapter.objective_diagnostics import reward_gradients
 from gem.closedloop.reference_adapter.vector_control import detach_state
 from test_direct_reference import direct_system
+
+
+def test_formal_eight_configs_isolate_horizon_root_and_continuity():
+    import yaml
+    root=Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_absolute_root_20261029'
+    configs=[direct_reference_config(yaml.safe_load((root/f'gpu{i}.yaml').read_text())) for i in range(8)]
+    for i,c in enumerate(configs):
+        assert c['vector']['target_accepted_updates']==10000 and c['vector']['num_envs']==2048
+        assert c['alternating']['critic_enabled'] is False and c['alternating']['root_xy'] is False
+        assert c['bptt_steps']==(32 if i<4 else 64)
+        assert c['training']['wm_fit_window']==8
+        assert c['sm_mdp']['root_pos_weight']==1.2 and c['sm_mdp']['root_ori_weight']==1.
+        assert c['alternating']['precision']==configs[i%4]['alternating']['precision']
+    p=[c['alternating']['precision'] for c in configs]
+    assert p[0]['root_xy_weight']==p[1]['root_xy_weight']<p[2]['root_xy_weight']==p[3]['root_xy_weight']
+    assert p[0]['soft_reference_weights']==p[2]['soft_reference_weights']
+    assert all(abs(p[1]['soft_reference_weights'][k]/v-3)<1e-10 for k,v in p[0]['soft_reference_weights'].items())
 
 
 def test_root_heading_huber_far_gradient_and_z_independence():
