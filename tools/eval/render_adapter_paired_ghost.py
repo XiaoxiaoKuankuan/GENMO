@@ -3,7 +3,7 @@
 输入是同一次整歌配对评价导出的两个JSON/NPZ：左侧零Adapter，右侧已训练Adapter。
 每侧实色机器人使用真实Newton物理执行qpos，蓝色半透明机器人使用同一控制步下发的
 参考第一帧；原始GENMO名义目标仍用于误差和世界坐标轨迹图。两侧保持同一音乐时间、
-相同相机以及共同名义目标的镜头中心，不单独跟随实际机器人而掩盖位置漂移。
+相同相机，镜头共同容纳名义目标及两侧真实位置，不单独跟随各自机器人而掩盖漂移。
 只通过mj_forward重建渲染几何，不推进MuJoCo动力学，不修改/平滑/插值轨迹。真实执行
 提前结束的面板显示终止信息，不补机器人姿态；视频保留原音乐，图片选择配对根误差
 差异的一秒滑动平均峰值，并写明选择时刻。文件SHA、关节名称、初态、物理参数、音频
@@ -107,11 +107,15 @@ def main():
     size = (2*width, header+height+footer)
     model.vis.global_.offwidth = max(width, model.vis.global_.offwidth)
     model.vis.global_.offheight = max(height, model.vis.global_.offheight)
+    model.vis.headlight.active = 1
+    model.vis.headlight.ambient[:] = [.45, .45, .45]
+    model.vis.headlight.diffuse[:] = [.8, .8, .8]
+    model.vis.headlight.specular[:] = [.2, .2, .2]
     renderer = mujoco.Renderer(model, height=height, width=width, max_geom=10000)
     actual, ghost = mujoco.MjData(model), mujoco.MjData(model)
     camera = mujoco.MjvCamera()
     mujoco.mjv_defaultFreeCamera(model, camera)
-    camera.distance, camera.azimuth, camera.elevation = 2.8, 135, -17
+    camera.distance, camera.azimuth, camera.elevation = 2.1, 135, -17
     option, perturb = mujoco.MjvOption(), mujoco.MjvPerturb()
     title_font = ImageFont.truetype(str(args.font), 25)
     font = ImageFont.truetype(str(args.font), 20)
@@ -137,8 +141,13 @@ def main():
             draw.text((20, 41), '实色：真实仿真执行   蓝色影子：该方法下发参考   两侧同一音乐时刻、同一镜头', font=font, fill='#bdcadd')
             draw.text((20, 71), f'Newton真实轨迹回放 · 50 Hz · 音乐 {(index+1)/50:.2f} s · 原始名义目标用于计算误差', font=small, fill='#97acc3')
             available = next(row for row in arrays if index < len(row['tick']))
-            center = available['nominal_qpos'][index, :3]
-            camera.lookat[:] = [center[0], center[1], .67]
+            positions = [available['nominal_qpos'][index, :2]]
+            positions.extend(row[key][index, :2] for row in arrays if index < len(row['tick'])
+                             for key in ('qpos', 'corrected_qpos'))
+            positions = np.asarray(positions)
+            center = (positions.min(0)+positions.max(0))/2
+            camera.lookat[:] = [center[0], center[1], .59]
+            camera.distance = 2.1+1.8*float(np.linalg.norm(positions-center, axis=-1).max())
             for column, (row, meta) in enumerate(zip(arrays, metadata)):
                 left = column*width
                 draw.text((left+20, 107), args.labels[column], font=title_font, fill=ink[column])
@@ -175,10 +184,11 @@ def main():
                     draw.text((left+18, header+height+7), f'根位置误差 {root_error*100:.2f} cm    关节RMSE {q_error:.4f} rad', font=font, fill='white')
                     draw.text((left+18, header+height+39), f"本帧Tracking {row['raw_track'][index]:.5f}    已执行 {(index+1)/50:.2f} s", font=font, fill='#bdcadd')
                     full_root = np.sqrt(np.mean(row['raw_error_root_pos']))
-                    draw.text((left+18, header+height+71), f'整段根RMSE {full_root*100:.2f} cm    {meta["end_reason"]}', font=small, fill=ink[column])
+                    draw.text((left+18, header+height+71), f'执行段根RMSE {full_root*100:.2f} cm    {meta["end_reason"]}', font=small, fill=ink[column])
                     mx, my = left+width-190, header+height-175
                     draw.rectangle((mx, my, mx+176, my+161), fill='#152334', outline='#6d839b')
                     draw.text((mx+8, my+5), '世界位置 / 同一比例', font=small, fill='white')
+                    draw.text((mx+8, my+27), '蓝：名义  彩：实际', font=small, fill='#bdcadd')
                     for key, color in [('nominal_qpos', '#4ba9ef'), ('qpos', ink[column])]:
                         xy = (row[key][:index+1, :2]-map_mid)/map_span
                         points = [(mx+88+float(p[0])*144, my+94-float(p[1])*112) for p in xy]
@@ -214,7 +224,8 @@ def main():
     manifest = dict(task=first['task'], labels=args.labels, frames=frames, fps=50, duration_seconds=frames/50,
         panel_actual_seconds=[len(row['tick'])/50 for row in arrays], snapshot_seconds=(snapshot+1)/50,
         snapshot_selection='one_second_smoothed_absolute_root_error_difference_peak',
-        camera=dict(distance=2.8, azimuth=135, elevation=-17, shared_nominal_center=True),
+        camera=dict(min_distance=2.1, azimuth=135, elevation=-17,
+                    shared_center_and_distance_cover_both_actual_and_reference=True),
         scope='kinematic_render_of_actual_Newton_physics_and_committed_reference_no_new_dynamics',
         video_sha256=sha(output), image_sha256=sha(output.with_suffix('.png')),
         trajectory_metadata=[dict(path=str(p), metadata_sha256=sha(p), npz_sha256=m['sha256'])

@@ -20,7 +20,10 @@ METRICS = {
     'joint_q_rmse_rad': -1, 'joint_qd_rmse_rad_s': -1, 'body_orientation_rmse_rad': -1,
     'jerk_rms': -1, 'contact_foot_slip_mps': -1, 'total_return': 1, 'discounted_return': 1,
     'mean_abs_joint_speed': 0, 'joint_range_mean': 0,
+    'beat_f1': 1,
 }
+METRICS.update({'tracking_'+key: 1 for key in
+                ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori')})
 
 
 def main():
@@ -60,7 +63,9 @@ def main():
             task = tasks[task_id]
             metrics = {}
             for key, direction in METRICS.items():
-                values = [episode[key] for episode in episodes]
+                values = [(episode['music'].get('f1') if key == 'beat_f1' else
+                           episode['sm_terms'].get(key.removeprefix('tracking_')) if key.startswith('tracking_')
+                           else episode[key]) for episode in episodes]
                 if any(v is None for v in values):
                     continue
                 baseline, adapter = float(np.mean(values[:2])), float(np.mean(values[2:]))
@@ -89,7 +94,7 @@ def main():
                 continue
             baseline = float(np.mean([v['baseline'] for v in values]))
             adapter = float(np.mean([v['adapter'] for v in values]))
-            summary['metrics'][key] = dict(baseline=baseline, adapter=adapter, delta=adapter-baseline,
+            summary['metrics'][key] = dict(valid_songs=len(values), baseline=baseline, adapter=adapter, delta=adapter-baseline,
                 change_percent=100*(adapter/baseline-1) if baseline else None,
                 improved_songs=sum(v['delta']*direction > 0 for v in values) if direction else None,
                 regressed_songs=sum(v['delta']*direction < 0 for v in values) if direction else None,
