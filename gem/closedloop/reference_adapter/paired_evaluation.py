@@ -51,7 +51,7 @@ def _feasible_evaluation_proposal(control, full_state, ids, *, zero):
 
 
 @torch.no_grad()
-def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None):
+def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None, trajectory_dir=None):
     control, bank = collector.control, collector.bank
     selected = bank.by_split[split]
     count = len(selected)
@@ -64,6 +64,7 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None)
     active = torch.ones(count, dtype=torch.bool, device=bank.device)
     reasons = ['']*count
     states, lives, records, weighted, contacts = [], [], [], [], []
+    reference_frames, action_frames = [], []
     constraint_failures = []
     prior_diagnostics = control.detailed_reference
     control.detailed_reference = False
@@ -90,6 +91,15 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None)
                 raise FloatingPointError('真实评价状态非有限')
             end, reward, raw, terms, _, done, failed = control.advance(z, proposal, nxt[ids])
             target = bank.ref(z['song'], z['frame']+1)
+            if trajectory_dir is not None:
+                from supermimic.rotations import mat_to_quat
+                corrected = proposal['future']
+                poses = torch.cat((corrected.root_p[:, 0], mat_to_quat(corrected.root_R[:, 0]),
+                                   corrected.q[:, 0]), -1)
+                frame = initial.new_zeros(count, 28)
+                frame[ids] = poses
+                reference_frames.append(frame)
+                action_frames.append(action[:count].clone())
             raw['joint_q_mse'] = (nxt[ids, 13:34]-target.q).square().mean(-1)
             raw['joint_qd_mse'] = (nxt[ids, 34:]-target.qd).square().mean(-1)
             raw['total_objective'] = reward
@@ -128,6 +138,10 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None)
     raw_all = {k: torch.stack([r[k] for r in records]) for k in records[0]} if records else {}
     term_all = {k: torch.stack([r[k] for r in weighted]) for k in weighted[0]} if weighted else {}
     contact_all = torch.stack(contacts) if contacts else active.new_empty(0, count, 2)
+    if trajectory_dir is not None:
+        from .trajectory_export import export_trajectories
+        export_trajectories(trajectory_dir, collector, selected, initial, initial_xi, state_all, live,
+                            reference_frames, action_frames, raw_all, reasons, zero=zero)
     episodes = []
     for i, song in enumerate(selected.tolist()):
         n = int(live[:, i].sum())

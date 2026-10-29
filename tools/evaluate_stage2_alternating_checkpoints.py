@@ -1,9 +1,10 @@
-"""2026-10-28失败checkpoint的独立真实配对评价入口；不训练、不更新归一化。
+"""已有checkpoint的独立真实配对评价入口；不训练、不更新归一化。
 
 读取指定完整checkpoint的Adapter和原奖励/投影配置，使用相同真实歌曲初态及
 无探索噪声依次评价零Adapter、重复零Adapter、已有Adapter。采用原冻结Actor及
 实际Newton物理，保存分歌曲误差、接触脚滑、完整率、初态身份和重复性噪声。
 所有输出必须使用新目录，旧模型/Replay/日志只读；参考失败按episode单独记录。
+可按原清单顺序取互斥分片，完整覆盖训练样本；可导出同次执行轨迹与实际参考影子。
 """
 
 from pathlib import Path
@@ -24,6 +25,10 @@ def main():
     parser.add_argument('--splits',nargs='+',default=['validation','evaluation'])
     parser.add_argument('--max-steps',type=int)
     parser.add_argument('--no-repeat',action='store_true')
+    parser.add_argument('--shard-index',type=int,default=0)
+    parser.add_argument('--num-shards',type=int,default=1)
+    parser.add_argument('--save-trajectories',action='store_true')
+    parser.add_argument('--repeat-adapter',action='store_true')
     pre,_=parser.parse_known_args()
     import yaml
     config=yaml.safe_load(Path(pre.config).read_text())
@@ -46,17 +51,22 @@ def main():
     saved=torch.load(args.checkpoint,map_location='cpu',weights_only=False,mmap=True)
     cfg=saved['config'];cfg['supermimic']['repo']=config['supermimic']['repo'];cfg['observation_noise']=False
     engine=build_engine(cfg,'cuda:0');engine.step.adapter.load_state_dict(saved['adapter'])
+    if not 0 <= args.shard_index < args.num_shards:
+        raise ValueError('分片编号必须位于[0, num_shards)')
     tasks=[t for t in read_tasks(cfg['tasks']) if t['split'] in args.splits]
+    tasks=[t for i,t in enumerate(tasks) if i % args.num_shards == args.shard_index]
     bank=VectorBank(tasks,engine,'cuda:0');control=VectorControl(engine,bank)
     settings=cfg['alternating'];control.adapter.disable_root_xy=True
     control.disable_root_orientation=not settings.get('root_orientation',True)
     control.projection=ReferenceProjection(control.bundle.spec,control.adapter.bounds,**settings['projection']).cuda()
+    control.projection.compile_derivatives=settings.get('compile_so3_derivatives',True)
     calibration=json.loads(Path(settings['calibration']).read_text())
     control.precision=PrecisionObjective(calibration['scales'],**settings['precision'])
     control.soft_joint_limit_cost=False;control.sm_soft_termination_only=True
     actor_snapshot=control.bundle.frozen_snapshot()
     manifest=dict(checkpoint=args.checkpoint,checkpoint_updates=saved['state']['accepted_updates'],config=cfg,
         command=sys.argv,started_unix=time.time(),optimizer_steps=0,
+        shard_index=args.shard_index,num_shards=args.num_shards,task_ids=[t['id'] for t in tasks],
         adapter_sha256=tensor_digest(torch.cat([x.flatten() for x in saved['adapter'].values()])))
     (output/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
     del saved
@@ -68,15 +78,21 @@ def main():
         for split in args.splits:
             reports={}
             modes=[('zero',True),('repeat',True),('adapter',False)] if not args.no_repeat else [('zero',True),('adapter',False)]
+            if args.repeat_adapter:modes.append(('adapter_repeat',False))
             for name,zero in modes:
                 seed_all(42);collector.generator.manual_seed(42)
-                report=evaluate_fixed(collector,zero=zero,split=split,max_steps=args.max_steps)
+                trajectory_dir=(output/f'{split}_{name}_trajectories'
+                    if args.save_trajectories and name in ('zero','adapter') else None)
+                report=evaluate_fixed(collector,zero=zero,split=split,max_steps=args.max_steps,
+                                      trajectory_dir=trajectory_dir)
                 reports[name]=report
                 (output/f'{split}_{name}.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
                 print(json.dumps(dict(split=split,mode=name,tracking=report['mean_full_horizon_tracking'],
                     completion=report['completion_rate'],constraint_failures=report['constraint_failure_count']),ensure_ascii=False),flush=True)
             comparison=paired_comparison(reports['zero'],reports['adapter'])
             if 'repeat' in reports:comparison['repeat_noise']=paired_comparison(reports['zero'],reports['repeat'])
+            if 'adapter_repeat' in reports:
+                comparison['adapter_repeat_noise']=paired_comparison(reports['adapter'],reports['adapter_repeat'])
             (output/f'{split}_paired.json').write_text(json.dumps(comparison,ensure_ascii=False,indent=2))
         control.bundle.assert_unchanged(actor_snapshot)
         (output/'completed.json').write_text(json.dumps(dict(ended_unix=time.time(),real_transitions=collector.real_transitions,
