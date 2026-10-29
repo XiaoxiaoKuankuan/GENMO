@@ -75,12 +75,29 @@ def main():
                     favorable_direction=direction)
             completion = [float(episode['full_music_complete']) for episode in episodes]
             stem = f'{column:03d}_{task_id}.json'
+            prefix_steps = min(episodes[0]['steps'], episodes[2]['steps'])
+            prefix = dict(steps=prefix_steps, seconds=prefix_steps*.02, metrics={})
+            # 失败前缀不能与基线整段直接混成等长误差；两侧首遍轨迹取相同真实时段。
+            raw_keys = {'root_position_rmse_m': 'error_root_pos', 'joint_q_rmse_rad': 'joint_q_mse',
+                        'joint_qd_rmse_rad_s': 'joint_qd_mse', 'body_orientation_rmse_rad': 'error_body_ori'}
+            if prefix_steps:
+                for mode, label in (('zero', 'baseline'), ('adapter', 'adapter')):
+                    npz = directory/f'train_{mode}_trajectories'/stem.replace('.json', '.npz')
+                    with np.load(npz) as data:
+                        for key, raw_key in raw_keys.items():
+                            prefix['metrics'].setdefault(key, {})[label] = float(
+                                np.sqrt(np.mean(data['raw_'+raw_key][:prefix_steps], dtype=np.float64)))
+                        prefix['metrics'].setdefault('tracking_per_executed_step', {})[label] = float(
+                            np.mean(data['raw_track'][:prefix_steps], dtype=np.float64))
+                for values in prefix['metrics'].values():
+                    values['delta'] = values['adapter']-values['baseline']
             rows.append(dict(task=task_id, song_id=task['song_id'], source=task['source'],
                 audio_sha256=task['audio_sha256'], planned_seconds=episodes[0]['planned_steps']*.02,
                 baseline_completion=float(np.mean(completion[:2])), adapter_completion=float(np.mean(completion[2:])),
                 reasons=[episode['reason'] for episode in episodes], metrics=metrics,
                 baseline_trajectory=str(directory/'train_zero_trajectories'/stem),
                 adapter_trajectory=str(directory/'train_adapter_trajectories'/stem),
+                first_run_common_prefix=prefix,
                 first_run_baseline=episodes[0], first_run_adapter=episodes[2]))
     if seen != set(tasks) or len(models) != 1:
         raise ValueError('训练清单覆盖不完整或分片模型不同')
@@ -118,6 +135,13 @@ def main():
         selection_rule='absolute_completion_difference_then_absolute_full_horizon_tracking_difference_then_absolute_root_RMSE_difference_unique_audio',
         selection_boundary='three_largest_differences_are_selected_examples_not_an_unbiased_average',
         selected=selected, episodes=rows)
+    summary['first_run_common_prefix'] = {}
+    prefix_rows = [r['first_run_common_prefix']['metrics'] for r in rows if r['first_run_common_prefix']['steps']]
+    for key in prefix_rows[0] if prefix_rows else ():
+        baseline = float(np.mean([r[key]['baseline'] for r in prefix_rows]))
+        adapter = float(np.mean([r[key]['adapter'] for r in prefix_rows]))
+        summary['first_run_common_prefix'][key] = dict(songs=len(prefix_rows), baseline=baseline, adapter=adapter,
+            change_percent=100*(adapter/baseline-1) if baseline else None)
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output/'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False))
     (args.output/'selected.json').write_text(json.dumps(selected, ensure_ascii=False, indent=2, allow_nan=False))
