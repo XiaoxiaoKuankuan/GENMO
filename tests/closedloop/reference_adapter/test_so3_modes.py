@@ -73,7 +73,7 @@ def test_mode_budgets_cannot_silently_change():
                             root_orientation_mode='strict_so3',rotation_acceleration=6.)
 
 
-def test_quality_stop_requires_consecutive_full_validation():
+def test_validation_degradation_only_reports_and_never_stops():
     from gem.closedloop.reference_adapter.alternating_entry import validation_degradation
     rules=dict(root_rmse_relative_increase=.25,jerk_relative_increase=.20,
         tracking_relative_drop=.02,completion_absolute_drop=.25,consecutive_full_evaluations=2)
@@ -83,9 +83,17 @@ def test_quality_stop_requires_consecutive_full_validation():
     first=validation_degradation(None,zero,bad,rules)
     assert first['consecutive']==1 and not first['stop']
     second=validation_degradation(first,zero,bad,rules)
-    assert second['stop']
+    assert second['sustained_degradation'] and not second['stop']
+    assert second['action']=='report_only'
+    current=second
+    for _ in range(20):
+        current=validation_degradation(current,zero,bad,rules)
+    assert current['consecutive']==22 and not current['stop']
     assert not validation_degradation(first,zero,zero,rules)['stop']
     assert validation_degradation(first,zero,dict(bad,max_steps=256),rules)==first
+    legacy=dict(second,stop=True)
+    assert not validation_degradation(legacy,zero,bad,None)['stop']
+    assert not validation_degradation(legacy,zero,dict(bad,max_steps=256),rules)['stop']
 
 
 def test_relaxed_true_stationarity_uses_correct_nonnegative_dual_faces():

@@ -74,9 +74,9 @@ def checkpoint_keep_paths(extra):
 
 
 def validation_degradation(previous, zero, current, rules):
-    """仅整歌validation连续明显退化才停止本组；不逐候选回滚，也不读取evaluation。"""
+    """退化只作日志诊断，绝不提前退出；旧quality_stop配置仅提供报告阈值。"""
     if not rules or current.get('max_steps') is not None:
-        return previous or dict(consecutive=0, stop=False)
+        return dict(previous or dict(consecutive=0), stop=False, action='report_only')
     reasons = []
     for metric, limit in (('mean_root_position_rmse_m', rules['root_rmse_relative_increase']),
                           ('mean_jerk_rms', rules['jerk_relative_increase'])):
@@ -87,7 +87,8 @@ def validation_degradation(previous, zero, current, rules):
     if current['completion_rate'] < zero['completion_rate']-rules['completion_absolute_drop']+1e-12:
         reasons.append('completion_rate')
     consecutive = (previous or {}).get('consecutive', 0)+1 if reasons else 0
-    return dict(consecutive=consecutive, reasons=reasons, stop=consecutive >= rules['consecutive_full_evaluations'],
+    return dict(consecutive=consecutive, reasons=reasons, stop=False, action='report_only',
+                sustained_degradation=consecutive >= rules['consecutive_full_evaluations'],
                 selection_split='validation_only', rules=rules)
 
 
@@ -147,6 +148,7 @@ def main():
     json_write(output/'manifest.json', dict(config=cfg, command=[sys.executable, *sys.argv], state=state.copy(),
         initialization='full_resume_same_experiment' if args.resume else 'zero_Adapter_original_pretrained_WM_no_old_policy', communication='none',
         acceptance='finite_Adam_step_not_a_physical_improvement_certificate',
+        validation_policy='report_and_select_best_only_never_early_stop',
         critic_status=('enabled_bounded_GAE_real_TD_not_MC_calibrated' if settings['critic_enabled'] else 'disabled'),
         full_checkpoint_retention='initial_zero_latest_two_and_validation_best_all_numbered_weights_kept'))
     (output/'pid').write_text(str(os.getpid())+'\n')
@@ -490,12 +492,7 @@ def main():
                             critic=critic.state_dict(), config=cfg, state=state.copy(), continuation='weights_only'),
                             output/f'weights_{update:06d}_{time.time_ns()}.pt')
                     checkpoint('warmup' if warmup else 'periodic')
-                if extra.get('validation_quality', {}).get('stop'):
-                    json_write(output/'quality_stop.json', dict(extra['validation_quality'],
-                        adapter_updates=state['accepted_updates'], timestamp=time.time()))
-                    publish('stopped_sustained_validation_degradation',
-                            stop_reasons=extra['validation_quality']['reasons'])
-                    return 0
+                # 真实评价无论好坏都不退出、回滚或减少预算；旧checkpoint的stop字段也不执行。
                 publish(('WM_and_real_TD_Critic_warmup' if settings['critic_enabled'] else 'WM_only_warmup')
                         if warmup else 'formal_alternating', gpu_process_mib=gpu_usage())
             publish('completed_configured_Adapter_updates', target_updates=vector['target_accepted_updates'])
