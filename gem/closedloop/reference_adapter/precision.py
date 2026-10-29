@@ -4,19 +4,78 @@
 根位移；身体角速度只保留误差诊断，不再增加重复的Huber奖励。身体姿态使用原始
 世界姿态，不沿实际机器人重新锚定yaw。标尺只从训练歌曲零Adapter误差拟合一次；
 删除重复项后其余比例保持原值，不自动放大其它损失。Huber避免指数饱和。
-执行精度之外可显式配置根姿态软成本：相对名义的角速度偏差，以及绝对时刻对齐的
-前后计划姿态差。两项只进入奖励，不改变参考、不截断梯度、不作运行门禁；没有
-角加速度成本或硬预算，也不惩罚偏离基线控制动作。默认关闭以保留旧评价定义。
-世界根位置误差保留作监控，根XY通道关闭时默认不以它驱动优化。所有新项只乘一次dt。
+可显式启用名义heading系绝对根XY Huber，以及相对名义新增的关节/根姿态速度、
+加速度和重叠软成本。导数直接复用Actor Goal的中心差分，包含历史锚点和真实halo。
+这些成本只改变奖励，不改变参考、不截断梯度、不引入硬预算。旧配置默认保持原值；
+新权重由训练数据梯度标定。根位置真值只用于训练目标，不成为可部署观测。
+所有新增奖励只乘一次dt；新六项连续性与旧两项根姿态成本互斥，避免重复惩罚。
 """
 
 import torch
-from supermimic.rotations import so3_exp, so3_log
+from supermimic.rotations import so3_exp, so3_log, yaw_mat
 
 ERROR_NAMES = ('body_orientation', 'joint_position', 'joint_velocity', 'body_angular_velocity', 'root_local_displacement')
 NAMES = ('body_orientation', 'joint_position', 'joint_velocity', 'root_local_displacement')
 RATIOS = (.30, .25, .20, .10)
 FLOORS = (.02, .01, .1, .001)
+REFERENCE_NAMES = ('joint_velocity', 'joint_acceleration', 'root_velocity',
+                   'root_acceleration', 'joint_overlap', 'root_overlap')
+REFERENCE_FLOORS = dict(zip(REFERENCE_NAMES, (.1, 1., .05, .5, .005, .002)))
+
+
+def goal_derivatives(rotation, joints, frames):
+    """Actor Goal唯一的中心差分定义：输入真实名义支持t-1至t+11，输出t至t+10。
+
+    起始帧由调用方钳到实际存在的第0帧，分母使用实际时间跨度，不外推缺失参考。
+    根角速度为世界系SO(3)差分；软成本与Goal构造共享本函数，避免两套速度定义。
+    """
+    span = ((frames[:, 2:]-frames[:, :-2]).to(joints)*.02)[..., None]
+    return ((joints[:, 2:]-joints[:, :-2])/span,
+            so3_log(rotation[:, 2:]@rotation[:, :-2].transpose(-1, -2))/span)
+
+
+def absolute_root_xy(state, nominal, scale=.2):
+    """执行后t+1的真实/WM状态与同一时刻原GENMO参考比较，不读修正参考。
+
+    只绕名义yaw转入heading坐标系；该训练特权误差不加入Adapter或Actor观测。
+    Huber在归一化误差超过1后具有常数斜率，避免指数Tracking的大误差饱和。
+    """
+    world = state[:, :3]-nominal.root_p
+    local = (yaw_mat(nominal.root_R).transpose(-1, -2)@world[..., None]).squeeze(-1)
+    xy = local[:, :2]
+    cost = torch.nn.functional.huber_loss(xy/scale, torch.zeros_like(xy), reduction='none').mean(-1)
+    return cost, dict(root_xy_huber=cost, root_xy_squared_m=world[:, :2].square().sum(-1),
+        root_xy_heading_x_m=xy[:, 0], root_xy_heading_y_m=xy[:, 1],
+        root_xy_world_x_m=world[:, 0], root_xy_world_y_m=world[:, 1])
+
+
+def reference_continuity_values(control, z, proposal):
+    """直接读取实际Goal的qdot/w，惩罚相对名义轨迹新增的速度、加速度和计划跳变。
+
+    t时刻速度依赖已提交t-1与新t+1，t+1速度依赖已提交t与新t+2；相邻Goal速度
+    差因此覆盖前两帧接缝。末端t+10速度读取真实名义t+11及2*d10-d9的残差halo，
+    t+9/t+10速度差覆盖halo连接。加速度是这些同一定义速度的差/0.02，不另造速度。
+    新前九帧与旧后九帧对应相同绝对时刻；首次计划没有旧重叠，成本为0。
+    这里只计算可微成本，不修改任何参考或控制动作，不进行QP/SQP求解。
+    """
+    frames = (z['frame'][:, None]+control.bank.offset13).clamp_min(0)
+    rotation, q = proposal.get('nominal_rotation'), proposal.get('nominal_q')
+    if rotation is None or q is None:
+        _, rotation, q = control.bank.pose(z['song'][:, None], frames)
+    qd0, w0 = goal_derivatives(rotation, q, frames)
+    current, future = proposal['current'], proposal['future']
+    qd = torch.cat((current.qd[:, None], future.qd), 1)
+    w = torch.cat((current.root_w[:, None], future.root_w), 1)
+    extra_qd, extra_w = qd-qd0, w-w0
+    # 根旋转重叠使用同绝对时刻的群差；名义旋转相同，可在残差群中精确消去。
+    valid = z['plan_valid'][:, None, None].to(q)
+    r = proposal['residual']
+    overlap_q = (r[:, :9, 6:]-z['plan'][:, 1:, 6:])*valid
+    overlap_R = so3_log(so3_exp(z['plan'][:, 1:, 3:6]).transpose(-1, -2)
+                          @so3_exp(r[:, :9, 3:6]))*valid
+    return dict(joint_velocity=extra_qd, joint_acceleration=extra_qd.diff(dim=1)/.02,
+                root_velocity=extra_w, root_acceleration=extra_w.diff(dim=1)/.02,
+                joint_overlap=overlap_q, root_overlap=overlap_R)
 
 
 def errors(control, z, state, nominal, sm):
@@ -61,11 +120,23 @@ def root_reference_costs(residual, anchor, previous_plan, valid, nominal_rotatio
 
 class PrecisionObjective:
     def __init__(self, scales=None, *, weight=1., root_velocity_weight=0.,
-                 root_continuity_weight=0., root_velocity_scale=.3, root_continuity_scale=.05):
+                 root_continuity_weight=0., root_velocity_scale=.3, root_continuity_scale=.05,
+                 root_xy_weight=0., root_xy_scale=.2, soft_reference_weights=None, soft_reference_scales=None):
         self.scales = dict(zip(NAMES, FLOORS)) if scales is None else {name: scales[name] for name in NAMES}
         self.weight = weight
         self.root_velocity_weight, self.root_continuity_weight = root_velocity_weight, root_continuity_weight
         self.root_velocity_scale, self.root_continuity_scale = root_velocity_scale, root_continuity_scale
+        self.root_xy_weight, self.root_xy_scale = root_xy_weight, root_xy_scale
+        self.soft_reference_weights = dict(soft_reference_weights or {})
+        self.soft_reference_scales = dict(REFERENCE_FLOORS if soft_reference_scales is None else soft_reference_scales)
+        if root_xy_weight < 0 or root_xy_scale <= 0:
+            raise ValueError('绝对根XY权重须非负，物理尺度须为正')
+        if set(self.soft_reference_weights)-set(REFERENCE_NAMES) or any(v < 0 for v in self.soft_reference_weights.values()):
+            raise ValueError('软参考权重只能包含六个明确的非负成本')
+        if set(self.soft_reference_scales) != set(REFERENCE_NAMES) or any(v <= 0 for v in self.soft_reference_scales.values()):
+            raise ValueError('软参考标尺须是训练集固定的六项正数')
+        if any(self.soft_reference_weights.values()) and (root_velocity_weight or root_continuity_weight):
+            raise ValueError('新六项连续性成本已包含根速度和重叠，不能重复叠加旧两项成本')
         if min(root_velocity_weight, root_continuity_weight) < 0 or min(root_velocity_scale, root_continuity_scale) <= 0:
             raise ValueError('根姿态软成本权重须非负、归一化尺度须为正；这些数值不是硬约束')
         if set(self.scales) != set(NAMES) or any(v <= 0 for v in self.scales.values()):
@@ -75,6 +146,12 @@ class PrecisionObjective:
         values = errors(control, z, state, nominal, sm)
         raw = {'absolute_body_angular_velocity': values['body_angular_velocity'].abs().mean(-1)}
         weighted = {}
+        root_cost, root_raw = absolute_root_xy(state, nominal, self.root_xy_scale)
+        raw.update(root_raw)
+        if self.root_xy_weight:
+            # 覆盖旧禁用的三维平方root_non_saturating项；新配置只有这一个根辅助目标。
+            raw['root_non_saturating'] = root_cost
+            weighted['root_non_saturating'] = -.02*self.root_xy_weight*root_cost
         for name, ratio in zip(NAMES, RATIOS):
             error = values[name]/self.scales[name]
             cost = torch.nn.functional.huber_loss(error, torch.zeros_like(error), reduction='none').mean(-1)
@@ -91,6 +168,18 @@ class PrecisionObjective:
             raw.update(costs)
             weighted['root_reference_velocity'] = -.02*self.root_velocity_weight*costs['root_reference_velocity']
             weighted['root_reference_continuity'] = -.02*self.root_continuity_weight*costs['root_reference_continuity']
+        if any(self.soft_reference_weights.values()):
+            features = reference_continuity_values(control, z, proposal)
+            for name, value in features.items():
+                normalized = value/self.soft_reference_scales[name]
+                cost = torch.nn.functional.huber_loss(normalized, torch.zeros_like(normalized), reduction='none').mean((1, 2))
+                key = 'reference_soft_'+name
+                raw[key] = cost
+                raw[key+'_rms'] = value.square().mean((1, 2)).sqrt()
+                weighted[key] = -.02*self.soft_reference_weights.get(name, 0.)*cost
+            for name in ('joint_velocity', 'root_velocity', 'joint_acceleration', 'root_acceleration'):
+                raw['reference_seam_'+name+'_rms'] = features[name][:, :1].square().mean((1, 2)).sqrt()
+                raw['reference_halo_'+name+'_rms'] = features[name][:, -1:].square().mean((1, 2)).sqrt()
         return raw, weighted
 
 

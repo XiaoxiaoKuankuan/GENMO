@@ -245,7 +245,11 @@ def main():
             values.update({'real_'+k: value.mean() for k, value in row['raw'].items()
                 if isinstance(value, torch.Tensor) and value.ndim == 1 and
                 (k in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori',
-                       'action_rate') or k.startswith(('absolute_', 'error_', 'root_reference_')))})
+                       'action_rate', 'root_non_saturating') or k.startswith(('absolute_', 'error_', 'root_reference_',
+                           'root_xy_', 'reference_soft_', 'reference_seam_', 'reference_halo_')))})
+            if 'root_xy_squared_m' in row['raw']:
+                values['real_root_xy_rmse_m'] = row['raw']['root_xy_squared_m'].mean().sqrt()
+            values['real_sm_root_position_reward'] = .02*control.runtime.mdp.cfg.root_pos_weight*row['raw']['root_pos'].mean()
             if 'exploration_std' in row['proposal']:
                 values['executed_noise_rms'] = (row['proposal']['action']-row['proposal']['policy_action']).square().mean().sqrt()
                 values['large_exploration_fraction'] = (row['proposal']['exploration_std'] >= .099).float().mean()
@@ -420,6 +424,18 @@ def main():
                 if not warmup:
                     publish('Adapter_BPTT')
                     starts = replay.starts(train['actor_batch'], horizon=cfg['bptt_steps'], ends=bank.ends)
+                    diagnostic_every = settings.get('objective_gradient_every', 0)
+                    if diagnostic_every and (state['accepted_updates'] == 0 or
+                                             state['accepted_updates'] % diagnostic_every == 0):
+                        from .objective_diagnostics import reward_gradients
+                        from .vector_control import select_state
+                        diagnostic_starts = select_state(starts, slice(0, settings.get('objective_gradient_samples', 32)))
+                        gradient_report, _ = reward_gradients(control, engine.dynamics, critic,
+                            diagnostic_starts, cfg['bptt_steps'], microbatch=32, gamma=train['gamma_per_control'])
+                        gradient_report.update(adapter_updates=state['accepted_updates'], wm_updates=engine.dynamics.model_version)
+                        append_json(output/'objective_gradients.jsonl', gradient_report)
+                        row['objective_gradients'] = gradient_report
+                        del _, diagnostic_starts
                     def completed(metrics):
                         state['accepted_updates'] += 1
                         state['adapter_optimizer_updates'] += 1

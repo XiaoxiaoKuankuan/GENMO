@@ -131,12 +131,13 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
         with scope('stage2_WM_step'):
             state = dynamics.step(z['state'], proposal['action'], z['xi'])
         with scope('stage2_reward_and_history'):
-            end, reward, _, terms, continuation, _, _ = control.advance(z, proposal, state)
-        return end, reward, continuation, terms
+            end, reward, raw, terms, continuation, _, _ = control.advance(z, proposal, state)
+        return end, reward, continuation, terms, raw['track']
 
     z = start
     alive = z['state'].new_ones(len(z['state']))
     score = alive*0
+    tracking = alive*0
     features, rewards, continuations, terms_sum = [], [], [], {}
     gradient_probe = None
     projection_statistics = {}
@@ -180,9 +181,10 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
             # 中间Critic特征只供后续MSE，终端特征另外保留完整输入梯度。
             with torch.no_grad():
                 features.append(control.critic_features(detach_state(z)))
-        end, reward, cont, terms = (checkpoint(step, z, proposal, use_reentrant=False, preserve_rng_state=True)
+        end, reward, cont, terms, track = (checkpoint(step, z, proposal, use_reentrant=False, preserve_rng_state=True)
                                    if checkpoint_steps and torch.is_grad_enabled() else step(z, proposal))
         score = score+gamma**t*alive*reward
+        tracking = tracking+gamma**t*alive*track
         for key, value in terms.items():
             terms_sum[key] = terms_sum.get(key, score*0)+gamma**t*alive*value
         rewards.append(reward.detach()); continuations.append(cont.detach())
@@ -194,7 +196,7 @@ def imagine(control, dynamics, critic, start, horizon, *, terminal_value, gamma=
         terminal = gamma**horizon*alive*critic(x)
         score = score+terminal
         features.append(x.detach())
-    return dict(objective=score, terms=terms_sum, terminal=terminal, survival=alive.detach(),
+    return dict(objective=score, terms=terms_sum, tracking=tracking, terminal=terminal, survival=alive.detach(),
                 features=torch.stack(features) if terminal_value else None,
                 rewards=torch.stack(rewards), continuation=torch.stack(continuations), gradient_probe=gradient_probe,
                 projection_statistics=projection_statistics)

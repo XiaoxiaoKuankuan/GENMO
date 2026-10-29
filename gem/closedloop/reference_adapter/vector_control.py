@@ -13,6 +13,7 @@ from supermimic.mdp import unflatten_state, normalize_xi
 from supermimic.motion import ReferenceBatch, select_reference, goal_from_reference
 from supermimic.rotations import yaw_mat, mat_to_6d, so3_exp, so3_log
 from .reference_constraints import constrain_plan, reference_kinematics
+from .precision import goal_derivatives
 
 
 def select_state(z, index):
@@ -105,8 +106,8 @@ class VectorControl:
         R = R@so3_exp(d[..., 3:6])
         q = q+d[..., 6:]
         dt = ((frames[:, 2:]-frames[:, :-2]).to(p)*.02)[..., None]
-        v, qd = (p[:, 2:]-p[:, :-2])/dt, (q[:, 2:]-q[:, :-2])/dt
-        w = so3_log(R[:, 2:]@R[:, :-2].transpose(-1, -2))/dt
+        v = (p[:, 2:]-p[:, :-2])/dt
+        qd, w = goal_derivatives(R, q, frames)
         ref = base_reference(p[:, 1:-1], R[:, 1:-1], v, w, q[:, 1:-1], qd)
         current = select_reference(ref, (slice(None), 0))
         future = select_reference(ref, (slice(None), slice(1, None)))
@@ -145,7 +146,7 @@ class VectorControl:
         if action_offset is not None:
             action = action+action_offset
         result = dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action,
-                      nominal_rotation=nominal_pose[1])
+                      nominal_rotation=nominal_pose[1], nominal_q=nominal_pose[2])
         return result
 
     def constraint_certificate(self, z, proposal):
@@ -191,6 +192,7 @@ class VectorControl:
         # 误差平方无指数饱和，奖励使用训练可见的原名义世界坐标；不进入Adapter输入。
         root_cost = (state_next[:, :3]-nominal.root_p).square().sum(-1)
         weighted.update(root_non_saturating=-.02*self.root_cost_weight*root_cost)
+        raw['root_non_saturating'] = root_cost
         if self.precision is not None:
             precise_raw, precise_weighted = self.precision(self, z, proposal, state_next, nominal, raw)
             raw.update(precise_raw)
@@ -198,8 +200,7 @@ class VectorControl:
         raw = dict(raw, sm=r_sm, original_sm_with_soft_limit=original_sm, music=r_music, **costs, **music_info,
             residual_saturation=(d.abs() >= .98).float().mean((1, 2)),
             halo_max_abs=proposal['halo'].abs().amax(-1), target_qd_max_abs=proposal['future'].qd.abs().amax((1, 2)))
-        raw.update(root_non_saturating=root_cost,
-                   action_change=(proposal['action']-z['action']).square().mean(-1),
+        raw.update(action_change=(proposal['action']-z['action']).square().mean(-1),
                    proposal_projection_distance=feasibility.sqrt(),
                    proposal_projection_joint_rms=(proposal['raw_residual'][..., 6:]-proposal['residual'][..., 6:]).square().mean((1, 2)).sqrt(),
                    proposal_projection_rotation_rms=(proposal['raw_residual'][..., 3:6]-proposal['residual'][..., 3:6]).square().mean((1, 2)).sqrt(),
