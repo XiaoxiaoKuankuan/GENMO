@@ -1,7 +1,8 @@
-"""原SM奖励的直接复用与独立附加成本。
+"""原SM奖励的直接复用与音乐、活动目标。
 
 runtime.reward只接收执行终态和名义下一参考，返回的SM奖励已经包含dt；本模块仅对
-新增音乐/残差/活动成本乘一次dt。六项诊断用原MDP的身体集合、坐标对齐和尺度，
+新增音乐/活动成本乘一次dt；不再惩罚残差幅值、相邻帧差、重叠计划或软参考限位。
+六项诊断用原MDP的身体集合、坐标对齐和尺度，
 用于报告而不替换原函数。硬/软终止同样以名义参考计算，修正目标不参与降低门槛。
 """
 
@@ -12,9 +13,7 @@ from math import isfinite
 from supermimic.mdp import unflatten_state
 from supermimic.rotations import yaw_mat, rot_angle_sq
 from .contracts import DT
-from .reference import overlap_cost
-
-DEFAULT_WEIGHTS = dict(music=1e-4, magnitude=.02, smooth=.01, overlap=.02, reference_limit=.1, activity=.05)
+DEFAULT_WEIGHTS = dict(music=1e-4, activity=.05)
 
 
 def configure_sm_mdp(runtime, overrides):
@@ -66,17 +65,12 @@ class Rewards:
         memory = self.music.push(z.music_state, state_next[..., 34:], nominal_next.qd, z.tick+12)
         memory, r_music, activity, music_info = self.music.settle(memory, z.audio)
         normalized = corrected.plan.residual / bounds
-        q = corrected.future.q
-        costs = dict(magnitude=normalized.square().mean((1, 2)),
-                     smooth=torch.diff(normalized, dim=1).square().mean((1, 2)),
-                     overlap=overlap_cost(corrected.plan, z.previous_plan, bounds, z.heading),
-                     reference_limit=(torch.relu(q-self.runtime.mdp.soft_hi)+torch.relu(self.runtime.mdp.soft_lo-q)).sum(-1).mean(-1),
-                     activity=activity)
+        costs = dict(activity=activity)
         raw = {"sm": r_sm, "music": r_music, **costs, **original,
                **music_info,
                "halo_max_abs": corrected.halo_residual.abs().amax(-1),
                "target_qd_max_abs": corrected.future.qd.abs().amax((1, 2)),
-               "residual_saturation": (normalized.abs() >= .98).to(q).mean((1, 2))}
+               "residual_saturation": (normalized.abs() >= .98).to(normalized).mean((1, 2))}
         weighted = {"sm": r_sm, "music": DT*self.weights["music"]*r_music,
                     **{k: -DT*self.weights[k]*v for k, v in costs.items()}}
         return sum(weighted.values()), raw, weighted, memory

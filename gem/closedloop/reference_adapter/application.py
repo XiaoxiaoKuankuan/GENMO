@@ -5,6 +5,7 @@
 构建CPU网络不启动Isaac；真实物理由entry中的显式上下文管理。
 """
 
+import copy
 import json
 from pathlib import Path
 import random
@@ -17,7 +18,7 @@ from supermimic.bridge.bundle import load_bundle, file_digest
 from supermimic.bridge.runtime import SuperMimicRuntime
 from .policy import ReferenceAdapter
 from .music_reward import AudioTrack, MusicReward
-from .rewards import Rewards, configure_sm_mdp
+from .rewards import Rewards, configure_sm_mdp, DEFAULT_WEIGHTS
 from .collector import ControlStep
 from .dynamics import DynamicsModel
 from .critic import AdapterCritic
@@ -34,6 +35,29 @@ def read_config(path):
         raise ValueError("Adapter算法/三隐藏层/10帧/50Hz/音乐延迟合同不匹配")
     if cfg["bptt_steps"] < 1 or cfg["training"]["batch_size"] < 1:
         raise ValueError("展开时域及更新批量必须为正")
+    return cfg
+
+
+def direct_reference_config(config):
+    """在入口移除已废弃的参考限制，旧模型参数仍按原网络形状加载。
+
+    返回独立配置供训练、评价和manifest共同使用，不修改checkpoint内的原始配置。
+    十帧网络输出保留原幅值映射，取消导数投影、对应拒绝/恢复和重复参考惩罚。
+    物理终止、SM尺度、音乐目标、精度标尺及优化器配置均沿用调用方的明确设置。
+    """
+    cfg = copy.deepcopy(config)
+    cfg['reference_execution'] = 'bounded_direct_no_derivative_constraints'
+    cfg['rewards'] = {key: cfg.get('rewards', {}).get(key, value)
+                      for key, value in DEFAULT_WEIGHTS.items()}
+    for name in ('alternating', 'stage2a'):
+        if name not in cfg:
+            continue
+        settings = cfg[name]
+        for key in ('projection', 'projection_recovery_attempts', 'max_consecutive_projection_rejections',
+                    'proposal_feasibility_weight', 'compile_so3_derivatives'):
+            settings.pop(key, None)
+        settings['precision'] = {'weight': settings.get('precision', {}).get('weight', 1.)}
+        settings['objective_version'] = 'sm_music_precision_direct_reference_v7'
     return cfg
 
 
@@ -98,6 +122,7 @@ def task_assets(task, engine, device):
 
 
 def build_engine(cfg, device="cpu", *, calibrating=False):
+    cfg = direct_reference_config(cfg)
     bundle = load_bundle(require_file(cfg["supermimic"]["checkpoint"], "supermimic.checkpoint"), device,
                          robot_asset_dir=cfg["supermimic"]["robot_asset_dir"])
     runtime = SuperMimicRuntime(bundle, device)

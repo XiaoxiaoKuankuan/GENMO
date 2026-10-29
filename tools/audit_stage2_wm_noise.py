@@ -71,7 +71,7 @@ def main():
     control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds,
                                             **settings['projection']).cuda()
     calibration = json.loads(Path(settings['calibration']).read_text())
-    control.precision = PrecisionObjective(calibration['scales'], **settings['precision'])
+    control.precision = PrecisionObjective(calibration['scales'], weight=settings['precision'].get('weight', 1.))
     control.soft_joint_limit_cost = False
     control.relative_critic_features = True
     for model in (engine.step.adapter, engine.dynamics, original):
@@ -122,7 +122,9 @@ def main():
                 actions.append(row['proposal']['action']); physics.append(row['start']['xi'])
                 mask.append(active.clone()); rewards.append(row['reward'])
                 reference_delta.append(row['proposal']['residual'].square().mean((1, 2)).sqrt())
-                policy_delta.append((row['proposal']['action']-perturbation[t]-row['proposal']['zero_action']).square().mean(-1).sqrt())
+                zero_goal = control.nominal_goal(row['start'])[1]
+                zero_action = control.bundle.act(row['start']['history'], zero_goal)
+                policy_delta.append((row['proposal']['action']-perturbation[t]-zero_action).square().mean(-1).sqrt())
                 active &= ~row['done']
             window = dict(origin='real', **{key: torch.stack(value, 1) for key, value in
                 dict(state=state, next_state=target, action=actions, xi=physics, mask=mask, reward=rewards,

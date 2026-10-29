@@ -1,12 +1,15 @@
 # GENMO十帧Adapter：Stage2-A闭环参考补偿
 
-2026-10-26，GENMO `feature/stage2-supermimic-adapter`，配套SuperMimic
-`feature/genmo-worldmodel-bridge`。本次运行位置为Server-1，Server-2不参与。
-2026-10-27最新指令：仅使用WM+BPTT，当前入口为`tools/train_stage2a_reference.py`，
-固定双低通由有限时域最近点投影替代，根XY关闭。当前算法见
-[Stage2-A完整设计与公式](stage2a_reference_compensation.md)。旧八组和A/B/C的PPO对照
-仅作为失败历史保留，不能作为当前训练路线；Stage2-B本轮不启动。
-下面原八组说明保留作追溯，不代表当前方法已验收通过。
+2026-10-29 当前实现：`feature/stage2-supermimic-adapter`，正式入口为
+`tools/train_stage2_alternating.py`，现行配置为
+[`stage2_direct_reference.yaml`](../../configs/closedloop/stage2_direct_reference.yaml)。
+用户要求删除根角加速度、附加加速度及多余限制：正式训练与评价直接使用网络十帧
+有界参考，不再构造参考速度/加速度投影，不因导数证书中断舞蹈；对应导数、动作偏离、
+残差收缩与投影距离奖励一并移除。SM跟踪、实际精度、音乐/活动目标和实际物理终止保留。
+详见[删项与复查说明](adapter_direct_reference_20261029.rst)。
+
+下文是2026-10-26至27实现的历史说明。既有投影数学审计和服务器独立运行快照用于
+追溯旧实验，不能代表当前正式方法，也不会因开发目录同步自动切换运行中的训练。
 
 ## 不变的方法合同
 

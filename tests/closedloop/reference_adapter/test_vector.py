@@ -48,7 +48,7 @@ def test_vector_goal_actor_reward_gradient(system, nonzero):
         end, reward, raw, terms, cont, done, failed = control.advance(z, new, nxt)
         torch.testing.assert_close(reward, legacy.reward, atol=1e-6, rtol=2e-5)
         for key in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori',
-                    'music', 'activity', 'magnitude', 'smooth', 'overlap', 'reference_limit'):
+                    'music', 'activity'):
             torch.testing.assert_close(raw[key], legacy.raw[key], atol=1e-5, rtol=2e-5)
         old = legacy.end.detached()
         z = {k: v.detach() for k, v in end.items()}

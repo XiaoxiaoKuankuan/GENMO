@@ -83,7 +83,7 @@ def test_disabled_root_angular_acceleration_keeps_velocity_and_other_constraints
     assert not p.certificate(too_fast, z, z, rotation)['feasible'].all()
 
 
-def test_disabled_root_angular_acceleration_cost_and_real_SM_contract(system):
+def test_removed_acceleration_cost_preserves_real_SM_execution_gradients(system):
     from gem.closedloop.reference_adapter.alternating_learning import imagine
     from gem.closedloop.reference_adapter.dynamics import frozen_parameters
     from supermimic.networks import Critic
@@ -101,16 +101,13 @@ def test_disabled_root_angular_acceleration_cost_and_real_SM_contract(system):
     control.precision = PrecisionObjective()
     proposal = control.propose(z)
     off = control.advance(z, proposal, z['state'])[3]
-    assert off['added_reference_acceleration'].count_nonzero() == 0
-    gradient, = torch.autograd.grad(off['added_reference_acceleration'].sum(),
-                                   control.adapter.net[-1].bias, retain_graph=True)
-    assert gradient.count_nonzero() == 0
+    assert 'added_reference_acceleration' not in off
     enabled = ReferenceProjection(control.bundle.spec, control.adapter.bounds)
     disabled = control.projection
     control.projection = enabled
     on = control.advance(z, proposal, z['state'])[3]
-    assert (on['added_reference_acceleration'] < 0).all()
-    for key in off.keys()-{'added_reference_acceleration'}:
+    assert 'added_reference_acceleration' not in on
+    for key in off:
         torch.testing.assert_close(off[key], on[key], atol=0, rtol=0)
     control.projection = disabled
     critic = Critic(2835)
@@ -173,7 +170,7 @@ def test_disabled_soft_joint_limits_preserve_six_tracking_and_action_rate(system
     raw, terms = disabled[2:4]
     expected = raw['track']+.02*control.runtime.mdp.cfg.w_action_rate*raw['action_rate']
     torch.testing.assert_close(terms['sm'], expected, atol=0, rtol=0)
-    assert terms['reference_limit'].count_nonzero() == 0
+    assert 'reference_limit' not in terms
     torch.testing.assert_close(enabled[3]['sm']-terms['sm'],
         .02*control.runtime.mdp.cfg.w_joint_limit*raw['joint_limit'], atol=1e-8, rtol=1e-6)
     for key in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori'):

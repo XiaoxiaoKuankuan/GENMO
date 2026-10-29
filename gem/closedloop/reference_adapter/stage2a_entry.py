@@ -37,7 +37,7 @@ def main():
     if args.num_envs is not None:
         cfg['vector']['num_envs'] = args.num_envs
     import torch
-    from .application import build_engine, read_tasks, seed_all
+    from .application import build_engine, read_tasks, seed_all, direct_reference_config
     from .vector_bank import VectorBank
     from .vector_control import VectorControl, select_state
     from .vector_collector import VectorCollector
@@ -46,7 +46,6 @@ def main():
     from .vector_entry import json_write, append_json, numerical_check, compile_kinematics, gpu_usage
     from .vector_evaluation import evaluate_physical, collect_validation
     from .vector_checkpoint import save_vector, load_vector
-    from .reference_constraints import ReferenceProjection
     from .precision import PrecisionObjective
     from .stage2a_physics import difficulty_scan, collect_reference_response
     from .reference_response import ReferenceResponseReplay, validate_response
@@ -55,6 +54,7 @@ def main():
     from supermimic.bridge.streaming_env import StreamingPhysicalEnv
     from supermimic.env import make_sim
     from supermimic.bridge.bundle import atomic_save, file_digest
+    cfg = direct_reference_config(cfg)
     settings, train, vector = cfg['stage2a'], cfg['training'], cfg['vector']
     if settings['method'] != 'WM_BPTT_physical_trust' or settings.get('terminal_value', False):
         raise ValueError('Stage2-A初版只允许WM+BPTT且禁用未校准Critic终端价值')
@@ -88,12 +88,9 @@ def main():
     control = VectorControl(engine, bank)
     json_write(output/'numerical_original_SM_contract.json', numerical_check(engine, bank, control))
     control.adapter.disable_root_xy = True
-    control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds, **settings['projection']).cuda()
     calibration = json.loads(Path(settings['calibration']).read_text())
     control.precision = PrecisionObjective(calibration['scales'], **settings['precision'])
     control.soft_joint_limit_cost = settings.get('soft_joint_limit_cost', False)
-    if not control.soft_joint_limit_cost and cfg['rewards']['reference_limit'] != 0:
-        raise ValueError('关闭软限位时修正参考的同一软限位成本也必须明确配置为0')
     control.soft_imagination_continuation = False
     control.relative_critic_features = True
     critic = GroupNormalizedCritic(2835, control.spec).cuda()
@@ -169,7 +166,7 @@ def main():
             collector.reset(perturb=False)
             if args.resume:
                 ck = torch.load(args.resume, map_location='cpu', weights_only=False, mmap=True)
-                for key in ('method', 'projection', 'precision', 'terminal_value', 'objective_version', 'long_horizon'):
+                for key in ('method', 'precision', 'terminal_value', 'objective_version', 'long_horizon'):
                     if ck['config']['stage2a'].get(key) != settings[key]:
                         raise ValueError('恢复算法/参考/目标不兼容，不能加载旧饱和策略')
                 if ck['config']['stage2a'].get('soft_joint_limit_cost', True) != control.soft_joint_limit_cost:

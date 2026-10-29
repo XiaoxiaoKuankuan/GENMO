@@ -108,7 +108,7 @@ def main():
     from supermimic.env import make_sim
     from supermimic.bridge.streaming_env import StreamingPhysicalEnv
     from supermimic.bridge.bundle import atomic_save, file_digest
-    from .application import read_config, build_engine, read_tasks, seed_all
+    from .application import read_config, build_engine, read_tasks, seed_all, direct_reference_config
     from .vector_bank import VectorBank
     from .vector_control import VectorControl
     from .vector_collector import VectorCollector
@@ -118,13 +118,12 @@ def main():
     from .vector_evaluation import evaluate_physical
     from .paired_evaluation import paired_comparison
     from .vector_checkpoint import save_vector, load_vector
-    from .reference_constraints import ReferenceProjection
     from .precision import PrecisionObjective
     from .update_diagnostics import parameter_identity
     from .alternating_learning import (enable_wm_normalization, update_wm_normalization, wm_update,
                                       policy_update, critic_update, PolicyProjectionRejected)
 
-    cfg = read_config(args.config)
+    cfg = direct_reference_config(read_config(args.config))
     settings, train, vector = cfg['alternating'], cfg['training'], cfg['vector']
     if settings['method'] != 'supermimic_alternating_WM_BPTT' or train['wm_fit_window'] != 8:
         raise ValueError('正式入口只允许原SM H8监督交替算法')
@@ -228,14 +227,11 @@ def main():
                 if name.endswith('_ms'):
                     breakdown[name[:-3]+'_seconds'] = breakdown.get(name[:-3]+'_seconds', 0.)+milliseconds/1000
             values = dict(real_reward=row['reward'].mean(), real_tracking=row['raw']['track'].mean(),
-                real_reference_rms=row['proposal']['residual'].square().mean().sqrt(),
-                real_action_vs_zero_rms=(row['proposal']['action']-row['proposal']['zero_action']).square().mean().sqrt(),
-                policy_action_vs_zero_rms=(row['proposal'].get('policy_action', row['proposal']['action'])-
-                                          row['proposal']['zero_action']).square().mean().sqrt())
+                real_reference_rms=row['proposal']['residual'].square().mean().sqrt())
             values.update({'real_'+k: value.mean() for k, value in row['raw'].items()
                 if isinstance(value, torch.Tensor) and value.ndim == 1 and
                 (k in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori',
-                       'action_rate', 'action_deviation') or k.startswith(('absolute_', 'error_', 'proposal_projection_')))})
+                       'action_rate') or k.startswith(('absolute_', 'error_')))})
             if 'exploration_std' in row['proposal']:
                 values['executed_noise_rms'] = (row['proposal']['action']-row['proposal']['policy_action']).square().mean().sqrt()
                 values['large_exploration_fraction'] = (row['proposal']['exploration_std'] >= .099).float().mean()
@@ -317,10 +313,7 @@ def main():
         control = VectorControl(engine, bank)
         control.adapter.disable_root_xy = True
         control.disable_root_orientation = not settings.get('root_orientation', True)
-        control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds,
-                                                 **settings['projection']).cuda()
-        control.projection.compile_derivatives = settings.get('compile_so3_derivatives', True)
-        control.proposal_feasibility_weight = settings.get('proposal_feasibility_weight', 0.)
+        # 直接使用有界十帧输出；正式训练不构造导数投影或参考拒绝器。
         calibration = json.loads(Path(settings['calibration']).read_text())
         control.precision = PrecisionObjective(calibration['scales'], **settings['precision'])
         extra['precision_scales'] = control.precision.scales
@@ -352,7 +345,7 @@ def main():
             env = StreamingPhysicalEnv(sim_cfg, vector['num_envs'], engine.step.bundle)
             collector = VectorCollector(env, control, seed=vector['sampling_seed'])
             collector.uniform_start = True
-            collector.projection_recovery_attempts = settings.get('projection_recovery_attempts', 2)
+            collector.projection_recovery_attempts = 0
             collector.reset(split='train', perturb=True)
             if args.resume:
                 ck = torch.load(args.resume, map_location='cpu', weights_only=False, mmap=True)

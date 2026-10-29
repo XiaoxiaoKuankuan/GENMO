@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--num-shards',type=int,default=1)
     parser.add_argument('--save-trajectories',action='store_true')
     parser.add_argument('--repeat-adapter',action='store_true')
+    parser.add_argument('--task-ids',nargs='+',help='仅评价列出的真实歌曲；用于明确范围的复查')
     pre,_=parser.parse_known_args()
     import yaml
     config=yaml.safe_load(Path(pre.config).read_text())
@@ -38,28 +39,30 @@ def main():
     import torch
     from supermimic.env import make_sim
     from supermimic.bridge.streaming_env import StreamingPhysicalEnv
-    from gem.closedloop.reference_adapter.application import build_engine,read_tasks,seed_all
+    from gem.closedloop.reference_adapter.application import build_engine,read_tasks,seed_all,direct_reference_config
     from gem.closedloop.reference_adapter.vector_bank import VectorBank
     from gem.closedloop.reference_adapter.vector_control import VectorControl
     from gem.closedloop.reference_adapter.vector_collector import VectorCollector
-    from gem.closedloop.reference_adapter.reference_constraints import ReferenceProjection
     from gem.closedloop.reference_adapter.precision import PrecisionObjective
     from gem.closedloop.reference_adapter.vector_entry import compile_kinematics
     from gem.closedloop.reference_adapter.paired_evaluation import evaluate_fixed,paired_comparison,tensor_digest
     output=Path(args.output);output.mkdir(parents=True,exist_ok=False)
     seed_all(42);torch.set_num_threads(1);torch.backends.cuda.matmul.allow_tf32=False
     saved=torch.load(args.checkpoint,map_location='cpu',weights_only=False,mmap=True)
-    cfg=saved['config'];cfg['supermimic']['repo']=config['supermimic']['repo'];cfg['observation_noise']=False
+    cfg=direct_reference_config(saved['config']);cfg['supermimic']['repo']=config['supermimic']['repo'];cfg['observation_noise']=False
     engine=build_engine(cfg,'cuda:0');engine.step.adapter.load_state_dict(saved['adapter'])
     if not 0 <= args.shard_index < args.num_shards:
         raise ValueError('分片编号必须位于[0, num_shards)')
     tasks=[t for t in read_tasks(cfg['tasks']) if t['split'] in args.splits]
+    if args.task_ids:
+        selected=set(args.task_ids)
+        missing=selected-{t['id'] for t in tasks}
+        if missing:raise ValueError(f'指定歌曲不在评价划分中: {sorted(missing)}')
+        tasks=[t for t in tasks if t['id'] in selected]
     tasks=[t for i,t in enumerate(tasks) if i % args.num_shards == args.shard_index]
     bank=VectorBank(tasks,engine,'cuda:0');control=VectorControl(engine,bank)
     settings=cfg['alternating'];control.adapter.disable_root_xy=True
     control.disable_root_orientation=not settings.get('root_orientation',True)
-    control.projection=ReferenceProjection(control.bundle.spec,control.adapter.bounds,**settings['projection']).cuda()
-    control.projection.compile_derivatives=settings.get('compile_so3_derivatives',True)
     calibration=json.loads(Path(settings['calibration']).read_text())
     control.precision=PrecisionObjective(calibration['scales'],**settings['precision'])
     control.soft_joint_limit_cost=False;control.sm_soft_termination_only=True
@@ -67,7 +70,8 @@ def main():
     manifest=dict(checkpoint=args.checkpoint,checkpoint_updates=saved['state']['accepted_updates'],config=cfg,
         command=sys.argv,started_unix=time.time(),optimizer_steps=0,
         shard_index=args.shard_index,num_shards=args.num_shards,task_ids=[t['id'] for t in tasks],
-        adapter_sha256=tensor_digest(torch.cat([x.flatten() for x in saved['adapter'].values()])))
+        adapter_sha256=tensor_digest(torch.cat([x.flatten() for x in saved['adapter'].values()])),
+        reference_execution=cfg['reference_execution'], original_checkpoint_config=saved['config'])
     (output/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
     del saved
     (output/'compile.json').write_text(json.dumps(compile_kinematics(engine,bank),indent=2))
@@ -82,7 +86,7 @@ def main():
             for name,zero in modes:
                 seed_all(42);collector.generator.manual_seed(42)
                 trajectory_dir=(output/f'{split}_{name}_trajectories'
-                    if args.save_trajectories and name in ('zero','adapter') else None)
+                    if args.save_trajectories else None)
                 report=evaluate_fixed(collector,zero=zero,split=split,max_steps=args.max_steps,
                                       trajectory_dir=trajectory_dir)
                 reports[name]=report

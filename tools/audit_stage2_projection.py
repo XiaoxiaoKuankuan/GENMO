@@ -44,7 +44,7 @@ def main():
     bank=VectorBank(read_tasks(cfg['tasks']),engine,'cuda:0');control=VectorControl(engine,bank)
     control.adapter.disable_root_xy=True;control.soft_joint_limit_cost=False;control.sm_soft_termination_only=True
     calibration=json.loads(Path(cfg['alternating']['calibration']).read_text())
-    control.precision=PrecisionObjective(calibration['scales'],**cfg['alternating']['precision'])
+    control.precision=PrecisionObjective(calibration['scales'],weight=cfg['alternating']['precision'].get('weight',1.))
     oldpath=root/'source_genmo/gem/closedloop/reference_adapter/reference_constraints.py'
     spec=importlib.util.spec_from_file_location('gem.closedloop.reference_adapter.legacy_constraints',oldpath)
     old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)

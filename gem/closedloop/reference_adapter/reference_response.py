@@ -18,7 +18,7 @@ GROUP_WEIGHTS = dict(root_position=.15, root_orientation=.15, joint_position=.35
                      joint_velocity=.35, root_angular_velocity=.1, body_angular_velocity=.1)
 TEMPORAL = {'plus_action', 'minus_action', 'plus_next', 'minus_next', 'reliable',
             'contact_switch', 'repeated_states', 'trajectory_valid', 'legacy_reliable',
-            'all_action', 'all_next', 'all_residual', 'all_zero_action', 'all_rewards',
+            'all_action', 'all_next', 'all_residual', 'all_rewards',
             'all_frame', 'all_episode', 'all_done'}
 
 
@@ -250,7 +250,6 @@ class ResponseRecorder:
             legacy &= self.rows[-1]['legacy_reliable']
         self.rows.append(dict(all_next=state.detach().clone(), all_action=action.detach().clone(),
             all_residual=row['proposal']['residual'][:n].reshape(g, 4, 10, 27).detach().clone(),
-            all_zero_action=row['proposal']['zero_action'][:n].reshape(g, 4, 21).detach().clone(),
             all_rewards=reward.detach().clone(), all_frame=frame.reshape(g, 4).clone(),
             all_episode=episode.reshape(g, 4).clone(), all_done=row['done'][:n].reshape(g, 4).clone(),
             reliable=good, legacy_reliable=legacy, contact_switch=changed, trajectory_valid=continuous))
@@ -277,17 +276,17 @@ def score_response_sequences(dynamics, control, pairs, horizon, *, use_real_labe
         raise ValueError('奖励响应缺少完整真实四条件和参考身份，不能从旧正负数据伪造')
     groups = len(pairs['state'])
     z = {k.removeprefix('context_'): v.flatten(0, 1) for k, v in pairs.items() if k.startswith('context_')}
-    def step(current, action, residual, zero, target):
+    def step(current, action, residual, target):
         following = target if use_real_labels else dynamics.step(current['state'], action, current['xi'])
         now, future, goal, halo = control.reference(current, residual)
         proposal = dict(current=now, future=future, goal=goal, halo=halo, residual=residual,
-                        raw_residual=residual, action=action, zero_action=zero)
+                        raw_residual=residual, action=action)
         end, reward, raw, *_ = control.advance(current, proposal, following)
         return end, reward_vector(raw, reward)
     rows = []
     for t in range(horizon):
         args = (z, pairs['all_action'][:, t].flatten(0, 1), pairs['all_residual'][:, t].flatten(0, 1),
-                pairs['all_zero_action'][:, t].flatten(0, 1), pairs['all_next'][:, t].flatten(0, 1))
+                pairs['all_next'][:, t].flatten(0, 1))
         z, scores = checkpoint(step, *args, use_reentrant=False) if checkpoint_steps else step(*args)
         rows.append(scores.reshape(groups, 4, -1))
     return torch.stack(rows, 1)

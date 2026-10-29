@@ -160,6 +160,8 @@ class VectorCollector:
             std = torch.where(large, exploration_std, action_noise)
             proposal['action'] = (proposal['action']+std*noise).clamp(-20, 20)
             proposal['exploration_std'] = std[:, 0]
+        if not bool(torch.isfinite(proposal['action']).all()):
+            raise FloatingPointError('实际控制动作出现非有限值，未推进物理')
         if cuda:
             torch.cuda.synchronize(self.device)
         t1 = time.perf_counter()

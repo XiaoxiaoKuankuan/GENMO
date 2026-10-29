@@ -22,7 +22,6 @@ def main():
     p.add_argument('--num-envs', type=int, default=4)
     p.add_argument('--max-steps', type=int)
     p.add_argument('--adapter-updates', type=int, required=True)
-    p.add_argument('--baseline-source')
     p.add_argument('--repeat-candidate', type=int, default=1)
     args = p.parse_args()
     if args.num_envs not in range(4, 9):
@@ -41,11 +40,10 @@ def main():
     import torch
     from supermimic.env import make_sim
     from supermimic.bridge.streaming_env import StreamingPhysicalEnv
-    from gem.closedloop.reference_adapter.application import build_engine, read_tasks, seed_all
+    from gem.closedloop.reference_adapter.application import build_engine, read_tasks, seed_all, direct_reference_config
     from gem.closedloop.reference_adapter.vector_bank import VectorBank
     from gem.closedloop.reference_adapter.vector_control import VectorControl
     from gem.closedloop.reference_adapter.vector_collector import VectorCollector
-    from gem.closedloop.reference_adapter.reference_constraints import ReferenceProjection
     from gem.closedloop.reference_adapter.precision import PrecisionObjective
     from gem.closedloop.reference_adapter.vector_evaluation import evaluate_physical
     from gem.closedloop.reference_adapter.paired_evaluation import paired_comparison
@@ -53,6 +51,7 @@ def main():
     from gem.closedloop.reference_adapter.vector_entry import compile_kinematics
     seed_all(42); torch.set_num_threads(1); torch.backends.cuda.matmul.allow_tf32 = False
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
+    cfg = direct_reference_config(cfg)
     engine = build_engine(cfg, 'cuda:0')
     snapshot = torch.load(args.snapshot, map_location='cpu', weights_only=False, mmap=True)
     engine.step.adapter.load_state_dict(snapshot['adapter'])
@@ -62,17 +61,6 @@ def main():
     control.disable_root_orientation = not cfg['alternating'].get('root_orientation', True)
     control.soft_joint_limit_cost = False
     control.sm_soft_termination_only = True
-    control.proposal_feasibility_weight = cfg['alternating'].get('proposal_feasibility_weight', 0.)
-    control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds,
-        **cfg['alternating']['projection']).cuda()
-    control.projection.compile_derivatives = cfg['alternating'].get('compile_so3_derivatives', True)
-    if args.baseline_source:
-        import importlib.util, types
-        path = Path(args.baseline_source)/'gem/closedloop/reference_adapter/so3_projection.py'
-        name = 'gem.closedloop.reference_adapter.dedicated_baseline_so3'
-        spec = importlib.util.spec_from_file_location(name, path)
-        old = importlib.util.module_from_spec(spec); sys.modules[name] = old; spec.loader.exec_module(old)
-        control.projection.project_rotation = types.MethodType(lambda self, *a: old.project_rotation_implicit(self, *a), control.projection)
     calibration = json.loads(Path(cfg['alternating']['calibration']).read_text())
     control.precision = PrecisionObjective(calibration['scales'], **cfg['alternating']['precision'])
     compile_kinematics(engine, bank)
@@ -110,7 +98,7 @@ def main():
     (out/f'dedicated_timing_{args.adapter_updates:06d}.json').write_text(json.dumps(dict(
         seconds=time.perf_counter()-begin, actual_physics_envs=args.num_envs, training_physics_advanced=False,
         physical_transitions=collector.real_transitions, measured_by_role=collector.real_by_role,
-        snapshot=args.snapshot), indent=2))
+        snapshot=args.snapshot, reference_execution=cfg['reference_execution']), indent=2))
     return 0
 
 

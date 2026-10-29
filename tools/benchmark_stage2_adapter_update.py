@@ -86,7 +86,7 @@ def main():
     critic = Critic(2835).cuda().requires_grad_(False)
     critic.load_state_dict(ck['critic'])
     scales = json.loads(Path(cfg['alternating']['calibration']).read_text())['scales']
-    control.precision = PrecisionObjective(scales, **cfg['alternating']['precision'])
+    control.precision = PrecisionObjective(scales, weight=cfg['alternating']['precision'].get('weight', 1.))
     compile_kinematics(engine, bank)
     if args.compile_components:
         from gem.closedloop.reference_adapter.compute import compile_components

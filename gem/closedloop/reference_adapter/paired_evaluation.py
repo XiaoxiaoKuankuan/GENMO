@@ -1,8 +1,8 @@
 """已有Adapter的无探索真实物理配对评价，不执行任何网络或归一化更新。
 
 从固定歌曲初态重置，原始GENMO缓存始终是误差目标。仅对尚未结束的环境批量
-运行Adapter/Actor，已结束环境不会向报告补状态或补音乐奖励。参考不可执行时
-终止对应评价episode并记录constraint_failure，绝不将该参考送入物理或伪称跌倒。
+运行Adapter/Actor，已结束环境不会向报告补状态或补音乐奖励。正式入口直接使用
+有界网络参考，以音乐结束或真实物理失败终止；旧投影审计仍单独记录参考拒绝。
 报告实际执行前缀与共同评价预算两种Tracking，保存q/qd/姿态误差、真实接触脚滑、
 jerk、完成率、回报与初态/物理参数身份。短评价明确行政截断，不能称整歌完成。
 """
@@ -87,6 +87,8 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
                 break
             action = initial.new_zeros(collector.num_envs, 21)
             action[ids] = proposal['action']
+            if not bool(torch.isfinite(action[ids]).all()):
+                raise FloatingPointError('评价控制动作出现非有限值，未推进物理')
             nxt = collector.env.step_physics(action)
             if not bool(nxt[ids].isfinite().all()):
                 raise FloatingPointError('真实评价状态非有限')
@@ -196,6 +198,8 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
         num_envs=collector.num_envs, measured_evaluation_envs=count, wall_seconds=elapsed,
         measured_transitions=sum(r['steps'] for r in episodes), physics_transitions=len(states)*collector.num_envs,
         evidence='actual_physics_paired_initial_state_no_exploration',
+        reference_execution=('bounded_direct_no_derivative_constraints'
+            if control.projection is None and control.constraint_beta == 1. else 'historical_reference_constraint_audit'),
         sm_mdp_contract=sm_mdp_contract(control.runtime), soft_joint_limit_cost=control.soft_joint_limit_cost,
         full_song_evaluation=max_steps is None)
 

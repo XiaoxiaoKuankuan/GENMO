@@ -62,7 +62,7 @@ def main():
         **cfg.get('stage2a', {}).get('projection', {})).cuda()
     settings = cfg.get('stage2a', {})
     scales = json.loads(Path(settings['calibration']).read_text())['scales'] if settings.get('calibration') else None
-    control.precision = PrecisionObjective(scales, **settings.get('precision', {}))
+    control.precision = PrecisionObjective(scales, weight=settings.get('precision', {}).get('weight', 1.))
     control.soft_joint_limit_cost = settings.get('soft_joint_limit_cost', True)
     before = {k: v.detach().clone() for k, v in control.adapter.state_dict().items()}
     checkpoint = None

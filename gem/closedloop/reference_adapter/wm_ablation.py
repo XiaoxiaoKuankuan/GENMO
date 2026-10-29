@@ -169,12 +169,11 @@ def main():
     from isaaclab.app import add_launcher_args, launch_simulation
     add_launcher_args(p);args=p.parse_args()
     import torch
-    from .application import build_engine, read_tasks, seed_all
+    from .application import build_engine, read_tasks, seed_all, direct_reference_config
     from .vector_bank import VectorBank
     from .vector_control import VectorControl
     from .vector_collector import VectorCollector
     from .vector_learning import GroupNormalizedCritic, fit_wm
-    from .reference_constraints import ReferenceProjection
     from .precision import PrecisionObjective
     from .reference_response import ReferenceResponseReplay, validate_response, reward_response_loss
     from .parameter_audit import parameter_update_audit
@@ -186,6 +185,7 @@ def main():
     from supermimic.env import make_sim
     out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
     seed_all(cfg['training']['seed']);torch.set_num_threads(1)
+    cfg=direct_reference_config(cfg)
     engine=build_engine(cfg,'cuda:0')
     if bool(args.wm_initialize) != bool(args.candidate_only):
         raise ValueError('指定已有WM仅用于明确的候选诊断，不能暗中接续监督预算')
@@ -195,7 +195,6 @@ def main():
         engine.dynamics.model_version=wm['wm_version']
     bank=VectorBank(read_tasks(cfg['tasks']),engine,'cuda:0')
     control=VectorControl(engine,bank);control.adapter.disable_root_xy=True
-    control.projection=ReferenceProjection(control.bundle.spec,control.adapter.bounds,**cfg['stage2a']['projection']).cuda()
     scales=json.loads(Path(cfg['stage2a']['calibration']).read_text())['scales']
     control.precision=PrecisionObjective(scales,**cfg['stage2a']['precision'])
     control.soft_joint_limit_cost=False;control.soft_imagination_continuation=False

@@ -73,30 +73,6 @@ def test_mode_budgets_cannot_silently_change():
                             root_orientation_mode='strict_so3',rotation_acceleration=6.)
 
 
-def test_hard_rotation_budget_and_switch_do_not_change_explicit_regularizer():
-    from gem.closedloop.reference_adapter.precision import PrecisionObjective
-    precision=PrecisionObjective(rotation_velocity_scale=.3,rotation_acceleration_scale=3.,
-                                 rotation_acceleration_penalty=True)
-    torch.manual_seed(84)
-    v=torch.randn(2,12,27,dtype=torch.double,requires_grad=True)
-    a=v.diff(dim=1)/.02
-    results=[]
-    for mode in ('strict_so3','relaxed_so3','smooth_so3','no_root_orientation'):
-        p=projector(mode)
-        vs,acs,mask=precision.reference_cost_scales(p)
-        loss=(v/vs).square().mean()+((a/acs).square()*mask).mean()
-        results.append((loss,torch.autograd.grad(loss,v,retain_graph=True)[0]))
-    for loss,grad in results[1:]:
-        torch.testing.assert_close(loss,results[0][0],rtol=0,atol=0)
-        torch.testing.assert_close(grad,results[0][1],rtol=0,atol=0)
-    # 即使关硬角加速度约束，显式奖励开关仍独立生效。
-    p=ReferenceProjection(SimpleNamespace(joint_names=['joint']*21),torch.ones(27,dtype=torch.double),
-                          constrain_root_angular_acceleration=False)
-    _,acs,mask=precision.reference_cost_scales(p)
-    assert p.acceleration_mask[3:6].sum()==0 and mask[3:6].sum()==3
-    torch.testing.assert_close(acs[3:6],torch.full((3,),3.,dtype=torch.double))
-
-
 def test_quality_stop_requires_consecutive_full_validation():
     from gem.closedloop.reference_adapter.alternating_entry import validation_degradation
     rules=dict(root_rmse_relative_increase=.25,jerk_relative_increase=.20,

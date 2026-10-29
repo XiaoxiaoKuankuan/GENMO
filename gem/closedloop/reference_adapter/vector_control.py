@@ -146,9 +146,6 @@ class VectorControl:
             action = action+action_offset
         result = dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action,
                       nominal_rotation=nominal_pose[1])
-        if self.precision is not None:
-            # 对照动作在相同真实/想象状态及同一历史下使用原始Goal；保留其输入梯度。
-            result['zero_action'] = act(z['history'], nominal_goal)
         return result
 
     def constraint_certificate(self, z, proposal):
@@ -186,26 +183,14 @@ class VectorControl:
         memory = self.bank.memory_push(z['music'], state_next[:, 34:], nominal.qd, self.music)
         r_music, activity, music_info = self.bank.music_reward(memory, z['song'], frames, self.music)
         d = proposal['residual']/self.adapter.bounds
-        overlap = ((proposal['residual'][:, :9]-z['plan'][:, 1:])/self.adapter.bounds).square().mean((1, 2))*z['plan_valid']
-        q = proposal['future'].q
-        costs = dict(magnitude=d.square().mean((1, 2)), smooth=d.diff(dim=1).square().mean((1, 2)),
-            overlap=overlap, reference_limit=(torch.relu(q-self.runtime.mdp.soft_hi)+torch.relu(self.runtime.mdp.soft_lo-q)).sum(-1).mean(-1),
-            activity=activity)
+        costs = dict(activity=activity)
         weighted = dict(sm=r_sm, music=.02*self.weights['music']*r_music,
                         **{k: -.02*self.weights[k]*v for k, v in costs.items()})
-        # 辅助项只鼓励原始提案接近同一可微可行投影，不把补偿本身拉向零。
-        # 主奖励仍完整穿过投影；历史锚点和投影结果均保留原计算图，dt仅乘一次。
         proposal_gap = (proposal['raw_residual']-proposal['residual'])/self.adapter.bounds
         feasibility = proposal_gap.square().mean((1, 2))
-        weighted['proposal_feasibility'] = -.02*getattr(self, 'proposal_feasibility_weight', 0.)*feasibility
-        nominal_future = self.bank.ref(z['song'][:, None], z['frame'][:, None]+self.bank.offset11[1:])
         # 误差平方无指数饱和，奖励使用训练可见的原名义世界坐标；不进入Adapter输入。
         root_cost = (state_next[:, :3]-nominal.root_p).square().sum(-1)
-        velocity_cost = ((proposal['future'].root_v-nominal_future.root_v)/.3).square().mean((1, 2))
-        velocity_cost = velocity_cost+((proposal['future'].root_w-nominal_future.root_w)/.5).square().mean((1, 2))
-        velocity_cost = velocity_cost+(proposal['future'].qd-nominal_future.qd).square().mean((1, 2))
-        weighted.update(root_non_saturating=-.02*self.root_cost_weight*root_cost,
-                        reference_velocity=-.02*self.velocity_cost_weight*velocity_cost)
+        weighted.update(root_non_saturating=-.02*self.root_cost_weight*root_cost)
         if self.precision is not None:
             precise_raw, precise_weighted = self.precision(self, z, proposal, state_next, nominal, raw)
             raw.update(precise_raw)
@@ -213,7 +198,7 @@ class VectorControl:
         raw = dict(raw, sm=r_sm, original_sm_with_soft_limit=original_sm, music=r_music, **costs, **music_info,
             residual_saturation=(d.abs() >= .98).float().mean((1, 2)),
             halo_max_abs=proposal['halo'].abs().amax(-1), target_qd_max_abs=proposal['future'].qd.abs().amax((1, 2)))
-        raw.update(root_non_saturating=root_cost, reference_velocity=velocity_cost,
+        raw.update(root_non_saturating=root_cost,
                    action_change=(proposal['action']-z['action']).square().mean(-1),
                    proposal_projection_distance=feasibility.sqrt(),
                    proposal_projection_joint_rms=(proposal['raw_residual'][..., 6:]-proposal['residual'][..., 6:]).square().mean((1, 2)).sqrt(),
