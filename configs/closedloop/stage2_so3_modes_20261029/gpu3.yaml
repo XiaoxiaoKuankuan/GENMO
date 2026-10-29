@@ -26,7 +26,7 @@ alternating:
   log_every: 10
   max_consecutive_projection_rejections: 5
   method: supermimic_alternating_WM_BPTT
-  objective_version: q_qd_body_R_local_root_strict_root_alpha3_v4
+  objective_version: sm_tighter_scales_height02_tilt06_q_qd_body_R_v5
   precision:
     acceleration_weight: 0.0002
     action_weight: 0.01
@@ -122,3 +122,13 @@ vector:
   num_envs: 2048
   sampling_seed: 42
   target_accepted_updates: 200
+
+# 用户2026-10-29确认：改指数奖励误差尺度，原六项权重不变。
+# 高度/倾斜均相对于原始GENMO参考，硬终止和想象软终止共用阈值。
+sm_mdp:
+  root_pos_std: 0.2
+  root_ori_std: 0.3
+  body_pos_std: 0.1
+  body_ori_std: 0.15
+  term_height: 0.2
+  term_tilt: 0.6

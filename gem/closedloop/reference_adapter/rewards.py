@@ -6,6 +6,8 @@ runtime.reward只接收执行终态和名义下一参考，返回的SM奖励已�
 """
 
 import torch
+from dataclasses import asdict, replace
+from math import isfinite
 
 from supermimic.mdp import unflatten_state
 from supermimic.rotations import yaw_mat, rot_angle_sq
@@ -13,6 +15,28 @@ from .contracts import DT
 from .reference import overlap_cost
 
 DEFAULT_WEIGHTS = dict(music=1e-4, magnitude=.02, smooth=.01, overlap=.02, reference_limit=.1, activity=.05)
+
+
+def configure_sm_mdp(runtime, overrides):
+    """入口一次性覆盖用户指定的误差尺度和终止阈值，仍调用SM权威公式。
+
+    RewardCfg在原MDP构造器中是共享默认对象，必须replace为本运行独立实例，
+    不能原地修改并污染另一个零基线/旧标准运行。六项权重、速度尺度、Actor及其
+    normalizer均不改变；hard/soft termination自动使用同一高度和重力投影阈值。
+    """
+    allowed = {'root_pos_std', 'root_ori_std', 'body_pos_std', 'body_ori_std', 'term_height', 'term_tilt'}
+    if set(overrides)-allowed or any(not isfinite(v) or v <= 0 for v in overrides.values()):
+        raise ValueError('SM误差尺度/终止阈值必须为已声明字段的有限正数')
+    runtime.mdp.cfg = replace(runtime.mdp.cfg, **overrides)
+
+
+def sm_mdp_contract(runtime):
+    """报告实际生效参数，禁止把不同尺度/终止标准的评分混成配对提升。"""
+    return dict(parameters=asdict(runtime.mdp.cfg), dt=DT,
+        weights=dict(body_pos=1., body_ori=1., body_linvel=1., body_angvel=1., root_pos=.5, root_ori=.5),
+        formula='sum(weight*exp(-squared_error/std**2))*dt',
+        termination='abs(z-z_nominal)>term_height OR abs(R[2,2]-R_nominal[2,2])>term_tilt',
+        target='original_GENMO_nominal_reference', body_alignment='original_SM_root_xy_yaw')
 
 
 def sm_diagnostics(runtime, state, nominal):

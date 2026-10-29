@@ -15,6 +15,7 @@ import torch
 from .evaluation import beat_report
 from .vector_control import select_state
 from .vector_audit import contact_tensors
+from .rewards import sm_mdp_contract
 
 
 def tensor_digest(value):
@@ -152,10 +153,19 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
         slip_mask = contact_all[:n, i]
         slip = float(raw_all['foot_speed_xy'][:n, i][slip_mask].mean()) if n and bool(slip_mask.any()) else 0.
         tracking_sum = float(raw_all['track'][:n, i].sum()) if n else 0.
+        from supermimic.mdp import unflatten_state
+        final_p, final_R, *_ = unflatten_state(state[-1:])
+        final_nominal = bank.ref(songs[i:i+1], songs.new_tensor([n]))
+        height_error = float((final_p[..., 2]-final_nominal.root_p[..., 2]).abs()[0])
+        gravity_z_error = float((final_R[..., 2, 2]-final_nominal.root_R[..., 2, 2]).abs()[0])
+        failure_conditions = dict(root_height_error_m=height_error, gravity_projection_z_difference=gravity_z_error,
+            root_height_exceeded=height_error > control.runtime.mdp.cfg.term_height,
+            gravity_projection_z_exceeded=gravity_z_error > control.runtime.mdp.cfg.term_tilt)
         episodes.append(dict(task=bank.tasks[song]['id'], song=bank.tasks[song]['song_id'], split=split,
             steps=n, planned_steps=planned, evaluation_budget_steps=budget, reason=reasons[i],
             fraction_of_song_executed=n/planned, full_music_complete=reasons[i]=='music_end',
             physical_failure=reasons[i]=='physical_failure', constraint_failure=reasons[i]=='constraint_failure',
+            failure_conditions_at_last_executed_state=failure_conditions,
             failure_time_s=n*.02 if reasons[i] in ('physical_failure', 'constraint_failure') else None,
             initial_state_sha256=tensor_digest(initial[i]), physical_xi_sha256=tensor_digest(initial_xi[i]),
             sm_terms=terms, weighted_step_terms={k: float(v[:n, i].mean()) for k, v in term_all.items()} if n else {},
@@ -186,10 +196,13 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
         num_envs=collector.num_envs, measured_evaluation_envs=count, wall_seconds=elapsed,
         measured_transitions=sum(r['steps'] for r in episodes), physics_transitions=len(states)*collector.num_envs,
         evidence='actual_physics_paired_initial_state_no_exploration',
+        sm_mdp_contract=sm_mdp_contract(control.runtime), soft_joint_limit_cost=control.soft_joint_limit_cost,
         full_song_evaluation=max_steps is None)
 
 
 def paired_comparison(zero, current):
+    if zero.get('sm_mdp_contract') != current.get('sm_mdp_contract'):
+        raise ValueError('物理评价配对条件不一致: SM奖励尺度或终止标准不同，必须重算零基线')
     baseline={r['task']:r for r in zero['episodes']}
     rows=[]
     metrics=('full_horizon_tracking','root_position_rmse_m','joint_q_rmse_rad','joint_qd_rmse_rad_s',

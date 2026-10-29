@@ -42,6 +42,8 @@ def load_vector(path, engine, critic, optimizers, replay, tangent, collector, co
     for key in ('music', 'rewards', 'reference_steps', 'control_hz'):
         if ck['config'][key] != config[key]:
             raise ValueError('恢复的奖励或时钟合同不同')
+    if ck['config'].get('sm_mdp', {}) != config.get('sm_mdp', {}):
+        raise ValueError('恢复的SM误差尺度或真实终止条件不同，不能沿用旧奖励Replay')
     for k, v in engine.step.bundle.state_dict().items():
         if not torch.equal(v.cpu(), ck['frozen_bundle'][k]):
             raise ValueError('冻结资产发生变化')

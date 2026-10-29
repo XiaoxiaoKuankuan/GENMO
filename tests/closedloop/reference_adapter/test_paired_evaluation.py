@@ -34,6 +34,13 @@ def test_failed_prefix_cannot_claim_full_song_improvement():
     assert difference['cases'][0]['current_steps']==50
 
 
+def test_paired_evaluation_rejects_changed_scales_or_failure_conditions():
+    zero=report(); candidate=copy.deepcopy(zero)
+    candidate['sm_mdp_contract']={'root_pos_std': .2, 'term_height': .2}
+    with pytest.raises(ValueError, match='奖励尺度或终止标准'):
+        paired_comparison(zero,candidate)
+
+
 def test_projection_exception_rejects_only_bad_evaluation_environment():
     import torch
     from gem.closedloop.reference_adapter.paired_evaluation import _feasible_evaluation_proposal

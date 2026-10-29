@@ -49,6 +49,7 @@ def main():
     from gem.closedloop.reference_adapter.precision import PrecisionObjective
     from gem.closedloop.reference_adapter.vector_evaluation import evaluate_physical
     from gem.closedloop.reference_adapter.paired_evaluation import paired_comparison
+    from gem.closedloop.reference_adapter.rewards import sm_mdp_contract
     from gem.closedloop.reference_adapter.vector_entry import compile_kinematics
     seed_all(42); torch.set_num_threads(1); torch.backends.cuda.matmul.allow_tf32 = False
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
@@ -86,8 +87,9 @@ def main():
             zero_path = out/f'{key}_zero_dedicated{args.num_envs}.json'
             if zero_path.exists():
                 zero = json.loads(zero_path.read_text())
-                if zero['num_envs'] != args.num_envs or zero['max_steps'] != args.max_steps:
-                    raise ValueError('专用零基线环境数或评价预算不一致')
+                if (zero['num_envs'] != args.num_envs or zero['max_steps'] != args.max_steps
+                        or zero.get('sm_mdp_contract') != sm_mdp_contract(control.runtime)):
+                    raise ValueError('专用零基线环境数、评价预算或奖励/终止标准不一致；请使用新评价目录')
             else:
                 seed_all(42); collector.generator.manual_seed(42)
                 zero = evaluate_physical(collector, zero=True, split=split, max_steps=args.max_steps)

@@ -34,6 +34,7 @@ def main():
     p.add_argument('--output', required=True)
     p.add_argument('--baseline-source', required=True)
     p.add_argument('--fixture')
+    p.add_argument('--objective-config', help='只覆盖SM尺度/终止参数；新旧求解器仍使用同一目标与原fixture')
     p.add_argument('--batch', type=int, default=1024)
     p.add_argument('--horizons', type=int, nargs='+', default=[8, 16, 32])
     p.add_argument('--microbatches', type=int, nargs='+', default=[32, 64, 128, 256])
@@ -59,6 +60,9 @@ def main():
     sys.path.insert(0, str(sm))
     ck = torch.load(args.checkpoint, map_location='cpu', weights_only=False, mmap=True)
     cfg = ck['config']
+    if args.objective_config:
+        objective = yaml.safe_load(Path(args.objective_config).read_text())
+        cfg['sm_mdp'] = objective.get('sm_mdp', {})
     sys.path.insert(0, cfg['supermimic']['repo'])
     from gem.closedloop.reference_adapter.application import build_engine, read_tasks
     from gem.closedloop.reference_adapter.vector_bank import VectorBank

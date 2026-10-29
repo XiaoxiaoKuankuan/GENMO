@@ -17,7 +17,7 @@ from supermimic.bridge.bundle import load_bundle, file_digest
 from supermimic.bridge.runtime import SuperMimicRuntime
 from .policy import ReferenceAdapter
 from .music_reward import AudioTrack, MusicReward
-from .rewards import Rewards
+from .rewards import Rewards, configure_sm_mdp
 from .collector import ControlStep
 from .dynamics import DynamicsModel
 from .critic import AdapterCritic
@@ -101,6 +101,7 @@ def build_engine(cfg, device="cpu", *, calibrating=False):
     bundle = load_bundle(require_file(cfg["supermimic"]["checkpoint"], "supermimic.checkpoint"), device,
                          robot_asset_dir=cfg["supermimic"]["robot_asset_dir"])
     runtime = SuperMimicRuntime(bundle, device)
+    configure_sm_mdp(runtime, cfg.get('sm_mdp', {}))
     if calibrating:
         # 仅采集零Adapter速度统计；此临时标尺不参与任何参数更新，标定后必须重新加载。
         s0 = torch.ones(21)
@@ -124,4 +125,5 @@ def behavior_config(cfg):
     # 只绑定实际采样/奖励/优化合同，不比较源码SHA或可重定位的目录。
     return {k: cfg[k] for k in ("algorithm", "physics_backend", "reference_steps", "hidden_dims", "output_dim", "control_hz",
                                "bptt_steps", "observation_noise", "music", "rewards")} | {
+        "sm_mdp": cfg.get('sm_mdp', {}),
         "optimization": {k: cfg["training"][k] for k in ("adapter_lr", "critic_lr", "wm_lr", "wm_fit_window", "gamma_per_control", "lambda_return_per_control", "grad_clip_norm")}}
