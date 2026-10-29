@@ -42,3 +42,52 @@ Critic以H+1想象轨迹GAE/lambda-return为主目标，并加入最新2～3个�
 针对根权重/旧默认隔离、dt一次、输入梯度、H64有界Critic BPTT、真实终止TD及Critic-off路径，CPU定向回归17 passed / 10.88s。完整回归与Server-1实际启动、首次Adapter更新、物理评价及checkpoint恢复结果完成后追加。
 
 完整CPU回归：150 passed / 50.05s，临时产物清理完成。
+
+## Server-1实际启动与恢复记录
+
+2026-10-29 16:19（北京时间）已实际启动全部八卡，无排队或跳过。运行源码固定为GENMO `0e23094dd062b828ee5b8a51a9660cb32a3d78b4`、SuperMimic `44cc31b77bc2dd1f998cec93933f812540dbd4d6`。输出根为 `/data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/formal_rootweight_critic_20261029_1619`，各组目录为 `gpu0` 至 `gpu7`，独立配置为根目录的 `config_gpuN.yaml`，完整命令见 `launch_manifest.json`。冻结运行工作树为该根目录的 `source_genmo` 与 `source_supermimic`；后续文档提交不改变已运行源码。
+
+执行的启动命令（Server-1，adapter/GENMO开发树内）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python -B tools/launch_stage2_alternating.py \
+  --root /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/formal_rootweight_critic_20261029_1619 \
+  --session-prefix rootweight_critic_20261029_1619 \
+  --config-dir configs/closedloop/stage2_rootweight_critic_20261029 --wait-for-free-gpus
+```
+
+|GPU|训练PID|tmux后缀（公共前缀rootweight_critic_20261029_1619_）|16:24已完成Adapter更新|真实采集转移|
+|---|---:|---|---:|---:|
+|0|418357|g0|18|739328|
+|1|418382|g1|16|729088|
+|2|418424|g2|10|694272|
+|3|418509|g3|10|694272|
+|4|418580|g4|7|684032|
+|5|418625|g5|5|673792|
+|6|421299|g6|6|677888|
+|7|422338|g7|5|673792|
+
+上述是采样时刻的运行快照，不是最终训练结果。八组首次Adapter更新前均完成647168条真实采集和1010次WM更新；首次参数L2变化均约0.00253，控制动作变化非零。开Critic的GPU1/3/5/7首次正式迭代分别执行24/48/96/96次Critic小批量优化，折扣终端价值非零；关闭组为0。日志中的Adapter计数不包含WM/Critic优化。GPU可见设备、PID argv/cwd、tmux、GPU占用和初始资产均已核验，见 `launch_verification.json`；无关tmux `genmo-rolling-20261022_182720`保持原状，旧实验未覆盖。
+
+初期完整交替轮次中位数：H16约4.9～5.2s、H32约9.0～9.1s、H64无Critic约16.5～16.8s、有Critic约17.9～18.6s。这个统计包含采集、10次WM及Adapter/Critic计算，不含周期性checkpoint和独立评价；H64不是单次终态预测。16:22实测GPU进程占用约8.6～12.8GiB，各组仍运行；CUDA allocated峰值约7.2～8.3GiB，两者口径不同。
+
+启动前64环境H64+Critic真实测试完成两次更新后恢复到第三次；保存/恢复前后优化器step分别为Adapter 2→3、WM 3→4、Critic 33→49，Replay恢复1472条、最终采集1664条，Critic上界/归一化、RNG和三网络/优化器均包含在完整checkpoint中。物理隐藏求解器状态仍按既有合同新开真实episode，不宣称逐位恢复接触状态。独立临时目录 `/tmp/genmo_rootweight_critic_gpu_20261029_1617` 已清理，摘要保留在正式运行根的 `startup_validation.json`。
+
+## 第5次更新的初期物理对照边界
+
+八组均完成独立4环境、相同歌曲/初态、无探索噪声、256控制步（5.12秒）的validation。下表是候选相对本组零Adapter的百分比变化；Tracking越高越好，其余误差越低越好。不是整歌结果，不用该短前缀的完成率判断整歌表现。
+
+|GPU|Tracking|关节q误差|身体姿态误差|根RMSE|jerk|
+|---|---:|---:|---:|---:|---:|
+|0|+0.305%|-2.639%|-1.463%|-8.955%|+1.006%|
+|1|-0.052%|+1.071%|+0.726%|-0.797%|+0.329%|
+|2|+0.262%|-2.665%|-1.796%|-2.504%|+0.097%|
+|3|-0.107%|+1.197%|+0.854%|+2.230%|+0.504%|
+|4|+0.156%|-1.482%|-1.306%|+1.371%|+1.228%|
+|5|-0.009%|+0.921%|+0.832%|-2.523%|+2.337%|
+|6|+0.192%|-0.812%|-0.627%|-4.912%|+0.751%|
+|7|+0.042%|-0.207%|+0.307%|-4.905%|+0.495%|
+
+零Adapter此短validation的Tracking约0.114233/步、关节q RMSE约0.090652rad、qd RMSE约0.544726rad/s、身体姿态RMSE约0.101801rad、根RMSE约0.035854m。新权重下Tracking上限0.124/步，不能仍按旧满分0.1换算。
+
+目前只能确认八组训练链路和首次物理评价正常；不能据五次更新宣布最终提升，也没有证据表明加Critic已经优于不加。Critic虽未超过12.4上界，部分估值已接近上界，且终端项及梯度较大，仍需持续看真实配对评价；本轮不把想象EV或上界本身称为校准成功。后续按既定20/50/100/200等更新点自动整歌评价与保存，validation选best，evaluation只报告。
