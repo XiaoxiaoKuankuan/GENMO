@@ -146,7 +146,7 @@ class ReferenceProjection(torch.nn.Module):
                  height_acceleration=1.2, rotation_velocity=.3, rotation_acceleration=3.,
                  iterations=3000, coupled_iterations=40, tolerance=1e-6,
                  constrain_root_angular_acceleration=True, root_orientation_mode='legacy',
-                 so3_qp_solver='active_set', so3_warm_start=True):
+                 so3_qp_solver='active_set', so3_warm_start=False):
         super().__init__()
         self.iterations, self.tolerance = iterations, tolerance
         self.coupled_iterations = coupled_iterations
@@ -197,6 +197,7 @@ class ReferenceProjection(torch.nn.Module):
         return torch.cat((proposal[..., :3], rotation, proposal[..., 6:]), -1)
 
     def forward(self, proposal, left, anchor, nominal_rotation=None, previous_plan=None):
+        original_proposal = proposal
         if self.root_orientation_mode == 'smooth_so3':
             proposal = self.smooth_rotation(proposal, left, anchor)
         elif self.root_orientation_mode == 'no_root_orientation':
@@ -248,6 +249,12 @@ class ReferenceProjection(torch.nn.Module):
             self.warm_plan = previous_plan
             try:
                 result = self.project_rotation(proposal, result, left, anchor, nominal_rotation, lower, upper)
+            except RuntimeError as error:
+                if hasattr(error, 'bad_mask'):
+                    from .projection_evidence import projection_snapshot
+                    # smooth模式必须保存变换前提案，离线恢复不能重复做三次拟合。
+                    error.projection_inputs = projection_snapshot(self, original_proposal, left, anchor, nominal_rotation)
+                raise
             finally:
                 self.warm_plan = None
         elif self.root_orientation_mode == 'no_root_orientation':

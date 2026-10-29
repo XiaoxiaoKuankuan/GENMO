@@ -72,6 +72,24 @@ def checkpoint_keep_paths(extra):
     return keep
 
 
+def validation_degradation(previous, zero, current, rules):
+    """仅整歌validation连续明显退化才停止本组；不逐候选回滚，也不读取evaluation。"""
+    if not rules or current.get('max_steps') is not None:
+        return previous or dict(consecutive=0, stop=False)
+    reasons = []
+    for metric, limit in (('mean_root_position_rmse_m', rules['root_rmse_relative_increase']),
+                          ('mean_jerk_rms', rules['jerk_relative_increase'])):
+        if current[metric] is not None and zero[metric] and current[metric] > zero[metric]*(1+limit):
+            reasons.append(metric)
+    if current['mean_full_horizon_tracking'] < zero['mean_full_horizon_tracking']*(1-rules['tracking_relative_drop']):
+        reasons.append('full_horizon_tracking')
+    if current['completion_rate'] < zero['completion_rate']-rules['completion_absolute_drop']+1e-12:
+        reasons.append('completion_rate')
+    consecutive = (previous or {}).get('consecutive', 0)+1 if reasons else 0
+    return dict(consecutive=consecutive, reasons=reasons, stop=consecutive >= rules['consecutive_full_evaluations'],
+                selection_split='validation_only', rules=rules)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
@@ -269,6 +287,11 @@ def main():
         key = 'best' if full else 'best_short'
         extra[key] = select_validation_best(extra[key], zero, reports['validation'], extra['zero_checkpoint'],
             adapter_updates=state['accepted_updates'], scope=scope)
+        if full and state['accepted_updates'] > 0:
+            extra['validation_quality'] = validation_degradation(extra.get('validation_quality'),
+                zero, reports['validation'], settings.get('quality_stop'))
+            append_json(output/'validation_quality.jsonl', dict(extra['validation_quality'],
+                adapter_updates=state['accepted_updates'], timestamp=time.time()))
         if full and extra['best'] and extra['best'].get('model_identity') == 'initial_zero_Adapter':
             if extra['zero_checkpoint'] is not None:
                 json_write(output/'best_checkpoint.json', dict(extra['zero_checkpoint'], validation=extra['best']), replace=True)
@@ -443,6 +466,12 @@ def main():
                             critic=critic.state_dict(), config=cfg, state=state.copy(), continuation='weights_only'),
                             output/f'weights_{update:06d}_{time.time_ns()}.pt')
                     checkpoint('warmup' if warmup else 'periodic')
+                if extra.get('validation_quality', {}).get('stop'):
+                    json_write(output/'quality_stop.json', dict(extra['validation_quality'],
+                        adapter_updates=state['accepted_updates'], timestamp=time.time()))
+                    publish('stopped_sustained_validation_degradation',
+                            stop_reasons=extra['validation_quality']['reasons'])
+                    return 0
                 publish('WM_only_warmup' if warmup else 'formal_alternating', gpu_process_mib=gpu_usage())
             publish('completed_configured_Adapter_updates', target_updates=vector['target_accepted_updates'])
             return 0

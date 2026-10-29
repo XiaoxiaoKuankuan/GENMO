@@ -68,8 +68,9 @@ def main():
     if args.baseline_source:
         import importlib.util, types
         path = Path(args.baseline_source)/'gem/closedloop/reference_adapter/so3_projection.py'
-        spec = importlib.util.spec_from_file_location('dedicated_baseline_so3', path)
-        old = importlib.util.module_from_spec(spec); spec.loader.exec_module(old)
+        name = 'gem.closedloop.reference_adapter.dedicated_baseline_so3'
+        spec = importlib.util.spec_from_file_location(name, path)
+        old = importlib.util.module_from_spec(spec); sys.modules[name] = old; spec.loader.exec_module(old)
         control.projection.project_rotation = types.MethodType(lambda self, *a: old.project_rotation_implicit(self, *a), control.projection)
     calibration = json.loads(Path(cfg['alternating']['calibration']).read_text())
     control.precision = PrecisionObjective(calibration['scales'], **cfg['alternating']['precision'])

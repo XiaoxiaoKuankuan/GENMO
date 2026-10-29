@@ -57,7 +57,7 @@ def _accumulate_projection_statistics(target, source):
                  'so3_float64_excess', 'so3_float32_excess', 'qp_ipm_residual_max'):
         if name in source and source[name].numel():
             value = source[name].detach().amax()
-            key = name+'_max'
+            key = name if name.endswith('_max') else name+'_max'
             target[key] = value if key not in target else torch.maximum(target[key], value)
 
 
@@ -329,7 +329,11 @@ def _policy_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
         values.update(qp_active_fraction=values.get('qp_active_count', 0)/max(values.get('qp_channel_count', 0), 1),
             sqp_active_fraction=values.get('sqp_active_count', 0)/max(values.get('sqp_batch_count', 0), 1),
             sqp_iterations_mean=values.get('sqp_iterations_sum', 0)/max(values.get('sqp_iterations_count', 0), 1),
-            sqp_kkt_polish_iterations_mean=values.get('sqp_kkt_polish_iterations_sum', 0)/max(values.get('sqp_kkt_polish_iterations_count', 0), 1))
+            sqp_kkt_polish_iterations_mean=values.get('sqp_kkt_polish_iterations_sum', 0)/max(values.get('sqp_kkt_polish_iterations_count', 0), 1),
+            qp_kkt_accept_fraction=values.get('qp_kkt_accepted', 0)/max(values.get('qp_kkt_samples', 0), 1),
+            qp_kkt_iterations_mean=values.get('qp_kkt_iterations', 0)/max(values.get('qp_kkt_samples', 0), 1),
+            qp_ipm_iterations_mean=values.get('qp_ipm_iterations', 0)/max(values.get('qp_ipm_samples', 0), 1),
+            sqp_warm_start_fraction=values.get('sqp_warm_start_count', 0)/max(values.get('sqp_active_count', 0), 1))
         report['projection_solver'] = values
     if diagnostics:
         raw_norm, projected_norm = gradient_square['raw_residual']**.5, gradient_square['residual']**.5

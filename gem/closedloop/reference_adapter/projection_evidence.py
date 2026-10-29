@@ -23,13 +23,16 @@ def cpu_snapshot(value):
 def projection_snapshot(projector, raw, left, anchor, nominal_rotation):
     """只由异常处理器调用；保留整个失败批次以复现批处理求解的数值上下文。"""
     inputs = dict(raw=raw, left=left, anchor=anchor, nominal_rotation=nominal_rotation)
+    if getattr(projector, 'warm_plan', None) is not None:
+        inputs['previous_plan'] = projector.warm_plan
     return dict(schema='reference_projection_failure.v1', inputs=cpu_snapshot(inputs),
         requires_grad={k: bool(v.requires_grad) if isinstance(v, torch.Tensor) else False
                        for k, v in inputs.items()}, gradient_enabled=torch.is_grad_enabled(),
         joint_names=tuple(projector.joint_names), buffers=cpu_snapshot(projector.state_dict()),
         options={k: getattr(projector, k) for k in ('iterations', 'coupled_iterations',
             'tolerance', 'rotation_velocity', 'rotation_acceleration',
-            'constrain_root_angular_acceleration')}, original_device=str(raw.device))
+            'constrain_root_angular_acceleration', 'root_orientation_mode', 'so3_qp_solver',
+            'so3_warm_start')}, original_device=str(raw.device))
 
 
 def retain_partial_failure(control, error, start, starts, *, offset, horizon, context):
@@ -60,7 +63,9 @@ def restore_projection(evidence, device='cpu'):
     buffers = {k: v.to(device) for k, v in evidence['buffers'].items()}
     projector = ReferenceProjection(SimpleNamespace(joint_names=evidence['joint_names']),
         buffers['bounds'], **evidence['options']).to(device)
-    projector.load_state_dict(buffers)
+    missing = projector.load_state_dict(buffers, strict=False)
+    if set(missing.missing_keys)-{'smooth_basis', 'smooth_fit'} or missing.unexpected_keys:
+        raise ValueError('投影现场缺少必要约束矩阵或预算')
     inputs = {k: (v.to(device=device, copy=True).requires_grad_(evidence['requires_grad'][k])
                   if isinstance(v, torch.Tensor) else v) for k, v in evidence['inputs'].items()}
     return projector, inputs

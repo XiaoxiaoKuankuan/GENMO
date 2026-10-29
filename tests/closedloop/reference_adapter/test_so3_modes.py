@@ -71,3 +71,18 @@ def test_mode_budgets_cannot_silently_change():
     with pytest.raises(ValueError,match='预算'):
         ReferenceProjection(SimpleNamespace(joint_names=['joint']*21),torch.ones(27),
                             root_orientation_mode='strict_so3',rotation_acceleration=6.)
+
+
+def test_quality_stop_requires_consecutive_full_validation():
+    from gem.closedloop.reference_adapter.alternating_entry import validation_degradation
+    rules=dict(root_rmse_relative_increase=.25,jerk_relative_increase=.20,
+        tracking_relative_drop=.02,completion_absolute_drop=.25,consecutive_full_evaluations=2)
+    zero=dict(max_steps=None,mean_root_position_rmse_m=.1,mean_jerk_rms=100.,
+              mean_full_horizon_tracking=.09,completion_rate=1.)
+    bad=dict(zero,mean_root_position_rmse_m=.14)
+    first=validation_degradation(None,zero,bad,rules)
+    assert first['consecutive']==1 and not first['stop']
+    second=validation_degradation(first,zero,bad,rules)
+    assert second['stop']
+    assert not validation_degradation(first,zero,zero,rules)['stop']
+    assert validation_degradation(first,zero,dict(bad,max_steps=256),rules)==first
