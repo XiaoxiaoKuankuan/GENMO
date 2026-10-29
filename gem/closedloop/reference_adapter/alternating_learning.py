@@ -11,7 +11,8 @@ Adapter/Actor/WM，完整内部计算图通过梯度检查点保留。只执行�
 计算GAE(lambda)标签，再训练Critic；Critic关闭时不产生价值损失或终端梯度。
 正式入口不创建投影器；本模块中投影拒绝分支仅服务显式加载旧投影的历史审计。
 旧审计的孤立求解失败按microbatch记录，不能把它冒充真实摔倒。
-NaN/Inf等硬故障仍抛出并保存现场。正式修复配置关闭未经真实校准的Critic终端梯度。
+NaN/Inf等硬故障仍抛出并保存现场。新Critic对照可使用真实转移TD锚定；TD标签
+仍含bootstrap，不冒充独立完整MC校准，也不作为阻塞正式训练的预验收门禁。
 """
 
 import copy
@@ -359,38 +360,72 @@ def _policy_update(control, dynamics, critic, optimizer, starts, horizon, *, ter
     return report, dataset
 
 
-def critic_update(critic, optimizer, trajectory, *, gamma=.99, lam=.95, epochs=5, minibatches=4):
-    if trajectory is None:
+def critic_update(critic, optimizer, trajectory, *, gamma=.99, lam=.95, epochs=5, minibatches=4,
+                  real=None, real_weight=1., batch_size=None):
+    """想象lambda-return与本轮真实TD(0)锚定；真实终止不自举且不跨reset拼接。
+
+    real来自采集器reset前的起点/末态，奖励使用实际执行动作和同一名义参考。
+    两类标签都在优化前冻结；不把TD误差日志称为MC校准。无trajectory时可用真实
+    转移预热Critic；两者皆无时不执行任何优化，保持Critic-off路径不变。
+    """
+    if trajectory is None and real is None:
         return dict(critic_loss=None, critic_optimizer_steps=0)
-    x = trajectory['features'].detach()
-    critic.norm.update(x)
+    x = trajectory['features'].detach() if trajectory is not None else None
+    if x is not None:
+        critic.norm.update(x)
+    if real is not None:
+        rx, rn = real['features'].detach(), real['next_features'].detach()
+        critic.norm.update(torch.cat((rx, rn)))
     with torch.no_grad():
-        values = critic(x)
-        target = lambda_returns(trajectory['rewards'], trajectory['continuation'], values, gamma, lam)
-    xf, yf = x[:-1].flatten(0, 1), target.flatten()
+        if x is not None:
+            values = critic(x)
+            target = lambda_returns(trajectory['rewards'], trajectory['continuation'], values, gamma, lam)
+            xf, yf = x[:-1].flatten(0, 1), target.flatten()
+        if real is not None:
+            ry = real['rewards'].detach()+gamma*(~real['done']).to(rx)*critic(rn)
+        if x is None:
+            xf, yf = rx, ry
     losses, steps = [], 0
     for _ in range(epochs):
-        for ids in torch.randperm(len(xf), device=xf.device).tensor_split(minibatches):
+        permutation = torch.randperm(len(xf), device=xf.device)
+        batches = permutation.split(batch_size) if batch_size else permutation.tensor_split(minibatches)
+        for ids in batches:
             if not len(ids):
                 continue
             optimizer.zero_grad(set_to_none=True)
             loss = (critic(xf[ids])-yf[ids]).square().mean()
+            if real is not None and x is not None:
+                real_ids = torch.randint(len(rx), (len(ids),), device=rx.device)
+                loss = loss+real_weight*(critic(rx[real_ids])-ry[real_ids]).square().mean()
             if not torch.isfinite(loss):
                 raise FloatingPointError('Critic想象GAE loss非有限')
             loss.backward()
             nn.utils.clip_grad_norm_(critic.parameters(), 1., error_if_nonfinite=True)
-            optimizer.step(); losses.append(float(loss.detach())); steps += 1
+            optimizer.step(); losses.append(loss.detach()); steps += 1
     optimizer.zero_grad(set_to_none=True)
     if not bool(torch.stack([torch.isfinite(p).all() for p in critic.parameters()]).all()):
         raise FloatingPointError('Critic Adam后参数非有限')
     with torch.no_grad():
         error = critic(xf)-yf
         variance = yf.var(unbiased=False)
-    return dict(critic_loss=sum(losses)/len(losses), critic_optimizer_steps=steps,
+    result = dict(critic_loss=float(torch.stack(losses).mean()), critic_optimizer_steps=steps,
                 critic_target_mean=float(yf.mean()), critic_target_std=float(variance.sqrt()),
-                critic_imagined_mse=float(error.square().mean()),
-                critic_imagined_ev=float(1-error.var(unbiased=False)/variance) if variance > 1e-12 else None,
-                critic_norm_count=float(critic.norm.count), critic_target_source='imagined_GAE_lambda_not_real_MC')
+                critic_imagined_mse=float(error.square().mean()) if x is not None else None,
+                critic_imagined_ev=float(1-error.var(unbiased=False)/variance) if x is not None and variance > 1e-12 else None,
+                critic_norm_count=float(critic.norm.count),
+                critic_target_source=('imagined_GAE_lambda_plus_real_TD0_not_MC' if x is not None and real is not None
+                                     else 'real_TD0_not_MC' if x is None else 'imagined_GAE_lambda_not_real_MC'))
+    with torch.no_grad():
+        predictions = critic(xf)
+        result.update(critic_value_mean=float(predictions.mean()), critic_value_max=float(predictions.max()))
+        if hasattr(critic, 'value_upper_bound'):
+            result.update(critic_value_upper_bound=float(critic.value_upper_bound),
+                critic_near_upper_fraction=float((predictions > .95*critic.value_upper_bound).float().mean()))
+        if real is not None:
+            result.update(critic_real_td_mse=float((critic(rx)-ry).square().mean()),
+                critic_real_target_mean=float(ry.mean()), critic_real_samples=len(rx),
+                critic_real_terminals=int(real['done'].sum()))
+    return result
 
 
 def policy_update(control, dynamics, critic, optimizer, starts, horizon, *, timing=False, **kwargs):

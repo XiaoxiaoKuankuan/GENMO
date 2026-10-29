@@ -4,7 +4,8 @@
 Actor/WM后的逐步BPTT→可选想象GAE Critic。100个WM-only交替循环后直接策略
 更新，不加载旧Adapter，不运行Oracle/方向审计/物理候选回滚。GPU配置决定H8、
 H16、H32或H64及动作探索消融；WM仍固定真实H8递归监督，十帧参考不随BPTT
-增长。未经真实回报校准的Critic暂不参与训练或终端梯度。
+增长。显式开启的Critic使用想象GAE及本轮真实转移TD锚定，回报上界来自实际奖励；
+预热阶段可先用真实TD训练。该实验不将自举标签冒充独立MC校准。
 
 每次有限Adam完成立即计数并记录修正传播及投影梯度；0/5/10更新固定短时对照，
 20更新起执行无探索整歌validation和evaluation，只有validation选择best。评价下降只
@@ -105,6 +106,8 @@ def main():
     import numpy as np
     import torch
     from supermimic.networks import Critic
+    from .critic import AlternatingCritic
+    from .rewards import sm_mdp_contract
     from supermimic.env import make_sim
     from supermimic.bridge.streaming_env import StreamingPhysicalEnv
     from supermimic.bridge.bundle import atomic_save, file_digest
@@ -129,8 +132,6 @@ def main():
         raise ValueError('正式入口只允许原SM H8监督交替算法')
     if cfg['bptt_steps'] not in (8, 16, 32, 64):
         raise ValueError('本次正式BPTT配置只使用H8/H16/H32/H64')
-    if settings['critic_enabled']:
-        raise ValueError('10月28日修复实验暂时关闭未经独立真实回报校准的Critic；不能使用旧想象EV放行')
     if torch.cuda.device_count() != 1 or int(os.environ.get('WORLD_SIZE', '1')) != 1:
         raise ValueError('每组必须仅可见一张GPU；禁止DDP/跨GPU通信')
     output = Path(args.output).resolve()
@@ -146,13 +147,14 @@ def main():
     json_write(output/'manifest.json', dict(config=cfg, command=[sys.executable, *sys.argv], state=state.copy(),
         initialization='full_resume_same_experiment' if args.resume else 'zero_Adapter_original_pretrained_WM_no_old_policy', communication='none',
         acceptance='finite_Adam_step_not_a_physical_improvement_certificate',
-        critic_status='disabled_unqualified_real_MC_anchor_and_independent_calibration_required',
+        critic_status=('enabled_bounded_GAE_real_TD_not_MC_calibrated' if settings['critic_enabled'] else 'disabled'),
         full_checkpoint_retention='initial_zero_latest_two_and_validation_best_all_numbered_weights_kept'))
     (output/'pid').write_text(str(os.getpid())+'\n')
     engine = critic = collector = replay = tangent = None
     optimizers = {}
     extra = normalize_extra_state()
     frozen = None
+    real_critic_rows = []
 
     def publish(phase, **fields):
         state.update(phase=phase, updated_unix=time.time(), **fields)
@@ -216,6 +218,7 @@ def main():
         return path
 
     def collect(n):
+        real_critic_rows.clear()
         totals = {}
         breakdown = {}
         begin = time.perf_counter()
@@ -225,6 +228,13 @@ def main():
                 exploration_fraction=settings.get('exploration_fraction', 0.),
                 exploration_std=settings.get('exploration_std', .1))
             update_wm_normalization(engine.dynamics, row)
+            if settings['critic_enabled']:
+                # end是reset前的真实终态；采集器仅修改其独立下一状态，不跨episode自举。
+                with torch.no_grad():
+                    real_critic_rows.append(dict(features=control.critic_features(row['start']),
+                        next_features=control.critic_features(row['end']),
+                        rewards=row['reward'].detach(), done=row['done']))
+                    del real_critic_rows[:-3]  # 初始化大段采集只保留最新三个真实向量步作TD锚定。
             for name, milliseconds in row['timing'].items():
                 if name.endswith('_ms'):
                     breakdown[name[:-3]+'_seconds'] = breakdown.get(name[:-3]+'_seconds', 0.)+milliseconds/1000
@@ -321,7 +331,9 @@ def main():
         control.soft_joint_limit_cost = False
         control.sm_soft_termination_only = True
         control.relative_critic_features = True
-        critic = Critic(2835).cuda()
+        value_bound = .02*sum(sm_mdp_contract(control.runtime)['weights'].values())/(1-train['gamma_per_control'])
+        critic = (AlternatingCritic(2835, value_bound) if settings['critic_enabled'] else Critic(2835)).cuda()
+        state['critic_value_upper_bound'] = value_bound if settings['critic_enabled'] else None
         critic.requires_grad_(settings['critic_enabled'])
         optimizers = dict(adapter=torch.optim.Adam(control.adapter.parameters(), lr=train['adapter_lr'], betas=(.9, .95)),
             wm=torch.optim.Adam(engine.dynamics.model.net.parameters(), lr=train['wm_lr']),
@@ -391,6 +403,18 @@ def main():
                 torch.cuda.synchronize()
                 row.update(wm_report, wm_seconds=time.perf_counter()-wm_begin)
                 warmup = state['iterations'] <= settings['wm_only_iterations']
+                real_critic = ({key: torch.cat([part[key] for part in real_critic_rows])
+                                for key in real_critic_rows[0]} if real_critic_rows else None)
+                real_critic_rows.clear()
+                critic_seconds = 0.
+                if warmup and settings['critic_enabled']:
+                    publish('real_TD_Critic_warmup')
+                    critic_begin = time.perf_counter()
+                    v = critic_update(critic, optimizers['critic'], None, real=real_critic,
+                        gamma=train['gamma_per_control'], epochs=1, batch_size=train.get('critic_batch', 2048))
+                    state['critic_optimizer_updates'] += v['critic_optimizer_steps']
+                    critic_seconds = time.perf_counter()-critic_begin
+                    row.update(v)
                 if not warmup:
                     publish('Adapter_BPTT')
                     starts = replay.starts(train['actor_batch'], horizon=cfg['bptt_steps'], ends=bank.ends)
@@ -402,7 +426,7 @@ def main():
                     pi_begin = time.perf_counter()
                     try:
                         pi, imagined = policy_update(control, engine.dynamics, critic, optimizers['adapter'], starts,
-                            cfg['bptt_steps'], terminal_value=False, microbatch=train['backward_microbatch'],
+                            cfg['bptt_steps'], terminal_value=settings['critic_enabled'], microbatch=train['backward_microbatch'],
                             gamma=train['gamma_per_control'], diagnostics=True, timing=True, on_step=completed,
                             failure_context=dict(source=runtime_source, experiment_source=state['source'],
                                 iteration=state['iterations'],
@@ -424,17 +448,22 @@ def main():
                     extra['consecutive_projection_rejections'] = 0
                     row.update(pi, policy_seconds=time.perf_counter()-pi_begin)
                     publish('imagined_GAE_Critic' if settings['critic_enabled'] else 'Critic_disabled')
+                    critic_begin = time.perf_counter()
                     v = critic_update(critic, optimizers['critic'], imagined, gamma=train['gamma_per_control'],
                         lam=train['lambda_return_per_control'], epochs=settings['critic_epochs'],
-                        minibatches=settings['critic_minibatches'])
+                        minibatches=settings['critic_minibatches'], real=real_critic,
+                        real_weight=settings.get('critic_real_td_weight', 1.), batch_size=train.get('critic_batch'))
                     state['critic_optimizer_updates'] += v['critic_optimizer_steps']
+                    critic_seconds = time.perf_counter()-critic_begin
                     row.update(v)
                     del starts, imagined
                 if state['iterations'] % 10 == 0 or state['accepted_updates'] == 1:
                     engine.step.bundle.assert_unchanged(frozen)
                 update = state['accepted_updates']
+                row['critic_seconds'] = critic_seconds
                 row.update(iteration=state['iterations'], adapter_updates=update, wm_updates=engine.dynamics.model_version,
-                    phase='WM_only_warmup' if warmup else 'formal_alternating', real_transitions=collector.real_transitions,
+                    phase=('WM_and_real_TD_Critic_warmup' if settings['critic_enabled'] else 'WM_only_warmup')
+                           if warmup else 'formal_alternating', real_transitions=collector.real_transitions,
                     train_transitions=collector.real_by_role.get('train', 0), iteration_seconds=time.perf_counter()-begin,
                     timestamp=time.time(), peak_cuda_allocated_mib=torch.cuda.max_memory_allocated()/2**20,
                     wm_in_norm_count=float(engine.dynamics.model.in_norm.count),
@@ -443,7 +472,8 @@ def main():
                 append_json(output/'timing.jsonl', dict(phase='alternating_iteration', adapter_updates=update,
                     real_collection_seconds=row['collection_seconds'], wm10_seconds=row['wm_seconds'],
                     real_collection_regions=row['collection_breakdown_seconds'],
-                    adapter_seconds=row.get('policy_seconds'), adapter_regions=row.get('timing'), timestamp=time.time()))
+                    adapter_seconds=row.get('policy_seconds'), adapter_regions=row.get('timing'),
+                    critic_seconds=critic_seconds, timestamp=time.time()))
                 if warmup and state['iterations'] % 10 == 0 or not warmup and (update == 1 or update % settings['log_every'] == 0):
                     print(json.dumps(row, ensure_ascii=False, allow_nan=False), flush=True)
                     from .training_report import safe_update_report as update_report
@@ -466,7 +496,8 @@ def main():
                     publish('stopped_sustained_validation_degradation',
                             stop_reasons=extra['validation_quality']['reasons'])
                     return 0
-                publish('WM_only_warmup' if warmup else 'formal_alternating', gpu_process_mib=gpu_usage())
+                publish(('WM_and_real_TD_Critic_warmup' if settings['critic_enabled'] else 'WM_only_warmup')
+                        if warmup else 'formal_alternating', gpu_process_mib=gpu_usage())
             publish('completed_configured_Adapter_updates', target_updates=vector['target_accepted_updates'])
             return 0
     except BaseException as error:

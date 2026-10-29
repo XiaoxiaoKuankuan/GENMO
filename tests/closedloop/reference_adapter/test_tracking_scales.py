@@ -22,12 +22,13 @@ OVERRIDES = dict(root_pos_std=.2, root_ori_std=.3, body_pos_std=.1,
                  body_ori_std=.15, term_height=.2, term_tilt=.6)
 
 
-def test_tracking_scales_keep_weights_dt_and_input_gradients(system):
+@pytest.mark.parametrize('root_weights', [{}, {'root_pos_weight': 1.2, 'root_ori_weight': 1.}])
+def test_tracking_scales_keep_weights_dt_and_input_gradients(system, root_weights):
     engine, z = system
     original = engine.step.runtime
     before = asdict(original.mdp.cfg)
     runtime = copy.copy(original); runtime.mdp = copy.copy(original.mdp)
-    configure_sm_mdp(runtime, OVERRIDES)
+    configure_sm_mdp(runtime, OVERRIDES | root_weights)
     assert asdict(original.mdp.cfg) == before
     assert runtime.mdp.cfg is not original.mdp.cfg
     assert runtime.mdp.cfg.body_linvel_std == before['body_linvel_std']
@@ -40,6 +41,9 @@ def test_tracking_scales_keep_weights_dt_and_input_gradients(system):
     reward, terms = runtime.reward(state, action, z.previous_action, nominal, diagnostics=True)
     expected_track = sum(weight*torch.exp(-terms['error_'+name]/getattr(runtime.mdp.cfg, name+'_std')**2)
                          for name, weight in sm_mdp_contract(runtime)['weights'].items())*.02
+    assert sm_mdp_contract(runtime)['weights'] == dict(body_pos=1., body_ori=1., body_linvel=1.,
+        body_angvel=1., root_pos=root_weights.get('root_pos_weight', .5),
+        root_ori=root_weights.get('root_ori_weight', .5))
     torch.testing.assert_close(terms['track'], expected_track)
     expected = expected_track+.02*(runtime.mdp.cfg.w_action_rate*terms['action_rate']+
                                     runtime.mdp.cfg.w_joint_limit*terms['joint_limit'])
@@ -75,7 +79,7 @@ def test_original_reference_height_tilt_failure_and_soft_threshold(system):
     assert not runtime.mdp.termination(S, None, ref=nominal._replace(root_p=p, root_R=R)).any()
 
 
-@pytest.mark.parametrize('bad', [{'root_pos_weight': .2}, {'term_height': 0.}, {'body_ori_std': float('nan')}])
+@pytest.mark.parametrize('bad', [{'root_pos_weight': -.2}, {'term_height': 0.}, {'body_ori_std': float('nan')}])
 def test_invalid_scale_configuration_is_rejected_at_entry(system, bad):
     with pytest.raises(ValueError, match='SM误差尺度'):
         configure_sm_mdp(system[0].step.runtime, bad)

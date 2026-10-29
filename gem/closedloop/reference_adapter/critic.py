@@ -7,6 +7,29 @@
 
 import torch
 from torch import nn
+from supermimic.networks import Critic as SuperMimicCritic
+
+
+class AlternatingCritic(SuperMimicCritic):
+    """原SM归一化MLP加可微回报上界；不改变2835维特权输入或Adapter观测。
+
+    当前奖励除Tracking外均非正，因此每步最大Tracking/(1-gamma)是真实回报上界。
+    使用upper-softplus(upper-raw)保持负值无界，避免硬clamp或错误直通梯度；原始
+    网络输出在零附近时导数接近1。末层零权重及解析bias使初始价值为零。归一化、
+    网络和上界均进入state_dict，只有独立Critic优化器更新该网络。
+    """
+    def __init__(self, dimension, upper_bound):
+        import math
+        super().__init__(dimension)
+        if not math.isfinite(upper_bound) or upper_bound <= 0:
+            raise ValueError('Critic真实回报上界必须为有限正数')
+        self.register_buffer('value_upper_bound', torch.tensor(float(upper_bound)))
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.constant_(self.net[-1].bias, -math.log(-math.expm1(-upper_bound)))
+
+    def forward(self, x):
+        raw = super().forward(x)
+        return self.value_upper_bound-torch.nn.functional.softplus(self.value_upper_bound-raw)
 
 
 class AdapterCritic(nn.Module):
