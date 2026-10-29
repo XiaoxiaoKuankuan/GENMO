@@ -192,6 +192,7 @@ def main():
                     gradient = optimizer.gradient.cpu()
                     parameters = torch.cat([v.detach().flatten() for v in control.adapter.parameters()]).cpu()
                     row.update(seconds=time.perf_counter()-begin, metrics=metrics,
+                        accepted_samples=metrics['accepted_samples'], rejected_samples=metrics['rejected_samples'],
                         peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,
                         peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20)
                     key = (implementation, horizon)
@@ -219,6 +220,9 @@ def main():
                     torch.cuda.empty_cache()
                 finally:
                     stop.set(); thread.join()
+                if getattr(control, 'last_imagination_failure', None) is not None:
+                    torch.save(control.last_imagination_failure,
+                        out/f'projection_failure_{implementation}_h{horizon}_micro{micro}.pt')
                 row['gpu_usage_samples'] = usage
                 results.append(row)
                 (out/'benchmark.json').write_text(json.dumps(results, ensure_ascii=False, indent=2))

@@ -86,3 +86,24 @@ def test_quality_stop_requires_consecutive_full_validation():
     assert second['stop']
     assert not validation_degradation(first,zero,zero,rules)['stop']
     assert validation_degradation(first,zero,dict(bad,max_steps=256),rules)==first
+
+
+def test_relaxed_true_stationarity_uses_correct_nonnegative_dual_faces():
+    import json
+    from pathlib import Path
+    case=json.loads((Path(__file__).parent/'fixtures/relaxed_dual_pruning.json').read_text())
+    p=ReferenceProjection(SimpleNamespace(joint_names=case['joint_names']),torch.tensor(case['bounds']),**case['options'])
+    raw,left,anchor,rotation=[torch.tensor(case[k]) for k in ('raw','left','anchor','nominal_rotation')]
+    raw.requires_grad_()
+    value=p(raw,left,anchor,rotation)
+    assert p.certificate(value,left,anchor,rotation)['feasible'].all()
+    assert p.last_statistics['sqp_stationarity_residual64'].max()<2e-6
+    assert torch.autograd.grad(value.sum(),raw)[0].isfinite().all()
+    p=p.double();raw=raw.detach().double().requires_grad_()
+    left,anchor,rotation=left.double(),anchor.double(),rotation.double()
+    torch.manual_seed(710);probe=torch.randn_like(raw);direction=torch.zeros_like(raw)
+    direction[...,3:6]=torch.randn_like(direction[...,3:6])*.001
+    value=p(raw,left,anchor,rotation);g=torch.autograd.grad((probe*value).sum(),raw)[0]
+    eps=1e-4
+    finite=((p(raw+eps*direction,left,anchor,rotation)-p(raw-eps*direction,left,anchor,rotation))*probe).sum()/(2*eps)
+    torch.testing.assert_close((g*direction).sum(),finite,atol=2e-6,rtol=.01)

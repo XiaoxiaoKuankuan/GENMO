@@ -106,6 +106,29 @@ def _multipliers(a, c, target, x):
             break
         active = next_active
     multiplier = multiplier.clamp_min(0.) * active
+    residual = x-target+(a.transpose(-1, -2)@multiplier[..., None]).squeeze(-1)
+    retry = ((residual.abs().amax(-1)>2e-6) & (c.amax(-1)<=1e-6)).nonzero().flatten()
+    if len(retry):
+        # 近活跃但实际松弛约3e-8的冗余面可让最小范数乘子出现负值；一次
+        # 删除所有负乘子会错误删除仍需要的面，产生“可行却不驻点”的假失败。
+        # 在数值收敛附近重识别真正活跃面，并逐轮只删除最负的一面。仍以完整
+        # 驻点残差选择结果，不放宽可行性或隐式梯度证书，也不调用CPU NNLS。
+        ar, cr = a[retry], c[retry]
+        mask = cr > -2e-8
+        for _ in range(30):
+            aa = ar*mask[..., None]
+            inverse = _pinverse_gram(aa)
+            lam = (aa@(inverse@(target[retry]-x[retry])[..., None])).squeeze(-1)
+            negative = lam.amin(-1)<-1e-7
+            if not bool(negative.any()):
+                break
+            remove = lam.argmin(-1)
+            mask = mask.scatter(1, remove[:, None], (~negative)[:, None] & mask.gather(1, remove[:, None]))
+        lam = lam.clamp_min(0.)*mask
+        rr = x[retry]-target[retry]+(ar.transpose(-1, -2)@lam[..., None]).squeeze(-1)
+        improve = rr.abs().amax(-1)<residual[retry].abs().amax(-1)
+        multiplier = multiplier.index_copy(0, retry, torch.where(improve[:, None], lam, multiplier[retry]))
+        active = active.index_copy(0, retry, torch.where(improve[:, None], mask, active[retry]))
     return multiplier, active
 
 

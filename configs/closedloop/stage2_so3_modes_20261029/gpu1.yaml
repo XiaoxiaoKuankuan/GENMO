@@ -1,6 +1,6 @@
 # 四种根姿态模式×H16/H32的独立正式物理对照。
 # 仅根姿态模式及其声明的硬角加速度预算不同；其余奖励/冻结资产/随机流一致。
-# 当前以microbatch256为候选，正式启动前根据同一1024起点实测统一确定。
+# 同一1024起点完整更新实测统一选microbatch512；独立物理评价仍只创建4环境。
 algorithm: genmo_supermimic_reference_adapter10
 alternating:
   action_noise: 0.0
@@ -49,7 +49,7 @@ alternating:
   root_orientation: true
   root_xy: false
   soft_joint_limit: false
-  stage_budget: 200_Adam_updates_validation_only_sustained_degradation_stop
+  stage_budget: bounded_Adam_updates_validation_only_sustained_degradation_stop
   utd: 0.4
   warmup_vector_steps: 64
   wm_only_iterations: 100
@@ -105,7 +105,7 @@ tasks: /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/stage2a_project
 training:
   actor_batch: 1024
   adapter_lr: 1.0e-05
-  backward_microbatch: 256
+  backward_microbatch: 512
   batch_size: 1024
   critic_lr: 0.0001
   gamma_per_control: 0.99
@@ -118,7 +118,7 @@ training:
   wm_lr: 3.0e-05
   wm_updates_per_iteration: 10
 vector:
-  checkpoint_every: 25
+  checkpoint_every: 50
   num_envs: 2048
   sampling_seed: 42
   target_accepted_updates: 200

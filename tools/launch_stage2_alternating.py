@@ -93,6 +93,7 @@ def main():
     p.add_argument('--session-prefix', required=True)
     p.add_argument('--gpus', default='0,1,2,3,4,5,6,7', help='本次明确启动的GPU索引；已有计算任务仍跳过')
     p.add_argument('--resume-root', help='逐GPU读取同组latest_checkpoint，不共享模型或Replay；输出仍须新目录')
+    p.add_argument('--resume-map', help='显式GPU到完整checkpoint的JSON映射；未列出的组从零初始化')
     p.add_argument('--python', default='/data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python')
     p.add_argument('--isaaclab', default='/data0/user/liwei/GENMO_assets/adapter_20261026/IsaacLab')
     p.add_argument('--inductor-cache', default='/data0/user/liwei/GENMO_assets/adapter_20261026/inductor_cache')
@@ -101,6 +102,9 @@ def main():
     p.add_argument('--wait-for-free-gpus', action='store_true', help='占用卡建立无CUDA等待任务，空闲后自动启动')
     p.add_argument('--poll-seconds', type=float, default=30.)
     args = p.parse_args()
+    if args.resume_root and args.resume_map:
+        raise ValueError('恢复根目录与显式恢复映射只能使用一个')
+    resume_map = json.loads(Path(args.resume_map).read_text()) if args.resume_map else {}
     requested_gpus = [int(value) for value in args.gpus.split(',')]
     if not requested_gpus or len(set(requested_gpus)) != len(requested_gpus) or any(gpu not in range(8) for gpu in requested_gpus):
         raise ValueError('GPU列表必须是0到7的不重复索引')
@@ -153,6 +157,11 @@ def main():
             resume = Path(pointer['path'])
             if not resume.is_file():
                 raise FileNotFoundError(f'GPU{gpu}自己的完整checkpoint不存在：{resume}')
+            command += ['--resume', str(resume)]
+        elif str(gpu) in resume_map:
+            resume = Path(resume_map[str(gpu)])
+            if not resume.is_file():
+                raise FileNotFoundError(resume)
             command += ['--resume', str(resume)]
         runner = root/f'run_gpu{gpu}.sh'
         if args.wait_for_free_gpus:
