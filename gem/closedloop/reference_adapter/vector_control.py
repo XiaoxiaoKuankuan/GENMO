@@ -130,7 +130,8 @@ class VectorControl:
         if self.projection is not None:
             rotation = nominal_pose[1]
             with scope('projection.total'):
-                residual = self.projection(residual, z['left'], z['anchor'], rotation)
+                kwargs = {'previous_plan': z['plan']} if hasattr(self.projection, 'so3_warm_start') else {}
+                residual = self.projection(residual, z['left'], z['anchor'], rotation, **kwargs)
         elif self.constraint_beta < 1:
             residual = constrain_plan(residual, z['left'], z['anchor'], self.constraint_beta)
         current, future, goal, halo = self.reference(z, residual, nominal_pose)

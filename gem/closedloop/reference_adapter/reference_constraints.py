@@ -145,7 +145,8 @@ class ReferenceProjection(torch.nn.Module):
                  ankle_velocity=.5, ankle_acceleration=5., height_velocity=.12,
                  height_acceleration=1.2, rotation_velocity=.3, rotation_acceleration=3.,
                  iterations=3000, coupled_iterations=40, tolerance=1e-6,
-                 constrain_root_angular_acceleration=True):
+                 constrain_root_angular_acceleration=True, root_orientation_mode='legacy',
+                 so3_qp_solver='active_set', so3_warm_start=True):
         super().__init__()
         self.iterations, self.tolerance = iterations, tolerance
         self.coupled_iterations = coupled_iterations
@@ -154,6 +155,16 @@ class ReferenceProjection(torch.nn.Module):
         self.joint_names = tuple(spec.joint_names)
         self.last_statistics = {}
         self.profile_enabled = False
+        if root_orientation_mode not in ('legacy', 'strict_so3', 'relaxed_so3', 'smooth_so3', 'no_root_orientation'):
+            raise ValueError('未知根姿态处理模式')
+        if root_orientation_mode in ('strict_so3', 'smooth_so3', 'relaxed_so3'):
+            expected = 6. if root_orientation_mode == 'relaxed_so3' else 3.
+            if rotation_acceleration != expected or rotation_velocity != .3 or not constrain_root_angular_acceleration:
+                raise ValueError('根姿态对照模式必须使用声明的速度/加速度预算')
+        if so3_qp_solver not in ('active_set', 'ipm'):
+            raise ValueError('SO(3) QP仅支持active_set或原IPM')
+        self.root_orientation_mode = root_orientation_mode
+        self.so3_qp_solver, self.so3_warm_start = so3_qp_solver, so3_warm_start
         # 旋转三个分量分配欧氏球预算；最终角速度始终以SO(3)复合后结果核验。
         velocity = [.12, .12, height_velocity]+[rotation_velocity/(3**.5)]*3
         acceleration = [1.2, 1.2, height_acceleration]+[rotation_acceleration/(3**.5)]*3
@@ -171,8 +182,25 @@ class ReferenceProjection(torch.nn.Module):
         matrix = torch.cat((eye, difference, difference@difference))
         self.register_buffer('matrix', matrix)
         self.register_buffer('inverse', torch.linalg.inv(eye+10*matrix.T@matrix))
+        # 三次多项式在k=-1、0精确继承两帧历史；十个网络点共同决定两个自由系数。
+        # 这是smooth模式显式选择的时间参数化，严格模式不经过该映射。
+        t = torch.arange(1, 11, device=device, dtype=dtype)/10
+        basis = torch.stack((t*(t+.1), t*(t+.1)*(t-.5)), -1)
+        self.register_buffer('smooth_basis', basis)
+        self.register_buffer('smooth_fit', torch.linalg.pinv(basis.double()).to(dtype))
 
-    def forward(self, proposal, left, anchor, nominal_rotation=None):
+    def smooth_rotation(self, proposal, left, anchor):
+        k = torch.arange(1, 11, device=proposal.device, dtype=proposal.dtype)
+        base = anchor[:, None, 3:6]+k[None, :, None]*(anchor-left)[:, None, 3:6]
+        coefficients = self.smooth_fit@(proposal[..., 3:6]-base)
+        rotation = base+self.smooth_basis@coefficients
+        return torch.cat((proposal[..., :3], rotation, proposal[..., 6:]), -1)
+
+    def forward(self, proposal, left, anchor, nominal_rotation=None, previous_plan=None):
+        if self.root_orientation_mode == 'smooth_so3':
+            proposal = self.smooth_rotation(proposal, left, anchor)
+        elif self.root_orientation_mode == 'no_root_orientation':
+            proposal = torch.cat((proposal[..., :3], proposal[..., 3:6]*0, proposal[..., 6:]), -1)
         unit = self.velocity*.02
         y = proposal.transpose(1, 2)/unit[None, :, None]
         l, c = left/unit, anchor/unit
@@ -215,8 +243,16 @@ class ReferenceProjection(torch.nn.Module):
             x = flat_y.index_copy(0, indices, solved).reshape_as(y)
             projected = (x*unit[None, :, None]).transpose(1, 2)
             result = torch.where(feasible[:, None], proposal, projected)
-        if nominal_rotation is not None:
-            result = self.project_rotation(proposal, result, left, anchor, nominal_rotation, lower, upper)
+        if nominal_rotation is not None and self.root_orientation_mode != 'no_root_orientation':
+            # 只作为无梯度的数值初值，目标、历史及名义旋转仍通过完整KKT求导。
+            self.warm_plan = previous_plan
+            try:
+                result = self.project_rotation(proposal, result, left, anchor, nominal_rotation, lower, upper)
+            finally:
+                self.warm_plan = None
+        elif self.root_orientation_mode == 'no_root_orientation':
+            self.last_statistics.update(sqp_active_count=indices.new_zeros(()),
+                                        sqp_batch_count=indices.new_tensor(len(proposal)))
         return result
 
     def angular_constraints(self, x, left, anchor, nominal_rotation):

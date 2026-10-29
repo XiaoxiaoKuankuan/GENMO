@@ -109,7 +109,80 @@ def _multipliers(a, c, target, x):
     return multiplier, active
 
 
-def _numerical_qp(target, lower, upper, matrix, iterations):
+def _active_set_qp(target, lower, upper, matrix, initial, max_iterations=8):
+    """批量活跃面KKT候选；仅完整原始/对偶/互补证书通过的样本可取代IPM。
+
+    近线性相关约束用30维Gram的秩揭示分解处理。每轮删去负乘子的面或增加
+    最大违约面；未收敛、退化及非有限样本留给原双精度IPM，不冒充投影解。
+    """
+    g = torch.cat((matrix, -matrix), 1)
+    h = torch.cat((upper, -lower), 1)
+    active = ((g@initial[..., None]).squeeze(-1)-h).abs() < 2e-6
+    answer = target.clone()
+    good = torch.zeros(len(target), device=target.device, dtype=torch.bool)
+    counts = torch.zeros(len(target), device=target.device, dtype=torch.long)
+    ids = torch.arange(len(target), device=target.device)
+    for _ in range(max_iterations):
+        a = g*active[..., None]
+        pinv = _pinverse_gram(a)
+        residual = ((g@target[..., None]).squeeze(-1)-h)*active
+        delta = (pinv@(a.transpose(-1, -2)@residual[..., None])).squeeze(-1)
+        x = target-delta
+        lam = (a@(pinv@delta[..., None])).squeeze(-1)
+        violation = (g@x[..., None]).squeeze(-1)-h
+        stationarity = x-target+(a.transpose(-1, -2)@lam[..., None]).squeeze(-1)
+        valid = ((violation.amax(-1) <= 1e-8) & (lam.amin(-1) >= -1e-9)
+                 & ((violation*active).abs().amax(-1) <= 1e-8)
+                 & (stationarity.abs().amax(-1) <= 1e-8) & torch.isfinite(x).all(-1))
+        answer[ids] = x
+        counts[ids] += 1
+        good[ids[valid]] = True
+        keep = (~valid).nonzero().flatten()
+        if not len(keep):
+            break
+        # 已验证样本立即退出后续小矩阵分解；循环只遍历固定迭代，不逐环境调用。
+        ids, target, g, h = ids[keep], target[keep], g[keep], h[keep]
+        active, lam, violation = active[keep], lam[keep], violation[keep]
+        remove = lam.amin(-1) < -1e-9
+        chosen = torch.where(remove, lam.argmin(-1), violation.argmax(-1))
+        active = active.scatter(1, chosen[:, None], (~remove)[:, None])
+    return answer, good, counts
+
+
+def _numerical_qp(target, lower, upper, matrix, iterations, *, initial=None, projector=None):
+    use_fast = projector is not None and projector.so3_qp_solver == 'active_set'
+    if use_fast:
+        with scope('projection.SO3_QP_active_KKT'):
+            answer, good, counts = _active_set_qp(target, lower, upper, matrix,
+                                                 target if initial is None else initial)
+        stats = projector.last_statistics
+        for key, value in dict(qp_kkt_samples=good.new_tensor(len(good), dtype=torch.long),
+                               qp_kkt_accepted=good.sum(), qp_kkt_iterations=counts.sum()).items():
+            stats[key] = stats.get(key, 0)+value.detach()
+        unresolved = (~good).nonzero().flatten()
+        if not len(unresolved):
+            return answer
+    else:
+        unresolved = torch.arange(len(target), device=target.device)
+        answer = target.clone()
+    with scope('projection.SO3_QP_IPM'):
+        solved, count, error = _ipm_qp(target[unresolved], lower[unresolved], upper[unresolved],
+                                     matrix[unresolved], iterations)
+    if projector is not None:
+        stats = projector.last_statistics
+        stats['qp_ipm_samples'] = stats.get('qp_ipm_samples', 0)+count.new_tensor(len(count))
+        stats['qp_ipm_iterations'] = stats.get('qp_ipm_iterations', 0)+count.sum()
+        stats['qp_ipm_residual_max'] = torch.maximum(stats.get('qp_ipm_residual_max', error.new_zeros(())), error.amax())
+    # 真实QP残差不合格必须拒绝，不能用尚未收敛的IPM结果继续SQP。
+    bad = ~torch.isfinite(error) | (error > 1e-6)
+    if bool(bad.any()):
+        mask = torch.zeros(len(target), device=target.device, dtype=torch.bool)
+        mask[unresolved[bad]] = True
+        raise ProjectionNumericalFailure('SO(3)内点QP未收敛', mask, diagnostic=dict(qp_residual=error))
+    return answer.index_copy(0, unresolved, solved)
+
+
+def _ipm_qp(target, lower, upper, matrix, iterations):
     """严格数值IPM，不把不满足互补条件的额外面硬精化为等式。"""
     g = torch.cat((matrix, -matrix), 1)
     h = torch.cat((upper, -lower), 1)
@@ -119,6 +192,9 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
     best_x = x.clone()
     best_error = x.new_full((len(x),), float('inf'))
     finished = torch.zeros(len(x), device=x.device, dtype=torch.bool)
+    ids = torch.arange(len(x), device=x.device)
+    counts = torch.zeros(len(x), device=x.device, dtype=torch.long)
+    result, result_error = x.clone(), best_error.clone()
     eye = torch.eye(x.shape[-1], device=x.device, dtype=x.dtype)
     def step_length(value, direction):
         ratio = torch.where(direction < 0, -value/direction.clamp_max(-1e-100), float('inf'))
@@ -129,6 +205,7 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
         mu = (slack*dual).mean(-1)
         residual = torch.maximum(rd.abs().amax(-1), rp.abs().amax(-1))
         error = torch.maximum(residual, mu)
+        counts[ids] += 1
         improved = error < best_error
         best_x = torch.where(improved[:, None], x, best_x)
         best_error = torch.minimum(best_error, error.nan_to_num(nan=float('inf')))
@@ -136,8 +213,19 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
         # 保留最小真实KKT残差的数值迭代，不改变任何外部约束或梯度定义。
         finished |= ((residual < 1e-8) & (mu < 1e-10)) | ~torch.isfinite(error)
         done = finished
-        if iteration % 4 == 3 and bool(done.all()):
-            break
+        if iteration % 4 == 3:
+            result[ids], result_error[ids] = best_x, best_error
+            keep = (~done).nonzero().flatten()
+            if not len(keep):
+                ids = ids[:0]
+                break
+            if len(keep) != len(ids):
+                ids, target, g, h = ids[keep], target[keep], g[keep], h[keep]
+                x, slack, dual = x[keep], slack[keep], dual[keep]
+                rd, rp, mu = rd[keep], rp[keep], mu[keep]
+                best_x, best_error = best_x[keep], best_error[keep]
+                finished = finished[keep]
+                done = finished
         lhs = eye+g.transpose(-1, -2)@((dual/slack)[..., None]*g)
         # predictor/corrector的矩阵完全相同；只分解一次，数值精度与原LU求解一致。
         lu, pivots, _ = torch.linalg.lu_factor_ex(lhs, check_errors=False)
@@ -156,7 +244,9 @@ def _numerical_qp(target, lower, upper, matrix, iterations):
         x = torch.where(done[:, None], x, x+ap[:, None]*dx)
         slack = torch.where(done[:, None], slack, (slack+ap[:, None]*ds).clamp_min(1e-30))
         dual = torch.where(done[:, None], dual, (dual+ad[:, None]*dl).clamp_min(1e-30))
-    return best_x
+    if len(ids):
+        result[ids], result_error[ids] = best_x, best_error
+    return result, counts, result_error
 
 
 def _solve(projector, initial, target, past, anchor, rotation, lower, upper, margin):
@@ -196,7 +286,8 @@ def _solve(projector, initial, target, past, anchor, rotation, lower, upper, mar
         qp_upper = torch.cat((upper, boundary), -1)
         with scope("projection.SO3_QP"):
             whitened = _numerical_qp(whitened_target, qp_lower/scale,
-                qp_upper/scale, whitened_matrix/scale[..., None], projector.coupled_iterations)
+                qp_upper/scale, whitened_matrix/scale[..., None], projector.coupled_iterations,
+                initial=(chol.transpose(-1, -2)@x[..., None]).squeeze(-1), projector=projector)
             candidate = (inv_t@whitened[..., None]).squeeze(-1)
         linear_c = torch.cat(((matrix@candidate[..., None]).squeeze(-1)-qp_upper,
                               qp_lower-(matrix@candidate[..., None]).squeeze(-1)), -1)
@@ -345,6 +436,21 @@ def project_rotation_implicit(projector, proposal, projected, left, anchor, nomi
     margin[:11] = 1e-4/projector.rotation_velocity
     if projector.constrain_root_angular_acceleration:
         margin[11:22] = .01/projector.rotation_acceleration
+    previous = getattr(projector, 'warm_plan', None)
+    if previous is not None and projector.so3_warm_start:
+        with torch.no_grad():
+            # 旧t+2..t+10平移为新t+1..t+9；旧halo只作为新第10点的数值初猜。
+            # 新名义旋转/已提交锚点仍重新计算约束，不复用旧可行性证书。
+            plan = previous[selected, :, 3:6].double()
+            warm = torch.cat((plan[:, 1:], 2*plan[:, -1:]-plan[:, -2:-1]), 1)
+            warm = (warm/unit.double()).transpose(1, 2).flatten(1)
+            cw = _constraints(projector, warm, past, current, rotation, lo, hi, margin)
+            ci = _constraints(projector, initial, past, current, rotation, lo, hi, margin)
+            mw = .5*(warm-target).square().sum(-1)+1000*torch.relu(cw-1e-8).sum(-1)
+            mi = .5*(initial-target).square().sum(-1)+1000*torch.relu(ci-1e-8).sum(-1)
+            use = torch.isfinite(warm).all(-1) & (mw < mi)
+            initial = torch.where(use[:, None], warm, initial)
+            projector.last_statistics['sqp_warm_start_count'] = use.sum()
     needs_gradient = torch.is_grad_enabled() and any(v.requires_grad for v in (target, past, current, rotation, lo, hi))
     for attempt in range(3):
         try:

@@ -41,7 +41,9 @@ def _projection_failure(error):
 
 def _accumulate_projection_statistics(target, source):
     """只累计已分离的GPU标量，统一在更新结束转CPU，避免每个控制步逐字段同步。"""
-    for name in ('qp_active_count', 'qp_channel_count', 'sqp_active_count', 'sqp_batch_count'):
+    for name in ('qp_active_count', 'qp_channel_count', 'sqp_active_count', 'sqp_batch_count',
+                 'qp_kkt_samples', 'qp_kkt_accepted', 'qp_kkt_iterations', 'qp_ipm_samples',
+                 'qp_ipm_iterations', 'sqp_warm_start_count'):
         if name in source:
             target[name] = target.get(name, 0)+source[name].detach()
     for name in ('sqp_iterations', 'sqp_kkt_polish_iterations'):
@@ -52,7 +54,7 @@ def _accumulate_projection_statistics(target, source):
             previous = target.get(name+'_max')
             target[name+'_max'] = iterations.max().detach() if previous is None else torch.maximum(previous, iterations.max().detach())
     for name in ('sqp_stationarity_residual64', 'sqp_constraint_residual64', 'sqp_step_residual64',
-                 'so3_float64_excess', 'so3_float32_excess'):
+                 'so3_float64_excess', 'so3_float32_excess', 'qp_ipm_residual_max'):
         if name in source and source[name].numel():
             value = source[name].detach().amax()
             key = name+'_max'

@@ -40,6 +40,9 @@ def main():
     p.add_argument('--no-compile-derivatives', action='store_true')
     p.add_argument('--compile-components', action='store_true')
     p.add_argument('--aux-weight', type=float, default=0.)
+    p.add_argument('--root-mode', choices=['strict_so3', 'relaxed_so3', 'smooth_so3', 'no_root_orientation'], default='strict_so3')
+    p.add_argument('--qp-solver', choices=['active_set', 'ipm'], default='active_set')
+    p.add_argument('--warm-start', action=argparse.BooleanOptionalAction, default=True)
     p.add_argument('--profile', action='store_true', help='额外H1 Kineto算子分析，不计入吞吐墙钟')
     args = p.parse_args()
     repo = Path(__file__).resolve().parents[1]
@@ -96,6 +99,12 @@ def main():
                         starts={k: v.cpu() for k,v in z.items()}), out/'fixed_starts.pt')
     if len(z['state']) != args.batch:
         raise ValueError('固定夹具不足实际batch')
+    if args.root_mode == 'no_root_orientation':
+        # 物理状态/控制历史相同；关闭姿态模式的参考记忆必须与其零根输出合同一致。
+        z = {k: v.clone() for k, v in z.items()}
+        for key in ('left', 'anchor', 'plan'):
+            z[key][..., 3:6] = 0
+        control.disable_root_orientation = True
     old_projection = load_module('gem.closedloop.reference_adapter.benchmark_old_projection',
         baseline/'gem/closedloop/reference_adapter/reference_constraints.py')
     old_so3 = load_module('gem.closedloop.reference_adapter.benchmark_old_so3',
@@ -110,7 +119,12 @@ def main():
     vectors = {}
     for implementation in args.implementations:
         cls = old_projection.ReferenceProjection if implementation == 'baseline' else ReferenceProjection
-        control.projection = cls(control.bundle.spec, control.adapter.bounds, **cfg['alternating']['projection']).cuda()
+        projection_cfg = dict(cfg['alternating']['projection'])
+        if implementation != 'baseline':
+            projection_cfg.update(root_orientation_mode=args.root_mode, so3_qp_solver=args.qp_solver,
+                                  so3_warm_start=args.warm_start,
+                                  rotation_acceleration=6. if args.root_mode == 'relaxed_so3' else 3.)
+        control.projection = cls(control.bundle.spec, control.adapter.bounds, **projection_cfg).cuda()
         control.projection.compile_derivatives = not args.no_compile_derivatives
         if implementation == 'baseline':
             def old_project(self, *inputs):
@@ -168,7 +182,8 @@ def main():
                         usage.append([float(v.strip()) for v in line.strip().split(',')])
                 thread = threading.Thread(target=sample_gpu, daemon=True); thread.start()
                 torch.cuda.synchronize(); begin = time.perf_counter()
-                row = dict(implementation=implementation, horizon=horizon, batch=args.batch, microbatch=micro)
+                row = dict(implementation=implementation, horizon=horizon, batch=args.batch, microbatch=micro,
+                           root_mode=args.root_mode, qp_solver=args.qp_solver, warm_start=args.warm_start)
                 try:
                     metrics, _ = policy_update(control, engine.dynamics, critic, optimizer, z, horizon,
                         terminal_value=False, microbatch=micro, diagnostics=True, timing=True)
