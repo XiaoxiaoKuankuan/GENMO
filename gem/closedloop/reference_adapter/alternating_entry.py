@@ -233,7 +233,7 @@ def main():
             values.update({'real_'+k: value.mean() for k, value in row['raw'].items()
                 if isinstance(value, torch.Tensor) and value.ndim == 1 and
                 (k in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori',
-                       'action_rate') or k.startswith(('absolute_', 'error_')))})
+                       'action_rate') or k.startswith(('absolute_', 'error_', 'root_reference_')))})
             if 'exploration_std' in row['proposal']:
                 values['executed_noise_rms'] = (row['proposal']['action']-row['proposal']['policy_action']).square().mean().sqrt()
                 values['large_exploration_fraction'] = (row['proposal']['exploration_std'] >= .099).float().mean()

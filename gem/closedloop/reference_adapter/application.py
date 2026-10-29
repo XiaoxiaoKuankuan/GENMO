@@ -56,8 +56,15 @@ def direct_reference_config(config):
         for key in ('projection', 'projection_recovery_attempts', 'max_consecutive_projection_rejections',
                     'proposal_feasibility_weight', 'compile_so3_derivatives'):
             settings.pop(key, None)
-        settings['precision'] = {'weight': settings.get('precision', {}).get('weight', 1.)}
-        settings['objective_version'] = 'sm_music_precision_direct_reference_v7'
+        precision = settings.get('precision', {})
+        settings['precision'] = {'weight': precision.get('weight', 1.)}
+        # 仅保留本次明确指定的根姿态软成本；旧角加速度/全参考惩罚不能隐式恢复。
+        for key in ('root_velocity_weight', 'root_continuity_weight', 'root_velocity_scale', 'root_continuity_scale'):
+            if key in precision:
+                settings['precision'][key] = precision[key]
+        soft_root = any(settings['precision'].get(k, 0.) for k in ('root_velocity_weight', 'root_continuity_weight'))
+        settings['objective_version'] = ('sm_music_precision_soft_root_v8' if soft_root
+                                         else 'sm_music_precision_direct_reference_v7')
     return cfg
 
 

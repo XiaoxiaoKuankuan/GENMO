@@ -4,12 +4,14 @@
 根位移；身体角速度只保留误差诊断，不再增加重复的Huber奖励。身体姿态使用原始
 世界姿态，不沿实际机器人重新锚定yaw。标尺只从训练歌曲零Adapter误差拟合一次；
 删除重复项后其余比例保持原值，不自动放大其它损失。Huber避免指数饱和。
-只评价实际/想象执行误差；不惩罚偏离基线动作，不计算附加速度或加速度成本。
+执行精度之外可显式配置根姿态软成本：相对名义的角速度偏差，以及绝对时刻对齐的
+前后计划姿态差。两项只进入奖励，不改变参考、不截断梯度、不作运行门禁；没有
+角加速度成本或硬预算，也不惩罚偏离基线控制动作。默认关闭以保留旧评价定义。
 世界根位置误差保留作监控，根XY通道关闭时默认不以它驱动优化。所有新项只乘一次dt。
 """
 
 import torch
-from supermimic.rotations import so3_log
+from supermimic.rotations import so3_exp, so3_log
 
 ERROR_NAMES = ('body_orientation', 'joint_position', 'joint_velocity', 'body_angular_velocity', 'root_local_displacement')
 NAMES = ('body_orientation', 'joint_position', 'joint_velocity', 'root_local_displacement')
@@ -34,10 +36,38 @@ def calibrate(error_rows):
             for name, floor in zip(NAMES, FLOORS)}
 
 
+def root_reference_costs(residual, anchor, previous_plan, valid, nominal_rotation,
+                         velocity_scale=.3, continuity_scale=.05):
+    """只读十帧参考的根姿态软成本；不修改输出，不求解QP/SQP。
+
+    根角速度用当前锚点、十帧及真实名义halo的SO(3)前向差分，减去同区间名义
+    角速度，故原舞蹈转身不受额外惩罚。连续性按新前九帧/旧后九帧相同绝对时刻
+    的旋转测地差计算；首计划无旧窗口时为零。两种scale仅是损失单位，不是限制。
+    所有计划/锚点保留梯度；仅使用已知名义参考，不访问未来实际执行状态。
+    """
+    rotation = residual[..., 3:6]
+    halo = 2*rotation[:, -1:]-rotation[:, -2:-1]
+    plan = torch.cat((anchor[:, None, 3:6], rotation, halo), 1)
+    nominal = nominal_rotation[:, 1:]
+    corrected = nominal@so3_exp(plan)
+    w = so3_log(corrected[:, 1:]@corrected[:, :-1].transpose(-1, -2))/.02
+    w0 = so3_log(nominal[:, 1:]@nominal[:, :-1].transpose(-1, -2))/.02
+    mismatch = so3_log(so3_exp(previous_plan[:, 1:, 3:6]).transpose(-1, -2)
+                      @so3_exp(rotation[:, :9]))
+    huber = lambda v: torch.nn.functional.huber_loss(v, torch.zeros_like(v), reduction='none').mean((1, 2))
+    return dict(root_reference_velocity=huber((w-w0)/velocity_scale),
+                root_reference_continuity=huber(mismatch/continuity_scale)*valid.to(residual))
+
+
 class PrecisionObjective:
-    def __init__(self, scales=None, *, weight=1.):
+    def __init__(self, scales=None, *, weight=1., root_velocity_weight=0.,
+                 root_continuity_weight=0., root_velocity_scale=.3, root_continuity_scale=.05):
         self.scales = dict(zip(NAMES, FLOORS)) if scales is None else {name: scales[name] for name in NAMES}
         self.weight = weight
+        self.root_velocity_weight, self.root_continuity_weight = root_velocity_weight, root_continuity_weight
+        self.root_velocity_scale, self.root_continuity_scale = root_velocity_scale, root_continuity_scale
+        if min(root_velocity_weight, root_continuity_weight) < 0 or min(root_velocity_scale, root_continuity_scale) <= 0:
+            raise ValueError('根姿态软成本权重须非负、归一化尺度须为正；这些数值不是硬约束')
         if set(self.scales) != set(NAMES) or any(v <= 0 for v in self.scales.values()):
             raise ValueError('精度标尺必须是训练集固定正数且完整包含四项')
 
@@ -51,6 +81,16 @@ class PrecisionObjective:
             raw['precision_'+name] = cost
             raw['absolute_'+name] = values[name].abs().mean(-1)
             weighted['precision_'+name] = -.02*self.weight*ratio*cost
+        if self.root_velocity_weight or self.root_continuity_weight:
+            rotation = proposal.get('nominal_rotation')
+            if rotation is None:  # 离线真实奖励重放没有缓存该字段，按相同歌曲/绝对帧恢复。
+                frames = (z['frame'][:, None]+control.bank.offset13).clamp_min(0)
+                rotation = control.bank.pose(z['song'][:, None], frames)[1]
+            costs = root_reference_costs(proposal['residual'], z['anchor'], z['plan'], z['plan_valid'],
+                                        rotation, self.root_velocity_scale, self.root_continuity_scale)
+            raw.update(costs)
+            weighted['root_reference_velocity'] = -.02*self.root_velocity_weight*costs['root_reference_velocity']
+            weighted['root_reference_continuity'] = -.02*self.root_continuity_weight*costs['root_reference_continuity']
         return raw, weighted
 
 

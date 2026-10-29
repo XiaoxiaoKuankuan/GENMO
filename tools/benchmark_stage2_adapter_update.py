@@ -42,7 +42,7 @@ def main():
     p.add_argument('--no-compile-derivatives', action='store_true')
     p.add_argument('--compile-components', action='store_true')
     p.add_argument('--aux-weight', type=float, default=0.)
-    p.add_argument('--root-mode', choices=['strict_so3', 'relaxed_so3', 'smooth_so3', 'no_root_orientation'], default='strict_so3')
+    p.add_argument('--root-mode', choices=['strict_so3', 'relaxed_so3', 'smooth_so3', 'no_root_orientation', 'direct'], default='strict_so3')
     p.add_argument('--qp-solver', choices=['active_set', 'ipm'], default='active_set')
     p.add_argument('--warm-start', action=argparse.BooleanOptionalAction, default=True)
     p.add_argument('--profile', action='store_true', help='额外H1 Kineto算子分析，不计入吞吐墙钟')
@@ -86,7 +86,9 @@ def main():
     critic = Critic(2835).cuda().requires_grad_(False)
     critic.load_state_dict(ck['critic'])
     scales = json.loads(Path(cfg['alternating']['calibration']).read_text())['scales']
-    control.precision = PrecisionObjective(scales, weight=cfg['alternating']['precision'].get('weight', 1.))
+    from gem.closedloop.reference_adapter.application import direct_reference_config
+    precision = direct_reference_config(cfg)['alternating']['precision']
+    control.precision = PrecisionObjective(scales, **precision)
     compile_kinematics(engine, bank)
     if args.compile_components:
         from gem.closedloop.reference_adapter.compute import compile_components
@@ -125,14 +127,17 @@ def main():
     vectors = {}
     for implementation in args.implementations:
         cls = old_projection.ReferenceProjection if implementation == 'baseline' else ReferenceProjection
-        projection_cfg = dict(cfg['alternating']['projection'])
-        if implementation != 'baseline':
-            projection_cfg.update(root_orientation_mode=args.root_mode, so3_qp_solver=args.qp_solver,
-                                  so3_warm_start=args.warm_start,
-                                  rotation_acceleration=6. if args.root_mode == 'relaxed_so3' else 3.)
-        control.projection = cls(control.bundle.spec, control.adapter.bounds, **projection_cfg).cuda()
-        control.projection.compile_derivatives = not args.no_compile_derivatives
-        if implementation == 'baseline':
+        if args.root_mode == 'direct':
+            control.projection = None
+        else:
+            projection_cfg = dict(cfg['alternating']['projection'])
+            if implementation != 'baseline':
+                projection_cfg.update(root_orientation_mode=args.root_mode, so3_qp_solver=args.qp_solver,
+                                      so3_warm_start=args.warm_start,
+                                      rotation_acceleration=6. if args.root_mode == 'relaxed_so3' else 3.)
+            control.projection = cls(control.bundle.spec, control.adapter.bounds, **projection_cfg).cuda()
+            control.projection.compile_derivatives = not args.no_compile_derivatives
+        if implementation == 'baseline' and control.projection is not None:
             def old_project(self, *inputs):
                 return old_so3.project_rotation_implicit(self, *inputs)
             control.projection.project_rotation = types.MethodType(old_project, control.projection)
@@ -141,7 +146,7 @@ def main():
         warm_begin = time.perf_counter()
         policy_update(control, engine.dynamics, critic, warm_optimizer, select_state(z, slice(0, min(32, args.batch))),
                       2, terminal_value=False, microbatch=32, diagnostics=False)
-        if implementation == 'optimized' and not args.no_compile_derivatives:
+        if implementation == 'optimized' and control.projection is not None and not args.no_compile_derivatives:
             # 编译128/256两个静态数学核都在计时前完成，不让microbatch256承担首次编译。
             from gem.closedloop.reference_adapter.so3_projection import _derivatives
             with torch.no_grad():
