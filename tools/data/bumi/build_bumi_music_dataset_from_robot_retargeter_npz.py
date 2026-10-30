@@ -365,7 +365,8 @@ def convert_datasets(
                 "qpos_order": "mujoco_native",
                 "fps": 30,
                 "quality_filter_applied": True,
-                "quality_acceptance_policy": "PASS_ONLY_REVIEW_REJECT_EXCLUDED",
+                "quality_acceptance_policy": "PASS_ONLY",
+                "quality_decision_policy": config.decision_policy,
                 "quality_joint_limit_violation_max_rad": config.joint_limit_violation_max,
                 "reader_joint_limit_tolerance_rad": config.joint_limit_violation_max,
                 "mjcf_sha256": config.robot_xml_sha256,
@@ -379,6 +380,7 @@ def convert_datasets(
                 "root_z_adjustment_method": "preserved_from_robot_retargeter_no_second_offset",
                 "root_orientation_gate": {
                     "scope": "per_dataset_all_frames",
+                    "status_affecting": config.decision_policy == "legacy_three_state",
                     "statistics": tilt_stats[dataset],
                     "all_sequences_recomputed_and_dataset_passed": True,
                 },

@@ -17,7 +17,11 @@ import torch
 from gem.robots.bumi.kinematics import BumiKinematics
 from gem.robots.bumi.motion_utils import sha256_file
 from tools.data.bumi import umr_qpos_adapter as adapter
-from tools.data.bumi.filter_robot_retargeter_npz_motions import DEFAULT_CONFIG, load_config
+from tools.data.bumi.filter_robot_retargeter_npz_motions import (
+    DANCE_CONFIG,
+    DEFAULT_CONFIG,
+    load_config,
+)
 
 KIN = (
     Path(__file__).resolve().parents[2]
@@ -46,6 +50,9 @@ def source(tmp_path, *, reverse=False, mutation=None):
         qpos[:, 3] = 2
     if mutation == "names":
         names[0] = names[1]
+    if mutation == "floor":
+        qpos[:, 2] = 0.15
+        qpos[:, 3:7] = [np.sqrt(0.5), np.sqrt(0.5), 0, 0]
     path = root / "example_bumi3.npz"
     human = tmp_path / "original/aistpp/example.npz"
     human.parent.mkdir(parents=True)
@@ -116,8 +123,12 @@ def test_prefixed_umr_alias_keeps_original_dataset_identity(tmp_path):
     np.testing.assert_array_equal(qpos.numpy(), expected)
 
 
-def test_full_publish_and_source_tamper_rejection(tmp_path, monkeypatch):
-    kin, path, xml, _ = source(tmp_path)
+@pytest.mark.parametrize(
+    "config_path", [DEFAULT_CONFIG, DANCE_CONFIG], ids=["legacy", "binary_floor"]
+)
+def test_full_publish_and_source_tamper_rejection(tmp_path, monkeypatch, config_path):
+    binary = config_path == DANCE_CONFIG
+    kin, path, xml, _ = source(tmp_path, mutation="floor" if binary else None)
     manifest = tmp_path / "selection.json"
     manifest.write_text(
         json.dumps(
@@ -125,14 +136,14 @@ def test_full_publish_and_source_tamper_rejection(tmp_path, monkeypatch):
                 "n": 1,
                 "files": [path.name],
                 "paths": [str(path)],
-                "clips": [{"dataset": "aistpp", "file": path.name, "rank": 1, "score_m": 0.0}],
+                "clips": [{"dataset": "aistpp", "file": path.name}],
             }
         )
     )
     row = adapter.input_rows(manifest, path.parent, None)[0]
     adapter._init_worker(str(KIN))
     decision = adapter._evaluate(
-        (row, path.parent, None, xml, load_config(DEFAULT_CONFIG), sha256_file(DEFAULT_CONFIG))
+        (row, path.parent, None, xml, load_config(config_path), sha256_file(config_path))
     )
     assert decision["status"] == "PASS", decision
     quality = tmp_path / "quality.jsonl"
@@ -142,7 +153,7 @@ def test_full_publish_and_source_tamper_rejection(tmp_path, monkeypatch):
         json.dumps(
             {
                 "report_contract_version": adapter.REPORT_VERSION,
-                "quality_config_sha256": sha256_file(DEFAULT_CONFIG),
+                "quality_config_sha256": sha256_file(config_path),
                 "mine_root": None,
                 "selection_manifest": str(manifest),
                 "selection_manifest_sha256": sha256_file(manifest),
@@ -178,7 +189,7 @@ def test_full_publish_and_source_tamper_rejection(tmp_path, monkeypatch):
         source_root=path.parent,
         mine_root=None,
         output_root=tmp_path / "published",
-        quality_config=DEFAULT_CONFIG,
+        quality_config=config_path,
         robot_xml=xml,
         retarget_config=xml,
         kinematics=KIN,
@@ -191,6 +202,13 @@ def test_full_publish_and_source_tamper_rejection(tmp_path, monkeypatch):
     payload = torch.load(args.output_root / "AIST++/motions/example.pt", weights_only=False)
     assert payload["ground_semantics"] == adapter.GROUND
     assert payload["root_z_second_adjustment_applied"] is False
+    if binary:
+        info = json.loads((args.output_root / "AIST++/meta/dataset_info.json").read_text())
+        assert info["root_orientation_gate"]["status_affecting"] is False
+        assert info["root_orientation_gate"]["statistics"]["median_deg"] == pytest.approx(
+            90.0, abs=0.001
+        )
+        assert decision["valid_intervals"] == [[0, 120]]
     args.output_root = tmp_path / "tampered"
     with path.open("ab") as handle:
         handle.write(b"changed after screening")
@@ -198,3 +216,27 @@ def test_full_publish_and_source_tamper_rejection(tmp_path, monkeypatch):
         adapter.build_main(args, {}, {})
     assert not args.output_root.exists()
     assert not list(tmp_path.glob(".tampered.staging-*"))
+
+
+def test_binary_inventory_cannot_silently_reuse_foot_spread_subset(tmp_path):
+    _, path, _, _ = source(tmp_path)
+    other = path.parent / "another_bumi3.npz"
+    other.touch()
+    manifest = tmp_path / "inventory.json"
+    value = {
+        "n": 1,
+        "files": [path.name],
+        "paths": [str(path)],
+        "clips": [{"dataset": "aistpp", "file": path.name}],
+    }
+    manifest.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="全量"):
+        adapter.input_rows(manifest, path.parent, None, require_full_inventory=True)
+    value["n"] = 2
+    value["files"].append(other.name)
+    value["paths"].append(str(other))
+    value["clips"].append({"dataset": "aistpp", "file": other.name})
+    manifest.write_text(json.dumps(value))
+    rows = adapter.input_rows(manifest, path.parent, None, require_full_inventory=True)
+    assert len(rows) == 2
+    assert all("foot_spread_rank" not in row for row in rows)

@@ -15,6 +15,8 @@
 
 当前主线是 **Stage2-A：冻结 GENMO 生成缓存上的训练**。在线滚动接口保留在 `rolling.py`，尚不能将固定缓存的训练/评价结果当成 Stage2-B 连续滚动验证。旧 GMT、PPO/DPPO、Oracle 和硬投影研究入口保留历史用途，不是下面命令使用的正式方法。
 
+Stage1新增[保留地板街舞和高难度动作的二分类规则](docs/bumi/dance_binary_quality_rules.rst)，使用[独立配置](configs/bumi/quality_filter_dance_binary_30hz_v1.yaml)只输出PASS／REJECT。此次仅准备规则与代码，尚未筛选真实数据或替换现有训练集；使用时需显式指定新配置。
+
 ## 1. 方法与模型合同
 
 ```mermaid

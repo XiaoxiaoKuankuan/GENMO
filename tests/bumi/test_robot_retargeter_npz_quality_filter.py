@@ -1,9 +1,10 @@
-"""测试 robot_retargeter BUMI3 30 Hz 输入契约与三态质量门禁。
+"""测试 BUMI3 30 Hz 输入契约、历史三态和保留舞蹈的新二分类规则。
 
 本文件构造最小的 13 字段 Mimic NPZ，不依赖服务器数据，重点覆盖正式批处理最容易
 静默出错的边界：帧率与键顺序必须精确、名称数组不能换序、数值数组必须 float32，
 以及 PASS / REVIEW / REJECT 必须分别响应正常站立、Root 倾角异常和严重关节突变。
-这些测试只验证确定性的离线数组规则，不替代四库全量统计或 MuJoCo/控制器回放。
+新增合成地板、倒立、跳跃和快转样例，验证新规则只诊断、不切片，报告无 REVIEW；
+关节限位和损坏数值仍拒绝。只验证离线数组规则，不代替全库统计或物理回放。
 """
 
 from __future__ import annotations
@@ -14,18 +15,24 @@ import numpy as np
 import pytest
 
 from tools.data.bumi.filter_robot_retargeter_npz_motions import (
+    DANCE_CONFIG,
     DEFAULT_CONFIG,
     REPORT_VERSION,
     evaluate_path,
     load_config,
     load_motion_npz,
 )
-from tools.data.bumi.npz_quality_utils import evaluate_motion
+from tools.data.bumi.npz_quality_utils import build_summary, evaluate_motion, write_reports
 
 
 @pytest.fixture(scope="module")
 def quality_config():
     return load_config(DEFAULT_CONFIG)
+
+
+@pytest.fixture(scope="module")
+def dance_config():
+    return load_config(DANCE_CONFIG)
 
 
 def _arrays(config, frames: int = 120) -> dict[str, np.ndarray]:
@@ -147,3 +154,111 @@ def test_robot_retargeter_record_overrides_generic_report_version(
 
     assert row["status"] == "PASS"
     assert row["report_contract_version"] == REPORT_VERSION
+
+
+@pytest.mark.parametrize(
+    "motion",
+    ["floor", "inverted", "crouch", "jump", "fast_spin", "fast_joints", "fast_translation"],
+)
+def test_binary_preserves_difficult_dance_and_entire_timeline(dance_config, motion):
+    arrays = _arrays(dance_config)
+    if motion == "floor":
+        arrays["body_pos_w"][..., 2] = 0.04
+        arrays["body_pos_w"][:, 0, 2] = 0.15
+        arrays["body_quat_w"][:, 0] = [np.sqrt(0.5), np.sqrt(0.5), 0, 0]
+    elif motion == "inverted":
+        arrays["body_quat_w"][:, 0] = [0, 1, 0, 0]
+    elif motion == "crouch":
+        arrays["body_pos_w"][:, 0, 2] = 0.15
+    elif motion == "jump":
+        arrays["body_pos_w"][:, 0, 2] = 2.5
+    elif motion == "fast_spin":
+        angle = np.arange(120) * 1.4
+        arrays["body_quat_w"][:, 0, 0] = np.cos(angle / 2)
+        arrays["body_quat_w"][:, 0, 3] = np.sin(angle / 2)
+    elif motion == "fast_joints":
+        arrays["joint_pos"][:, 0] = 1.9 * np.sin(np.arange(120) * np.pi / 3)
+    else:
+        arrays["body_pos_w"][:, 0, 0] = np.arange(120) * 0.4
+    result = evaluate_motion(arrays, dance_config)
+    assert result["status"] == result["status_without_joint_limit"] == "PASS"
+    assert result["quality_accepted"] is True
+    assert result["reason_codes"] == []
+    assert result["diagnostic_codes"]
+    assert all("REVIEW" not in code for code in result["diagnostic_codes"])
+    assert result["valid_intervals"] == [[0, 120]]
+    assert result["metrics"]["root_orientation"]["status_affecting"] is False
+    if motion == "floor":
+        assert result["floor_intervals"] == [[0, 120]]
+
+
+@pytest.mark.parametrize("motion", ["joint_limit", "quaternion"])
+def test_binary_rejects_definite_kinematic_errors(dance_config, motion):
+    arrays = _arrays(dance_config)
+    if motion == "joint_limit":
+        arrays["joint_pos"][40, 0] = dance_config.joint_upper_limits[0] + 0.001
+    else:
+        arrays["body_quat_w"][40, 0, 0] = 2.0
+    result = evaluate_motion(arrays, dance_config)
+    assert result["status"] == "REJECT"
+    assert result["valid_intervals"] == []
+    assert set(result["reason_statuses"].values()) == {"REJECT"}
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf])
+def test_binary_rejects_nonfinite_at_input_boundary(tmp_path, dance_config, bad_value, monkeypatch):
+    root = tmp_path / "source"
+    path = root / "aistpp/mimic_npz/bumi3/sample.npz"
+    path.parent.mkdir(parents=True)
+    arrays = _arrays(dance_config)
+    arrays["joint_pos"][10, 0] = bad_value
+    _save_npz(path, arrays, dance_config.required_npz_keys)
+    monkeypatch.setattr(
+        "tools.data.bumi.filter_robot_retargeter_npz_motions._validate_sidecars", lambda **kw: {}
+    )
+    row = evaluate_path(
+        path, input_root=root, config=dance_config, config_sha256="a" * 64, release_row={}
+    )
+    assert row["status"] == "REJECT"
+    assert row["reason_codes"] == ["MOTION_CONTRACT_ERROR"]
+
+
+def test_binary_short_valid_clip_not_lost_and_quaternion_sign_is_not_spin(dance_config):
+    arrays = _arrays(dance_config, frames=4)
+    arrays["body_quat_w"][1::2] *= -1
+    result = evaluate_motion(arrays, dance_config)
+    assert result["status"] == "PASS"
+    assert result["valid_intervals"] == [[0, 4]]
+    assert result["metrics"]["dynamics"]["root_angular_velocity"]["max"] == 0
+
+
+def test_binary_report_contains_only_pass_reject(tmp_path, dance_config):
+    import json
+
+    good, bad = _arrays(dance_config), _arrays(dance_config)
+    bad["joint_pos"][40, 0] = 3.0
+    rows = [
+        {
+            **evaluate_motion(arrays, dance_config),
+            "sample_id": str(i),
+            "dataset": "aistpp",
+            "source_relative_path": f"{i}.npz",
+        }
+        for i, arrays in enumerate((good, bad))
+    ]
+    summary = build_summary(
+        rows,
+        input_root=tmp_path,
+        config_path=DANCE_CONFIG,
+        config_sha256="a" * 64,
+        config=dance_config,
+        assets={},
+    )
+    assert summary["status_counts"] == {"PASS": 1, "REJECT": 1}
+    assert summary["result_states"] == ["PASS", "REJECT"]
+    write_reports(tmp_path / "reports", rows, summary, DANCE_CONFIG, overwrite=False)
+    assert not list((tmp_path / "reports").glob("*review*"))
+    assert "REVIEW" not in (tmp_path / "reports/quality_report.jsonl").read_text()
+    assert "REVIEW" not in json.dumps(summary)
+    assert (tmp_path / "reports/strict_pass.txt").read_text() == "0.npz\n"
+    assert (tmp_path / "reports/strict_reject.txt").read_text() == "1.npz\n"

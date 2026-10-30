@@ -2,7 +2,7 @@
 
 本模块只负责不同生产者的数据契约适配，不另设质量阈值。UMR 输入必须具有显式
 关节名称、30 Hz 帧率、连续 frame_ids 和已核验的 MJCF；按名称重排后利用相同的
-fe934 运动学计算 body 状态，再调用现有 evaluate_motion 执行三态质量门禁。自建
+fe934 运动学计算 body 状态，再调用 evaluate_motion 执行配置对应的质量规则。自建
 CSV 先由原有构建器完成原始配对审计、重采样及限位迁移，再接受同一 30 Hz 门禁。
 
 发布仅消费完整报告中的 PASS，绑定源文件、选择清单、配置和资产 SHA256。公开库
@@ -206,7 +206,13 @@ def qpos_arrays(qpos: torch.Tensor, kin: BumiKinematics, config) -> dict:
     }
 
 
-def input_rows(selection: Path, input_root: Path, mine_root: Path | None) -> list[dict]:
+def input_rows(
+    selection: Path,
+    input_root: Path,
+    mine_root: Path | None,
+    *,
+    require_full_inventory: bool = False,
+) -> list[dict]:
     selected = json.loads(selection.read_text())
     clips = selected["clips"]
     files = [r["file"] for r in clips]
@@ -217,6 +223,10 @@ def input_rows(selection: Path, input_root: Path, mine_root: Path | None) -> lis
         or selected["paths"] != [str(input_root / f) for f in files]
     ):
         raise ValueError("UMR 选择清单条数、顺序、去重或路径不一致")
+    if require_full_inventory:
+        inventory = {p.name for p in input_root.glob("*_bumi3.npz")}
+        if set(files) != inventory:
+            raise ValueError("保留舞蹈的二分类规则需要源目录全量 UMR 清单，不能复用 best70% 子集")
     rows = []
     for item in clips:
         ds, name = item["dataset"], item["file"]
@@ -229,8 +239,9 @@ def input_rows(selection: Path, input_root: Path, mine_root: Path | None) -> lis
                 "sample_id": f"{ds}/{sample}",
                 "source_relative_path": name,
                 "source_motion_contract_version": SOURCE_VERSION,
-                "foot_spread_rank": item["rank"],
-                "foot_spread_score_m": item["score_m"],
+                # 全量输入不需要脚底高度排名；旧清单的字段仅保留来源诊断。
+                **({"foot_spread_rank": item["rank"]} if "rank" in item else {}),
+                **({"foot_spread_score_m": item["score_m"]} if "score_m" in item else {}),
             }
         )
     if mine_root:
@@ -289,7 +300,12 @@ def filter_main(args, config):
     if output == root or root in output.parents:
         raise ValueError("报告目录必须位于 UMR 源目录之外")
     assets = verify_assets(config, args.robot_xml, args.retarget_config, args.kinematics)
-    rows = input_rows(args.selection_manifest, root, mine)
+    rows = input_rows(
+        args.selection_manifest,
+        root,
+        mine,
+        require_full_inventory=config.decision_policy == "preserve_dance_binary",
+    )
     if args.limit:
         rows = rows[: args.limit]
     config_sha = sha256_file(args.config)
@@ -312,7 +328,8 @@ def filter_main(args, config):
         report_version=REPORT_VERSION,
         decision_scope="UMR 与自建库统一30Hz离线门禁；未进行动力学回放",
         compatibility_notes={
-            "thresholds_reused_without_relaxation": True,
+            "thresholds_reused_without_relaxation": config.decision_policy == "legacy_three_state",
+            "full_umr_inventory_required": config.decision_policy == "preserve_dance_binary",
             "legacy_release_counts_not_applicable": True,
         },
     )
@@ -362,7 +379,7 @@ def _references(human_roots: dict, audio_roots: dict, mine_root: Path | None):
 
 
 def build_main(args, human_roots: dict, audio_roots: dict) -> dict:
-    """以统一三态报告为白名单发布多库；训练 reader 验收前不发布 staging。"""
+    """以统一质量报告的 PASS 发布多库；训练 reader 验收前不发布 staging。"""
     from gem.datasets.music_dance.music_dance_bumi import BumiMusicDatasetReader
     from tools.data.bumi.filter_robot_retargeter_npz_motions import load_config
 
@@ -387,7 +404,12 @@ def build_main(args, human_roots: dict, audio_roots: dict) -> dict:
     if sha256_file(Path(summary["selection_manifest"])) != summary["selection_manifest_sha256"]:
         raise ValueError("选择清单在筛选后发生变化")
     rows = [json.loads(x) for x in args.quality_report.read_text().splitlines() if x.strip()]
-    expected = input_rows(Path(summary["selection_manifest"]), root, mine)
+    expected = input_rows(
+        Path(summary["selection_manifest"]),
+        root,
+        mine,
+        require_full_inventory=config.decision_policy == "preserve_dance_binary",
+    )
     if (
         len(rows) != summary["sequences"]
         or len({r["sample_id"] for r in rows}) != len(rows)
@@ -527,6 +549,7 @@ def build_main(args, human_roots: dict, audio_roots: dict) -> dict:
                 "qpos_order": "mujoco_native",
                 "quality_filter_applied": True,
                 "quality_acceptance_policy": "PASS_ONLY",
+                "quality_decision_policy": config.decision_policy,
                 "reader_joint_limit_tolerance_rad": config.joint_limit_violation_max,
                 "mjcf_sha256": kin.source_mjcf_sha256,
                 "source_mjcf_sha256": kin.source_mjcf_sha256,
@@ -538,6 +561,7 @@ def build_main(args, human_roots: dict, audio_roots: dict) -> dict:
                 "root_z_adjusted": False,
                 "root_orientation_gate": {
                     "scope": "per_dataset_all_frames",
+                    "status_affecting": config.decision_policy == "legacy_three_state",
                     "all_sequences_recomputed_and_dataset_passed": True,
                     "statistics": root_tilt_statistics(np.concatenate(tilts[ds])),
                 },

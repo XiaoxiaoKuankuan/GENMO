@@ -11,9 +11,9 @@ GMR/旧机器人资产或错误关节顺序被静默复用。
 对每条剩余动作，工具严格检查 13 字段 NPZ、30 Hz、float32 数值数组、wxyz 四元数、
 21 关节和 22 body 名称；同时要求逐条报告确认输入和输出都是右手 Z-up 米制坐标。
 随后从最终 NPZ 重新计算关节限位、速度、加速度、jerk、Root 高度/倾角以及倒地动作，
-给出 ``PASS / REVIEW / REJECT`` 三态结果。重定向报告中的软警告只作为诊断保留，
-不替代这里对最终数据的重新计算。正式训练构建器只读取 PASS，REVIEW/REJECT 永不
-进入 manifest。
+按显式配置给出结果：历史配置保留三态；preserve_dance_binary 配置只输出 PASS / REJECT，
+高度、倾角、地板动作和动力学峰值只作诊断，不裁剪合法动作。重定向报告中的软警告
+不替代对最终数据的重新计算。正式训练构建器只读取 PASS。
 
 脚本不会删除、移动或改写源动作。JSONL、CSV、汇总、严格 PASS 列表和上游8条排除
 记录都写入独立输出目录；已有报告只有显式 ``--overwrite`` 才会被原子替换。这里的
@@ -55,6 +55,7 @@ CONFIG_VERSION = "genmo.bumi_robot_retargeter_npz_quality_config.v1"
 REPORT_VERSION = "genmo.bumi_quality_report.robot_retargeter_npz_30hz.v1"
 SOURCE_CONTRACT_VERSION = "robot_retargeter.bumi3_mimic_npz_30hz.v1"
 DEFAULT_CONFIG = REPO_ROOT / "configs/bumi/quality_filter_robot_retargeter_30hz_v1.yaml"
+DANCE_CONFIG = REPO_ROOT / "configs/bumi/quality_filter_dance_binary_30hz_v1.yaml"
 EXPECTED_DATASETS = ("aioz_gdance", "aistpp", "compas3d", "finedance")
 
 
@@ -113,6 +114,7 @@ class RobotRetargeterQualityConfig:
     torso_proxy_bodies: tuple[str, ...]
     upper_non_hand_bodies: tuple[str, ...]
     ankle_bodies: tuple[str, ...]
+    decision_policy: str = "legacy_three_state"
 
 
 def _mapping(parent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -162,6 +164,9 @@ def load_config(path: str | Path) -> RobotRetargeterQualityConfig:
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(raw, Mapping) or raw.get("contract_version") != CONFIG_VERSION:
         raise ValueError(f"质量配置 contract_version 必须为 {CONFIG_VERSION}")
+    policy = raw.get("decision_policy", "legacy_three_state")
+    if policy not in {"legacy_three_state", "preserve_dance_binary"}:
+        raise ValueError(f"未知 decision_policy: {policy}")
     source = _mapping(raw, "source")
     upstream = _mapping(raw, "upstream_release")
     hard = _mapping(raw, "hard_thresholds")
@@ -222,8 +227,9 @@ def load_config(path: str | Path) -> RobotRetargeterQualityConfig:
         if threshold <= 0.0 or not unit:
             raise ValueError(f"dynamics.{name} 的 threshold/unit 非法")
         dynamics[name] = (threshold, unit)
-    if str(soft.get("soft_failure_status", "")).upper() != QualityStatus.REVIEW.value:
-        raise ValueError("soft_failure_status 必须为 REVIEW")
+    expected_soft = "DIAGNOSTIC" if policy == "preserve_dance_binary" else "REVIEW"
+    if str(soft.get("soft_failure_status", "")).upper() != expected_soft:
+        raise ValueError(f"soft_failure_status 必须为 {expected_soft}")
     review_values = (
         _finite(root, "review_median_degrees"),
         _finite(root, "review_p95_degrees"),
@@ -305,6 +311,7 @@ def load_config(path: str | Path) -> RobotRetargeterQualityConfig:
         torso_proxy_bodies=torso,
         upper_non_hand_bodies=upper_bodies,
         ankle_bodies=ankles,
+        decision_policy=policy,
     )
 
 

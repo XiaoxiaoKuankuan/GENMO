@@ -1,0 +1,169 @@
+# BUMI Stage1 保留舞蹈风格的二分类筛选规则。
+#
+# 用途：对30Hz UMR qpos或robot_retargeter Mimic NPZ进行只读检查，只输出PASS/REJECT。
+# 数据流：按名称/FPS/数值/来源验证输入，计算运动学指标，只以四元数和机械关节限位
+# 等确定性错误拒绝。低根高度、大倾斜、贴地/倒立、快转、跳跃和高动态片段仅作诊断；
+# PASS保留完整时间线，不用floor mask切片，也不用脚底高度最稳70%预选名单。
+# 边界：本规则不证明碰撞/力矩/控制器跟踪可行，不把旧动力学阈值当机器人硬件极限。
+# 文件独立包含所有阈值与资产契约，SHA可完整追溯，无隐式配置继承。
+# 需显式传 --config 启用；本次只发布规则，未执行真实数据筛选或替换训练数据。
+
+contract_version: genmo.bumi_robot_retargeter_npz_quality_config.v1
+decision_policy: preserve_dance_binary
+
+source:
+  motion_contract_version: robot_retargeter.bumi3_mimic_npz_30hz.v1
+  release_report_schema: robot_retargeter.bumi3_full_release.v1
+  fps: 30
+  quaternion_convention: wxyz
+  robot_name: bumi3
+  anchor_body_name: waist_yaw_link
+  required_npz_keys:
+    - fps
+    - joint_pos
+    - joint_vel
+    - body_pos_w
+    - body_quat_w
+    - body_lin_vel_w
+    - body_ang_vel_w
+    - joint_names
+    - body_names
+    - anchor_body_name
+    - source_motion
+    - robot_name
+    - quaternion_order
+  robot_xml_sha256: fe93472dd764704fe8389b0f82052ae84ed8bc90f6d71b1467872f86e08a9ad3
+  retarget_config_sha256: 95e0d1e9fa6fcfc143f55abc92afab2b87653f34c47c237a3d983be6c5fa05b1
+  kinematics_sha256: c08731704dccece11351b6fa877e30bac5ca2a8d363de30af7ca2ea1398f4029
+  coordinate_contract:
+    source_coordinate_system: right_handed_z_up_metric
+    requested_up_axis: z
+    y_up_to_z_up_conversion_applied: false
+    output_coordinate_system: right_handed_z_up_metric
+  joint_order:
+    - l_leg_pitch_joint
+    - r_leg_pitch_joint
+    - waist_yaw_joint
+    - l_leg_roll_joint
+    - r_leg_roll_joint
+    - l_arm_pitch_joint
+    - r_arm_pitch_joint
+    - l_leg_yaw_joint
+    - r_leg_yaw_joint
+    - l_arm_roll_joint
+    - r_arm_roll_joint
+    - l_knee_pitch_joint
+    - r_knee_pitch_joint
+    - l_arm_yaw_joint
+    - r_arm_yaw_joint
+    - l_ankle_pitch_joint
+    - r_ankle_pitch_joint
+    - l_elbow_pitch_joint
+    - r_elbow_pitch_joint
+    - l_ankle_roll_joint
+    - r_ankle_roll_joint
+  joint_lower_limits:
+    [-2.09, -2.09, -1.57, -0.66, -1.57, -3.14, -3.14,
+     -2.53, -2.53, -0.14, -1.94, 0.0, 0.0, -1.57, -1.57,
+     -0.96, -0.96, -2.26, -2.26, -0.17, -0.17]
+  joint_upper_limits:
+    [2.09, 2.09, 1.57, 1.57, 0.66, 1.57, 1.57,
+     2.53, 2.53, 1.94, 0.14, 2.24, 2.24, 1.57, 1.57,
+     0.44, 0.44, 0.0, 0.0, 0.17, 0.17]
+  body_order:
+    - base_link
+    - waist_yaw_link
+    - l_arm_pitch_link
+    - l_arm_roll_link
+    - l_arm_yaw_link
+    - l_elbow_pitch_link
+    - r_arm_pitch_link
+    - r_arm_roll_link
+    - r_arm_yaw_link
+    - r_elbow_pitch_link
+    - l_leg_pitch_link
+    - l_leg_roll_link
+    - l_leg_yaw_link
+    - l_knee_pitch_link
+    - l_ankle_pitch_link
+    - l_ankle_roll_link
+    - r_leg_pitch_link
+    - r_leg_roll_link
+    - r_leg_yaw_link
+    - r_knee_pitch_link
+    - r_ankle_pitch_link
+    - r_ankle_roll_link
+
+upstream_release:
+  expected_selected: 3162
+  expected_completed: 3154
+  expected_failed: 8
+  expected_completed_by_dataset:
+    aioz_gdance: 1978
+    aistpp: 955
+    compas3d: 72
+    finedance: 149
+
+hard_thresholds:
+  minimum_frames: 4
+  quaternion_norm_error_max: 0.001
+  joint_limit_violation_max: 0.0001
+  minimum_joint_limit_margin_warn: 0.01
+  # 以下高度范围仅作诊断，不拒绝低姿态、跳跃或倒立。
+  root_height_min_absolute: -0.02
+  root_height_max_absolute: 2.1
+
+# 以下沿用历史统计分档，全部只记 diagnostic_codes，不改变 PASS/REJECT。
+# root_orientation/floor_style 中 review/reject 字段名仅兼容旧指标计算，不是新状态。
+soft_policy:
+  exceed_ratio_max: 0.08
+  consecutive_exceed_frames: 6
+  severe_multiplier: 3.0
+  soft_failure_status: DIAGNOSTIC
+
+dynamics:
+  joint_velocity_l2: {threshold: 30.0, unit: rad/s}
+  joint_acceleration_l2: {threshold: 1200.0, unit: rad/s^2}
+  joint_jerk_l2: {threshold: 60000.0, unit: rad/s^3}
+  root_linear_velocity: {threshold: 3.0, unit: m/s}
+  root_angular_velocity: {threshold: 12.0, unit: rad/s}
+
+root_orientation:
+  review_median_degrees: 30.0
+  reject_median_degrees: 60.0
+  review_p95_degrees: 60.0
+  reject_p95_degrees: 100.0
+  review_over_45deg_fraction: 0.20
+  reject_over_45deg_fraction: 0.50
+
+floor_style:
+  root_low_height: 0.30
+  root_low_tilt_degrees: 45.0
+  torso_ground_height: 0.30
+  upper_body_ground_height: 0.08
+  gate_root_height: 0.34
+  gate_tilt_degrees: 40.0
+  ankles_airborne_height: 0.08
+  reject_consecutive_frames: 15
+  review_ratio: 0.02
+  review_min_frames: 15
+  low_root_review_height: 0.22
+  low_root_review_consecutive_frames: 15
+  safe_interval_halo_frames: 15
+  minimum_safe_interval_frames: 120
+  body_groups:
+    torso_proxy: [l_arm_pitch_link, r_arm_pitch_link]
+    upper_non_hand:
+      - l_arm_pitch_link
+      - l_arm_roll_link
+      - l_arm_yaw_link
+      - l_elbow_pitch_link
+      - r_arm_pitch_link
+      - r_arm_roll_link
+      - r_arm_yaw_link
+      - r_elbow_pitch_link
+    ankles: [l_ankle_roll_link, r_ankle_roll_link]
+
+diagnostics:
+  retarget_report_warnings_status_affecting: false
+  stored_velocity_consistency_status_affecting: false

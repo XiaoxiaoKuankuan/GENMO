@@ -1,13 +1,13 @@
 """BUMI NPZ 质量评估、汇总和报告发布的 producer 中性实现。
 
 本模块集中保存当前 robot_retargeter 与 UMR qpos 共同使用的纯数组质量算法：
-中心差分、四元数角速度、关节限位与倒地/Root 倾角判定、三态决策、跨数据集统计
+中心差分、四元数角速度、关节限位与地板/Root 倾角统计、配置驱动决策、跨数据集统计
 汇总，以及 JSONL/CSV/文本清单的原子报告写出。模块只要求配置对象提供约定字段，
 不导入任何具体 producer 的配置 dataclass、NPZ reader、资产路径或命令行入口。
 
 通用评估只发布中性内部版本；robot_retargeter 和 UMR 边界在各自入口显式覆盖最终
-契约版本。报告写出规则、字段顺序、容差扫描及 PASS/REVIEW/REJECT 排序保持迁移前
-行为，不扩大质量结论到仿真 rollout、控制器可跟踪性或实机安全。
+契约版本。历史配置保持三态；保留舞蹈的配置仅输出 PASS/REJECT，风格与速度统计
+不影响分类，也不裁剪地板片段。不扩大质量结论到控制器可跟踪性或实机安全。
 """
 
 from __future__ import annotations
@@ -109,10 +109,12 @@ def _priority(status: QualityStatus) -> int:
 
 
 def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, Any]:
-    """在已通过契约校验的实际数组上计算物理指标和三态结论。"""
+    """在已通过契约校验的数组上评估；二分类只拒绝可确定的数值/关节限位错误。"""
 
     status = QualityStatus.PASS
     flags: list[tuple[str, QualityStatus]] = []
+    binary = getattr(config, "decision_policy", "legacy_three_state") == "preserve_dance_binary"
+    diagnostics: list[str] = []
 
     def flag(code: str, requested: QualityStatus) -> None:
         nonlocal status
@@ -120,6 +122,13 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
             flags.append((code, requested))
         if _priority(requested) > _priority(status):
             status = requested
+
+    def style_flag(code: str, requested: QualityStatus) -> None:
+        if binary:
+            # 旧阈值只用来定位特征，不把历史 REVIEW 改名为 REJECT。
+            diagnostics.append(code.removesuffix("_REVIEW").removesuffix("_REJECT"))
+        else:
+            flag(code, requested)
 
     fps = float(config.fps)
     joint_pos = np.asarray(arrays["joint_pos"], dtype=np.float64)
@@ -165,9 +174,9 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
     metrics["root_height_max"] = float(np.max(root_height))
     metrics["body_origin_ground_min"] = float(np.min(body_pos[..., 2]))
     if metrics["root_height_min"] < config.root_height_min_absolute:
-        flag("ROOT_HEIGHT_BELOW_ABSOLUTE_BOUND", QualityStatus.REJECT)
+        style_flag("ROOT_HEIGHT_BELOW_ABSOLUTE_BOUND", QualityStatus.REJECT)
     if metrics["root_height_max"] > config.root_height_max_absolute:
-        flag("ROOT_HEIGHT_ABOVE_ABSOLUTE_BOUND", QualityStatus.REJECT)
+        style_flag("ROOT_HEIGHT_ABOVE_ABSOLUTE_BOUND", QualityStatus.REJECT)
 
     # R[2,2] 是 root 局部 +Z 与世界 +Z 的夹角余弦；wxyz 下为 1-2(x²+y²)。
     up_dot = 1.0 - 2.0 * (root_quat[:, 1] ** 2 + root_quat[:, 2] ** 2)
@@ -200,6 +209,7 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
     floor_run = _longest_true_run(floor_mask)
     low_root_run = _longest_true_run(low_root_mask)
     metrics["floor_style"] = {
+        "status_affecting": not binary,
         "torso_proxy": "mean(l_arm_pitch_link, r_arm_pitch_link)",
         "frame_count": floor_count,
         "frame_ratio": floor_ratio,
@@ -219,6 +229,7 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
     root_tilt_p95 = float(np.percentile(root_tilt, 95.0))
     root_tilt_over_45_fraction = float(np.mean(root_tilt > 45.0))
     metrics["root_orientation"] = {
+        "status_affecting": not binary,
         "median_degrees": root_tilt_median,
         "p95_degrees": root_tilt_p95,
         "maximum_degrees": float(np.max(root_tilt)),
@@ -240,20 +251,20 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
     if all(value is not None for value in root_reject) and any(
         actual > float(limit) for actual, limit in zip(root_values, root_reject, strict=True)
     ):
-        flag("ROOT_TILT_DISTRIBUTION_REJECT", QualityStatus.REJECT)
+        style_flag("ROOT_TILT_DISTRIBUTION_REJECT", QualityStatus.REJECT)
     elif all(value is not None for value in root_review) and any(
         actual > float(limit) for actual, limit in zip(root_values, root_review, strict=True)
     ):
-        flag("ROOT_TILT_DISTRIBUTION_REVIEW", QualityStatus.REVIEW)
+        style_flag("ROOT_TILT_DISTRIBUTION_REVIEW", QualityStatus.REVIEW)
     if floor_run >= config.floor_reject_consecutive_frames:
-        flag("FLOOR_STYLE_SUSTAINED", QualityStatus.REJECT)
+        style_flag("FLOOR_STYLE_SUSTAINED", QualityStatus.REJECT)
     elif floor_count >= config.floor_review_min_frames and floor_ratio >= config.floor_review_ratio:
-        flag("FLOOR_STYLE_FRAGMENTED", QualityStatus.REVIEW)
+        style_flag("FLOOR_STYLE_FRAGMENTED", QualityStatus.REVIEW)
     if (
         low_root_run >= config.low_root_review_consecutive_frames
         and floor_run < config.floor_reject_consecutive_frames
     ):
-        flag("LOW_ROOT_REVIEW", QualityStatus.REVIEW)
+        style_flag("LOW_ROOT_REVIEW", QualityStatus.REVIEW)
 
     joint_velocity = np.diff(joint_pos, axis=0) * fps
     joint_acceleration = np.diff(joint_velocity, axis=0) * fps
@@ -270,7 +281,7 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
     for name, values in signals.items():
         threshold, unit = config.dynamics[name]
         summary = _signal_metrics(values, threshold)
-        summary.update({"threshold": threshold, "unit": unit})
+        summary.update({"threshold": threshold, "unit": unit, "status_affecting": not binary})
         dynamic_metrics[name] = summary
         severe = float(summary["max"]) > threshold * config.severe_multiplier
         broad = (
@@ -282,9 +293,9 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
         )
         code = name.upper()
         if severe:
-            flag(f"{code}_SEVERE", QualityStatus.REJECT)
+            style_flag(f"{code}_SEVERE", QualityStatus.REJECT)
         elif broad or sustained:
-            flag(f"{code}_SOFT", QualityStatus.REVIEW)
+            style_flag(f"{code}_SOFT", QualityStatus.REVIEW)
     metrics["dynamics"] = dynamic_metrics
 
     joint_vel_expected = central_difference(arrays["joint_pos"], fps)
@@ -302,11 +313,14 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
         "status_affecting": False,
     }
     floor_intervals = mask_to_intervals(floor_mask)
-    valid_intervals = safe_intervals_from_bad_mask(
-        floor_mask,
-        halo_frames=config.safe_interval_halo_frames,
-        minimum_frames=config.minimum_safe_interval_frames,
-    )
+    if binary:
+        valid_intervals = [(0, frames)] if status is QualityStatus.PASS else []
+    else:
+        valid_intervals = safe_intervals_from_bad_mask(
+            floor_mask,
+            halo_frames=config.safe_interval_halo_frames,
+            minimum_frames=config.minimum_safe_interval_frames,
+        )
     non_limit_status = QualityStatus.PASS
     for code, requested in flags:
         if code != "SOURCE_JOINT_LIMIT" and _priority(requested) > _priority(non_limit_status):
@@ -318,6 +332,7 @@ def evaluate_motion(arrays: Mapping[str, np.ndarray], config: Any) -> dict[str, 
         "quality_accepted": status is QualityStatus.PASS,
         "reason_codes": [code for code, _ in flags],
         "reason_statuses": {code: requested.value for code, requested in flags},
+        "diagnostic_codes": diagnostics,
         "metrics": metrics,
         "floor_intervals": [list(interval) for interval in floor_intervals],
         "valid_intervals": [list(interval) for interval in valid_intervals],
@@ -381,6 +396,10 @@ def build_summary(
     status_counts = Counter(str(row["status"]) for row in rows)
     no_limit_counts = Counter(str(row["status_without_joint_limit"]) for row in rows)
     reason_counts = Counter(str(code) for row in rows for code in row["reason_codes"])
+    policy = getattr(config, "decision_policy", "legacy_three_state")
+    if policy == "preserve_dance_binary":
+        status_counts.update({"PASS": 0, "REJECT": 0})
+        no_limit_counts.update({"PASS": 0, "REJECT": 0})
     contract_error_count = reason_counts.get("MOTION_CONTRACT_ERROR", 0)
 
     def rates(counts: Mapping[str, int], total: int) -> dict[str, float]:
@@ -527,6 +546,10 @@ def build_summary(
         "fps": config.fps,
         "quality_config": str(config_path),
         "quality_config_sha256": config_sha256,
+        "decision_policy": policy,
+        "result_states": ["PASS", "REJECT"]
+        if policy == "preserve_dance_binary"
+        else ["PASS", "REVIEW", "REJECT"],
         "verified_assets": dict(assets),
         "sequences": len(rows),
         "motion_contract_valid_sequences": len(rows) - contract_error_count,
@@ -539,6 +562,9 @@ def build_summary(
         "status_without_joint_limit_counts": dict(no_limit_counts),
         "status_without_joint_limit_rates": rates(no_limit_counts, len(rows)),
         "reason_counts": dict(reason_counts),
+        "diagnostic_counts": dict(
+            Counter(code for row in rows for code in row.get("diagnostic_codes", ()))
+        ),
         "by_dataset": by_dataset,
         "metric_distributions": distributions,
         "joint_limit_by_joint": joint_limit_by_joint,
@@ -579,6 +605,7 @@ def _flat_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "status_without_joint_limit": row.get("status_without_joint_limit"),
         "quality_accepted": row.get("quality_accepted"),
         "reason_codes": "|".join(map(str, row.get("reason_codes", ()))),
+        "diagnostic_codes": "|".join(map(str, row.get("diagnostic_codes", ()))),
         "num_frames": _nested(row, "metrics", "num_frames"),
         "joint_limit_violation_max": _nested(row, "metrics", "joint_limit_violation_max"),
         "root_height_min": _nested(row, "metrics", "root_height_min"),
@@ -619,6 +646,12 @@ def write_reports(
     """原子写出完整报告；已有结果必须显式 --overwrite 才能替换。"""
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    binary = summary.get("decision_policy") == "preserve_dance_binary"
+    if binary and any(
+        (output_dir / name).exists()
+        for name in ("review_candidates.jsonl", "without_joint_limit_review.txt")
+    ):
+        raise FileExistsError("新二分类规则请使用独立报告目录，不能与旧三态报告混用")
     occupied = [output_dir / name for name in REPORT_FILENAMES if (output_dir / name).exists()]
     if occupied and not overwrite:
         raise FileExistsError(f"报告已存在，需 --overwrite: {occupied}")
@@ -634,10 +667,11 @@ def write_reports(
             str(row["sample_id"]),
         )
     )
-    _atomic_write(
-        output_dir / "review_candidates.jsonl",
-        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in review),
-    )
+    if not binary:
+        _atomic_write(
+            output_dir / "review_candidates.jsonl",
+            "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in review),
+        )
     _atomic_write(
         output_dir / "quality_summary.json",
         json.dumps(dict(summary), indent=2, ensure_ascii=False, sort_keys=True) + "\n",
@@ -656,6 +690,8 @@ def write_reports(
             row["status_without_joint_limit"] == QualityStatus.REJECT.value
         ),
     }
+    if binary:
+        del list_specs["without_joint_limit_review.txt"]
     for filename, selected in list_specs.items():
         _atomic_write(
             output_dir / filename,
