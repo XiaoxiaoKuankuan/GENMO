@@ -1,0 +1,16 @@
+# 本机 Stage2-A 音乐→GENMO固定参考→SM＋Adapter→MuJoCo 演示资产。
+# 此配置不是训练入口；模型只读，所有运行写入新的目录。更换机器须显式修改路径。
+# Adapter 绑定64首训练集对照中保留的GPU7第2600次更新，不追随正在训练的latest。
+# 控制合同/根通道开关读取checkpoint内config，机器人参数读取SM RobotSpec。
+adapter_checkpoint: /home/weili/bumi-closedloop-worktrees/adapter/evaluation_train64_rootcont_20261030_105746/snapshots/g7_latest_u002600.pt
+supermimic:
+  repo: /home/weili/bumi-closedloop-worktrees/supermimic/SuperMimic
+  checkpoint: /home/weili/supermimic_vibed/logs/bumi3_seven_filtered_v1/ckpt_024000.pt
+  robot_asset_dir: /home/weili/supermimic_vibed/data/bumi3_4340/robot
+genmo:
+  checkpoint: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/checkpoints/stage1_server2_s595000_20261008/s595000.pt
+  stats: /home/weili/bumi-closedloop-worktrees/GENMO/inputs/checkpoints/stage1_server2_s595000_20261008/qpos30_train_stats.json
+  kinematics: /home/weili/bumi-closedloop-worktrees/adapter/GENMO/configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json
+music_baseline: /home/weili/bumi-closedloop-worktrees/adapter/sim2sim_assets/music_baseline_all.pt
+cache_root: /home/weili/bumi-closedloop-worktrees/adapter/sim2sim_assets/cache
+output_root: /home/weili/bumi-closedloop-worktrees/adapter/sim2sim_runs

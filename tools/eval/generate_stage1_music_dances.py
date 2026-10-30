@@ -81,12 +81,15 @@ def generate(actor, runtime, music, total, seed, directory):
             generated[: decision + 1], decision_frame=decision, history_steps=50
         )
         music_window = torch.zeros(120, 35)
-        music_window[:count] = music[decision : decision + count]
+        # sim2sim 可多生成少量真实模型尾帧供十帧 Goal/导数 halo 使用。
+        # 音乐结束后 mask 为假，不复制末帧音乐，不外推名义动作。
+        music_count = max(0, min(count, len(music)-decision))
+        music_window[:music_count] = music[decision : decision + music_count]
         valid = torch.arange(120) < count
         conditions = batch_to_device(
             {
                 "music_features": music_window[None],
-                "music_valid": valid[None],
+                "music_valid": (torch.arange(120) < music_count)[None],
                 "proprio_history": history[None],
                 "proprio_history_valid": history_valid[None],
                 "proprio_history_times": history_times[None],
