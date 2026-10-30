@@ -161,6 +161,7 @@ def main():
         )
     (args.output / "sources.json").write_text(json.dumps(sources, ensure_ascii=False, indent=2))
     started = time.monotonic()
+    last_progress = 0
     counts, frames, reasons, restored = defaultdict(Counter), Counter(), Counter(), Counter()
     config_sha = sha256_file(args.config)
     with (
@@ -204,7 +205,7 @@ def main():
                     else:
                         reject_out.write(json.dumps(result, ensure_ascii=False) + "\n")
                 processed = sum(sum(c.values()) for c in counts.values())
-                if processed % (args.workers * 160) == 0:
+                if processed - last_progress >= args.workers * 160:
                     print(
                         json.dumps(
                             dict(
@@ -216,6 +217,7 @@ def main():
                         ),
                         flush=True,
                     )
+                    last_progress = processed
     summary = dict(
         decision_policy=CONFIG.decision_policy,
         result_states=["PASS", "REJECT"],
