@@ -240,3 +240,71 @@ def test_binary_inventory_cannot_silently_reuse_foot_spread_subset(tmp_path):
     rows = adapter.input_rows(manifest, path.parent, None, require_full_inventory=True)
     assert len(rows) == 2
     assert all("foot_spread_rank" not in row for row in rows)
+
+
+def test_rescreen_text_uses_old_reject_only_as_inventory(tmp_path, monkeypatch):
+    """旧拒绝动作重新读源文件；完整新规则通过后可进入PASS，不沿用旧姿态筛选。"""
+    import sqlite3
+    import sys
+
+    from tools.data.bumi import rescreen_text_dance_binary as rescreen
+
+    _, path, xml, _ = source(tmp_path, mutation="floor")
+    report = tmp_path / "original_report"
+    report.mkdir()
+    human = tmp_path / "original/aistpp/example.npz"
+    identity = dict(
+        paths=dict(
+            dataset="bones_seed",
+            input_root=str(path.parent),
+            source_root=str(human.parent),
+            robot_xml=str(xml),
+        ),
+        assets=dict(robot_xml_sha256=load_config(DANCE_CONFIG).robot_xml_sha256),
+    )
+    (report / "run.json").write_text(json.dumps(dict(identity=identity)))
+    (report / "quality_summary.json").write_text(
+        json.dumps(dict(indexed_records=1, processed_records=1))
+    )
+    old = dict(
+        status="REJECT",
+        reason_codes=["ROOT_TILT_SUSTAINED"],
+        source_motion_id="example",
+        source_sequence_key="example",
+        source_sha256=sha256_file(path),
+        human_sha256=sha256_file(human),
+    )
+    with sqlite3.connect(report / "quality.sqlite") as db:
+        db.execute("create table inputs(relative_path text primary key, human_path text)")
+        db.execute("create table results(relative_path text primary key, payload text)")
+        db.execute("insert into inputs values(?,?)", (path.name, str(human)))
+        db.execute("insert into results values(?,?)", (path.name, json.dumps(old)))
+    output = tmp_path / "new_result"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rescreen",
+            "--reports",
+            str(report),
+            "--output",
+            str(output),
+            "--config",
+            str(DANCE_CONFIG),
+            "--kinematics",
+            str(KIN),
+            "--workers",
+            "1",
+        ],
+    )
+    rescreen.main()
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["counts"] == {"SOMA-BONES-SEED": {"PASS": 1, "REJECT": 0}}
+    assert summary["restored_from_old_nonpass"] == {"SOMA-BONES-SEED": 1}
+    passed = json.loads((output / "pass.jsonl").read_text())
+    assert passed["valid_intervals"] == [[0, 120]]
+    # 内容变化必须重新报告，不能把旧身份或旧PASS当成当前读取证据。
+    changed = {**passed, "source_sha256": "0" * 64}
+    result = rescreen.evaluate(changed)
+    assert result["status"] == "REJECT"
+    assert result["reason_codes"] == ["MOTION_CONTRACT_ERROR"]
