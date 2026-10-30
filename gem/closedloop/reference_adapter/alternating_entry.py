@@ -246,7 +246,8 @@ def main():
                 if isinstance(value, torch.Tensor) and value.ndim == 1 and
                 (k in ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori',
                        'action_rate', 'root_non_saturating') or k.startswith(('absolute_', 'error_', 'root_reference_',
-                           'root_xy_', 'reference_soft_', 'reference_seam_', 'reference_halo_')))})
+                           'root_xy_', 'reference_soft_', 'reference_seam_', 'reference_halo_',
+                           'execution_', 'stance_', 'root_tracking_')))})
             if 'root_xy_squared_m' in row['raw']:
                 values['real_root_xy_rmse_m'] = row['raw']['root_xy_squared_m'].mean().sqrt()
             values['real_sm_root_position_reward'] = .02*control.runtime.mdp.cfg.root_pos_weight*row['raw']['root_pos'].mean()
@@ -396,6 +397,10 @@ def main():
                 collect(settings['warmup_vector_steps'])
             torch.cuda.reset_peak_memory_stats()
             while state['accepted_updates'] < vector['target_accepted_updates']:
+                if (output/'stop_requested.json').is_file():
+                    checkpoint('user_stop')
+                    publish('stopped_by_user', stop_reason='explicit_stop_requested_file_at_iteration_boundary')
+                    return 0
                 begin = time.perf_counter()
                 state['iterations'] += 1
                 extra['step_acc'] += 1/settings['utd']

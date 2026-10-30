@@ -9,6 +9,8 @@
 这些成本只改变奖励，不改变参考、不截断梯度、不引入硬预算。旧配置默认保持原值；
 新权重由训练数据梯度标定。根位置真值只用于训练目标，不成为可部署观测。
 所有新增奖励只乘一次dt；新六项连续性与旧两项根姿态成本互斥，避免重复惩罚。
+执行jerk与名义支撑足端速度成本单独配置；根Tracking可加训练专用bonus，原六项
+Tracking报告仍用共同权重，以免把改变计分权重造成的分数增长冒充物理改善。
 """
 
 import torch
@@ -121,7 +123,10 @@ def root_reference_costs(residual, anchor, previous_plan, valid, nominal_rotatio
 class PrecisionObjective:
     def __init__(self, scales=None, *, weight=1., root_velocity_weight=0.,
                  root_continuity_weight=0., root_velocity_scale=.3, root_continuity_scale=.05,
-                 root_xy_weight=0., root_xy_scale=.2, soft_reference_weights=None, soft_reference_scales=None):
+                 root_xy_weight=0., root_xy_scale=.2, soft_reference_weights=None, soft_reference_scales=None,
+                 root_tracking_bonus_weight=0., execution_jerk_weight=0., execution_jerk_scale=1000.,
+                 stance_foot_weight=0., stance_foot_scale=.1, stance_height_band=.04,
+                 stance_height_tau=.01, stance_speed_scale=.2):
         self.scales = dict(zip(NAMES, FLOORS)) if scales is None else {name: scales[name] for name in NAMES}
         self.weight = weight
         self.root_velocity_weight, self.root_continuity_weight = root_velocity_weight, root_continuity_weight
@@ -129,6 +134,15 @@ class PrecisionObjective:
         self.root_xy_weight, self.root_xy_scale = root_xy_weight, root_xy_scale
         self.soft_reference_weights = dict(soft_reference_weights or {})
         self.soft_reference_scales = dict(REFERENCE_FLOORS if soft_reference_scales is None else soft_reference_scales)
+        self.root_tracking_bonus_weight = root_tracking_bonus_weight
+        self.execution_jerk_weight, self.execution_jerk_scale = execution_jerk_weight, execution_jerk_scale
+        self.stance_foot_weight, self.stance_foot_scale = stance_foot_weight, stance_foot_scale
+        self.stance_height_band, self.stance_height_tau = stance_height_band, stance_height_tau
+        self.stance_speed_scale = stance_speed_scale
+        self._stance_bank = None
+        if min(root_tracking_bonus_weight, execution_jerk_weight, stance_foot_weight) < 0 or min(
+                execution_jerk_scale, stance_foot_scale, stance_height_band, stance_height_tau, stance_speed_scale) <= 0:
+            raise ValueError('执行稳定性及根bonus权重须非负，固定物理标尺须为正')
         if root_xy_weight < 0 or root_xy_scale <= 0:
             raise ValueError('绝对根XY权重须非负，物理尺度须为正')
         if set(self.soft_reference_weights)-set(REFERENCE_NAMES) or any(v < 0 for v in self.soft_reference_weights.values()):
@@ -146,6 +160,26 @@ class PrecisionObjective:
         values = errors(control, z, state, nominal, sm)
         raw = {'absolute_body_angular_velocity': values['body_angular_velocity'].abs().mean(-1)}
         weighted = {}
+        if self.root_tracking_bonus_weight:
+            raw['root_tracking_bonus'] = sm['root_pos']
+            weighted['root_tracking_bonus'] = .02*self.root_tracking_bonus_weight*sm['root_pos']
+        if self.execution_jerk_weight:
+            from .execution_costs import execution_jerk
+            cost, rms = execution_jerk(state, z['state'], z['execution_previous_qd'],
+                                       z['execution_jerk_valid'], self.execution_jerk_scale)
+            raw.update(execution_jerk_cost=cost, execution_jerk_rms=rms,
+                       execution_jerk_valid=z['execution_jerk_valid'].to(state))
+            weighted['execution_jerk'] = -.02*self.execution_jerk_weight*cost
+        if self.stance_foot_weight:
+            from .execution_costs import stance_foot_velocity
+            self.prepare_stance(control)
+            feet = self._stance_feet
+            cost, diagnostics = stance_foot_velocity(sm['tracked_body_v'][:, feet], nominal.body_p[:, feet],
+                nominal.body_v[:, feet], self._stance_floor[z['song']], scale=self.stance_foot_scale,
+                height_band=self.stance_height_band, height_tau=self.stance_height_tau,
+                speed_scale=self.stance_speed_scale)
+            raw.update(diagnostics, stance_foot_cost=cost)
+            weighted['stance_foot_velocity'] = -.02*self.stance_foot_weight*cost
         root_cost, root_raw = absolute_root_xy(state, nominal, self.root_xy_scale)
         raw.update(root_raw)
         if self.root_xy_weight:
@@ -181,6 +215,18 @@ class PrecisionObjective:
                 raw['reference_seam_'+name+'_rms'] = features[name][:, :1].square().mean((1, 2)).sqrt()
                 raw['reference_halo_'+name+'_rms'] = features[name][:, -1:].square().mean((1, 2)).sqrt()
         return raw, weighted
+
+    def prepare_stance(self, control):
+        """每份只读名义库只准备一次相位基准；不读取任何未来执行状态或仿真接触。"""
+        if self._stance_bank is control.bank:
+            return
+        names = tuple(control.bundle.spec.tracked_bodies)
+        self._stance_feet = [names.index(n) for n in ('l_ankle_roll_link', 'r_ankle_roll_link')]
+        with torch.no_grad():
+            self._stance_floor = torch.stack([torch.quantile(
+                control.bank.reference.body_p[offset:offset+length, self._stance_feet, 2], .02, dim=0)
+                for offset, length in zip(control.bank.offsets.tolist(), control.bank.lengths.tolist())])
+        self._stance_bank = control.bank
 
 
 def calibrate_gradient_weights(control, dynamics, starts, *, microbatch=32, horizon=32):

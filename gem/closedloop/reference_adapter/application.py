@@ -60,7 +60,10 @@ def direct_reference_config(config):
         settings['precision'] = {'weight': precision.get('weight', 1.)}
         # 显式白名单：保留新软目标，旧投影/旧泛化加速度配置不能隐式恢复。
         for key in ('root_velocity_weight', 'root_continuity_weight', 'root_velocity_scale', 'root_continuity_scale',
-                    'root_xy_weight', 'root_xy_scale', 'soft_reference_weights', 'soft_reference_scales'):
+                    'root_xy_weight', 'root_xy_scale', 'soft_reference_weights', 'soft_reference_scales',
+                    'root_tracking_bonus_weight', 'execution_jerk_weight', 'execution_jerk_scale',
+                    'stance_foot_weight', 'stance_foot_scale', 'stance_height_band',
+                    'stance_height_tau', 'stance_speed_scale'):
             if key in precision:
                 settings['precision'][key] = precision[key]
         soft_root = any(settings['precision'].get(k, 0.) for k in ('root_velocity_weight', 'root_continuity_weight'))
@@ -68,6 +71,8 @@ def direct_reference_config(config):
                                          else 'sm_music_precision_direct_reference_v7')
         if precision.get('root_xy_weight', 0.) or any(precision.get('soft_reference_weights', {}).values()):
             settings['objective_version'] = 'sm_music_absolute_xy_goal_continuity_v9'
+        if any(precision.get(k, 0.) for k in ('root_tracking_bonus_weight', 'execution_jerk_weight', 'stance_foot_weight')):
+            settings['objective_version'] = 'sm_music_absolute_xy_execution_stability_v10'
     return cfg
 
 

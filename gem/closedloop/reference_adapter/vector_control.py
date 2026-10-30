@@ -64,7 +64,9 @@ class VectorControl:
             song=songs, frame=frames, start_frame=frames.clone(), episode=episodes,
             heading=yaw_mat(reference.root_R), plan=state.new_zeros(n, 10, 27),
             left=state.new_zeros(n, 27), anchor=state.new_zeros(n, 27),
-            plan_valid=torch.zeros(n, device=state.device, dtype=torch.bool), music=memory)
+            plan_valid=torch.zeros(n, device=state.device, dtype=torch.bool), music=memory,
+            execution_previous_qd=state[:, 34:].clone(),
+            execution_jerk_valid=torch.zeros(n, device=state.device, dtype=torch.bool))
 
     def nominal_goal(self, z):
         frames = z['frame'][:, None]+self.bank.offset11
@@ -224,7 +226,8 @@ class VectorControl:
         end = dict(z, state=state_next, action=proposal['action'], frame=frames,
             history=torch.cat((z['history'][:, 1:], obs[:, None]), 1),
             left=z['anchor'], anchor=proposal['residual'][:, 0], plan=proposal['residual'],
-            plan_valid=torch.ones_like(z['plan_valid']), music=memory)
+            plan_valid=torch.ones_like(z['plan_valid']), music=memory,
+            execution_previous_qd=z['state'][:, 34:], execution_jerk_valid=torch.ones_like(z['plan_valid']))
         return end, sum(weighted.values()), raw, weighted, continuation, done, failed
 
     def critic_features(self, z):

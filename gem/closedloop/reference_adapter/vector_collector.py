@@ -95,8 +95,10 @@ class VectorCollector:
         new = self.control.initial(observed, songs, frames, episodes)
         if hard is not None:
             # 来源是已经真实发生的因果历史，复位片段不冒充从歌曲开头的MC。
-            for key in ('action', 'history', 'heading', 'left', 'anchor', 'plan', 'plan_valid', 'music'):
-                new[key][hard] = pool[key][selected[hard]]
+            for key in ('action', 'history', 'heading', 'left', 'anchor', 'plan', 'plan_valid', 'music',
+                        'execution_previous_qd', 'execution_jerk_valid'):
+                if key in pool:
+                    new[key][hard] = pool[key][selected[hard]]
             self.env.a_prev[ids] = new['action']
         if self.state is None:
             if len(ids) != self.num_envs:
