@@ -114,3 +114,36 @@ Adapter控制＋物理＋逐步统计P50/P95为7.95/8.33ms；零Adapter为7.61/8
 这些是无窗口实测计算耗时，包含CUDA结果回传同步，不包括生成参考与窗口绘制；
 不能当作所有机器、所有歌曲的20ms最坏情况保证。5秒窗口实测同项P50/P95为
 8.91/10.61ms。首步或调度抖动可超过20ms，缓存生成本身也不属于50Hz控制循环。
+
+单独导出 Adapter ONNX
+---------------------
+
+正式入口为 ``tools/export/export_reference_adapter_onnx.py``。默认读取上面的本机
+配置及GPU7/u2600固定快照，使用CPU导出并自动核对PyTorch与ONNXRuntime：
+
+.. code-block:: bash
+
+   cd /home/weili/bumi-closedloop-worktrees/adapter/GENMO
+   /home/weili/GENMO/.venv/bin/python -B tools/export/export_reference_adapter_onnx.py \
+     --output /home/weili/bumi-closedloop-worktrees/adapter/exports/adapter_g7_u2600
+
+此目录已于2026-10-30实际生成，可直接使用，不必重复导出。重跑时换一个新目录；
+入口拒绝覆盖已有文件。导出其它权重时添加 ``--checkpoint /完整路径/模型.pt``，
+换机器时用 ``--config`` 指定本机资产配置。
+
+目录包含 ``adapter.onnx``、``metadata.json`` 和 ``parity_report.json``。
+metadata逐字段保存2654输入的名称、shape、扁平start/stop（左闭右开）、归一化要求、
+21关节顺序、幅值上限、根通道开关、来源checkpoint SHA及更新数。ONNX输入名为
+``adapter_input``，float32、动态 ``[B,2654]``；输出名为 ``residual_plan``，
+float32 ``[B,10,27]``，对应t+1到t+10，仍相对原始名义参考而非上轮残差增量。
+
+图包含MLP、Tanh限幅、根XY关闭、根姿态开关和0.05rad旋转向量范数上限。
+输入特征拼接/归一化、历史音乐状态、SO(3)右乘组合、当前锚点、导数halo、Goal570
+及冻结SM Actor仍属于控制程序。Adapter ONNX不能直接接收音乐文件，也不直接输出
+21维控制动作。旧checkpoint的外部投影不会被打包到该网络图；必须使用其匹配运行时。
+
+部署不需要WM、Critic、Replay或优化器；需要复用匹配的GENMO、SuperMimic Actor、
+其归一化及音乐基线资产。本页的MuJoCo演示目前仍走PyTorch控制链，新增导出工具
+没有将它改为整链ONNXRuntime。实际GPU7/u2600导出在batch1/16、零输入/随机输入/
+100倍输入共6组核对中最大绝对误差6.333e-8，所有输出有限且满足训练限幅；这仅证明
+导出数值一致，不新增真实物理收益或硬件部署结论。
