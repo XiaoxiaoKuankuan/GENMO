@@ -79,3 +79,17 @@ def test_short_sequences_and_failure_denominator():
     assert value['count'] == 4 and value['nonfinite_count'] == 1
     assert value['metrics']['error']['pooled_rmse'] == pytest.approx((26/3)**.5)
     assert value['metrics']['error']['source_mean_rmse'] == pytest.approx((5**.5+4)/2)
+
+
+def test_nonfinite_rollout_is_counted_without_real_state_replacement():
+    class BrokenModel(RecordedActionModel):
+        def step_model(self, state, action, xi):
+            result = super().step_model(state, action, xi)
+            result[action[:, 0] >= .025] = float('nan')
+            return result
+
+    result = evaluate_episode(episode(), BrokenModel(), batch_size=7, anchors=4, horizons=(1, 8, 16, 32))
+    assert result['scores']['one_step_all']['nonfinite_count'] > 0
+    assert result['scores']['rollout_endpoint_h1']['nonfinite_count'] == 0
+    assert result['scores']['rollout_endpoint_h32']['nonfinite_count'] == 4
+    assert all(v is None for v in result['scores']['rollout_endpoint_h32']['metrics'].values())
