@@ -102,3 +102,66 @@ Tracking参数梯度范数0.418326706，单位jerk成本0.398234993，单位足�
 
 最终八配置与标定摘要保存在`configs/closedloop/stage2_root_execution_stability_20261030/`。
 新增配置回归确保四组共同物理计分、同档权重配对双种子；正式启动仍待下方实际证据。
+
+### 八卡实际正式启动及第20次真实整歌评价
+
+2026-10-30 22:04:44实际执行启动器，源码/最终配置SHA为
+`6032c9306eb6fc0ef224bd926f61bc67a8444098`，配套SM为
+`44cc31b77bc2dd1f998cec93933f812540dbd4d6`。运行根为：
+
+`/data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/formal_root_execution_20261030_220444`
+
+实际命令：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /data0/user/liwei/envs/genmo_adapter_runtime_20261026/bin/python -B \
+  tools/launch_stage2_alternating.py \
+  --root /data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/formal_root_execution_20261030_220444 \
+  --session-prefix rootexec_20261030_220444 \
+  --config-dir configs/closedloop/stage2_root_execution_stability_20261030 --wait-for-free-gpus
+```
+
+|GPU|组/seed|实际训练PID|tmux|22:16已完成Adapter更新|完整一轮中位秒|
+|---|---|---:|---|---:|---:|
+|0|A/42|3568207|rootexec_20261030_220444_g0|35|8.70|
+|1|A/43|3568232|rootexec_20261030_220444_g1|35|8.65|
+|2|B/42|3568245|rootexec_20261030_220444_g2|34|8.49|
+|3|B/43|3568352|rootexec_20261030_220444_g3|35|8.58|
+|4|C/42|3571392|rootexec_20261030_220444_g4|29|9.54|
+|5|C/43|3571856|rootexec_20261030_220444_g5|34|8.66|
+|6|D/42|3572165|rootexec_20261030_220444_g6|28|9.31|
+|7|D/43|3572437|rootexec_20261030_220444_g7|30|9.14|
+
+八组均已通过初始100个WM-only迭代并实际执行有限Adam。首次Adam前均647168条
+真实转移、1010次WM更新；首次参数L2变化0.00253359至0.00253401，实际Actor
+动作RMS变化0.00134978至0.00169752。真实PID argv/cwd、单卡可见设备、GPU计算
+进程及完整checkpoint已核对；三个优化器容器、四类RNG和新增jerk历史在保存包内。
+同seed的四组初始Adapter完全相同；八组原WM/Actor/checkpoint/tasks身份一致。
+专用评价实际4环境，训练实际2048环境，各自Replay/WM/优化器独立。
+
+常驻训练GPU占用约9093至9169MiB；评价子进程期间同卡约11416至11492MiB。
+WM预热后的首次32样本梯度探针：新增jerk/Tracking为11.9%至23.3%，足端/Tracking
+15.9%至27.1%，根bonus/Tracking为20.3%至26.2%。这是实际分布与WM变化后的数值，
+不能把准备阶段10%当成训练全程事实。完整分项见objective_gradients.jsonl。
+
+第20次整歌结果如下，每组两seed的相对各自零策略变化再平均。validation和
+evaluation各固定4首、同初态/物理、无探索；八组双方全部完成。Tracking用共同
+六项计分，不混入不同bonus/成本。误差、jerk和脚滑越低越好。
+
+|组|validation Tracking%|validation根RMSE%|evaluation Tracking%|evaluation根RMSE%|evaluation jerk%|evaluation脚滑%|
+|---|---:|---:|---:|---:|---:|---:|
+|A 原目标|+1.049|-14.401|-1.854|+36.241|+0.080|+0.130|
+|B 根奖励加强|+0.473|-4.693|-2.388|+45.872|-0.128|+2.641|
+|C 执行稳定性|+0.900|-11.727|-1.459|+29.779|+0.481|+0.011|
+|D 两者结合|+0.394|-3.534|-2.338|+45.853|+1.000|+1.316|
+
+边界：增加根奖励尚未优于原目标；稳定性组独立evaluation根退化幅度稍小，但所有
+新组均尚未在该集取得根轨迹收益。20次是早期真实对照，不宣称方法成功、不根据
+evaluation改参数；按用户要求继续10000预算，评价不停止、不回滚。原64首训练集
+GPU7/u2600的收益不能移植为这次新权重的成绩；本次尚未对新权重重跑全64首。
+
+完整证据为运行根launch_manifest.json、startup_verified.json、first_full_evaluation.json
+及各gpuN的training.jsonl、validation/evaluation_000020.json、latest/best_checkpoint.json。
+小型证据已同步到本地adapter/formal_root_execution_20261030_220444，未复制巨型Replay。
+新增执行jerk区别于原action-rate：前者约束执行速度的二阶时间差，后者约束Actor
+控制动作的一阶差；没有再叠加另一个同定义action-rate成本。
