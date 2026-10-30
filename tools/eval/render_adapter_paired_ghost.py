@@ -2,7 +2,8 @@
 
 输入是同一次整歌配对评价导出的两个JSON/NPZ：左侧零Adapter，右侧已训练Adapter。
 每侧实色机器人使用真实Newton物理执行qpos，蓝色半透明机器人使用同一控制步下发的
-参考第一帧；原始GENMO名义目标仍用于误差和世界坐标轨迹图。两侧保持同一音乐时间、
+参考第一帧，或显式选择两侧完全相同的原始GENMO名义目标作为影子；原始GENMO
+名义目标始终用于误差和世界坐标轨迹图。两侧保持同一音乐时间、
 相同相机，镜头共同容纳名义目标及两侧真实位置，不单独跟随各自机器人而掩盖漂移。
 只通过mj_forward重建渲染几何，不推进MuJoCo动力学，不修改/平滑/插值轨迹。真实执行
 提前结束的面板显示终止信息，不补机器人姿态；视频保留原音乐，完整案例图片选择配对
@@ -41,12 +42,15 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--mjcf', type=Path)
     parser.add_argument('--audio', type=Path)
+    parser.add_argument('--ghost-reference', choices=['nominal', 'corrected'], default='corrected',
+                        help='nominal用共同原始GENMO目标叠加，corrected展示各方法下发参考')
     parser.add_argument('--labels', nargs=2, default=['基线：GENMO + 冻结SuperMimic', '最好模型：Adapter GPU2 / u700'])
     parser.add_argument('--panel-width', type=int, default=800)
     parser.add_argument('--panel-height', type=int, default=580)
     parser.add_argument('--max-frames', type=int, help='仅用于有限渲染验收，正式整歌不设置')
     parser.add_argument('--font', type=Path, default=Path('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'))
     args = parser.parse_args()
+    ghost_key = 'nominal_qpos' if args.ghost_reference == 'nominal' else 'corrected_qpos'
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     if any(output.with_suffix(ext).exists() for ext in ('.mp4', '.png', '.json')):
@@ -143,12 +147,13 @@ def main():
             draw = ImageDraw.Draw(canvas)
             task = first['task']
             draw.text((20, 9), f"训练集 / {task['source']} / {task['id']}", font=font, fill='white')
-            draw.text((20, 41), '实色：真实仿真执行   蓝色影子：该方法下发参考   两侧同一音乐时刻、同一镜头', font=font, fill='#bdcadd')
+            ghost_label = '共同原始GENMO目标' if args.ghost_reference == 'nominal' else '该方法下发参考'
+            draw.text((20, 41), f'实色：真实仿真执行   蓝色影子：{ghost_label}   两侧同一音乐时刻、同一镜头', font=font, fill='#bdcadd')
             draw.text((20, 71), f'Newton真实轨迹回放 · 50 Hz · 音乐 {(index+1)/50:.2f} s · 原始名义目标用于计算误差', font=small, fill='#97acc3')
             available = next(row for row in arrays if index < len(row['tick']))
             positions = [available['nominal_qpos'][index, :2]]
             positions.extend(row[key][index, :2] for row in arrays if index < len(row['tick'])
-                             for key in ('qpos', 'corrected_qpos'))
+                             for key in ('qpos', ghost_key))
             positions = np.asarray(positions)
             center = (positions.min(0)+positions.max(0))/2
             camera.lookat[:] = [center[0], center[1], .59]
@@ -158,7 +163,7 @@ def main():
                 draw.text((left+20, 107), args.labels[column], font=title_font, fill=ink[column])
                 if index < len(row['tick']):
                     actual.qpos[:] = row['qpos'][index]
-                    ghost.qpos[:] = row['corrected_qpos'][index]
+                    ghost.qpos[:] = row[ghost_key][index]
                     mujoco.mj_forward(model, actual)
                     mujoco.mj_forward(model, ghost)
                     renderer.update_scene(actual, camera=camera, scene_option=option)
@@ -238,7 +243,8 @@ def main():
         snapshot_selection=snapshot_rule,
         camera=dict(min_distance=2.1, azimuth=135, elevation=-17,
                     shared_center_and_distance_cover_both_actual_and_reference=True),
-        scope='kinematic_render_of_actual_Newton_physics_and_committed_reference_no_new_dynamics',
+        ghost_reference=args.ghost_reference,
+        scope='kinematic_render_of_actual_Newton_physics_and_selected_reference_no_new_dynamics',
         video_sha256=sha(output), image_sha256=sha(output.with_suffix('.png')),
         trajectory_metadata=[dict(path=str(p), metadata_sha256=sha(p), npz_sha256=m['sha256'])
                              for p, m in zip(args.trajectories, metadata)],
