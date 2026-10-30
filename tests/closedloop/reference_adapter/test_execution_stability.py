@@ -6,6 +6,7 @@ Tracking，新增项仅乘一次dt，BPTT内部历史没有detach。合成名义
 正确性，不代替Newton真实接触检查或整歌改善证据。测试不启动仿真或正式训练。
 """
 
+from pathlib import Path
 import torch
 
 from gem.closedloop.reference_adapter.execution_costs import execution_jerk, stance_foot_velocity
@@ -13,6 +14,27 @@ from gem.closedloop.reference_adapter.precision import PrecisionObjective
 from gem.closedloop.reference_adapter.application import direct_reference_config
 from gem.closedloop.reference_adapter.vector_replay import VectorReplay
 from test_direct_reference import direct_system
+
+
+def test_four_conditions_two_seeds_keep_common_physical_score():
+    import yaml
+    directory = Path(__file__).resolve().parents[3]/'configs/closedloop/stage2_root_execution_stability_20261030'
+    configs = [direct_reference_config(yaml.safe_load((directory/f'gpu{i}.yaml').read_text())) for i in range(8)]
+    for i,c in enumerate(configs):
+        assert c['bptt_steps'] == 32 and c['vector']['target_accepted_updates'] == 10000
+        assert c['vector']['num_envs'] == 2048 and c['training']['wm_fit_window'] == 8
+        assert c['training']['seed'] == c['vector']['sampling_seed'] == 42+i%2
+        assert c['alternating']['critic_enabled'] is False
+        assert c['alternating']['root_xy'] is False and c['alternating']['action_noise'] == 0
+        assert c['sm_mdp'] == configs[0]['sm_mdp']
+        assert c['sm_mdp']['root_pos_weight'] == 1.2 and c['sm_mdp']['root_ori_weight'] == 1.
+        p=c['alternating']['precision']; group=i//2
+        assert p['root_tracking_bonus_weight'] == (1.2 if group in (1,3) else 0.)
+        assert (p['execution_jerk_weight'] > 0) == (group in (2,3))
+        assert (p['stance_foot_weight'] > 0) == (group in (2,3))
+        assert p == configs[i//2*2]['alternating']['precision']
+        assert p['root_xy_weight'] == configs[0]['alternating']['precision']['root_xy_weight']
+        assert p['soft_reference_weights'] == configs[0]['alternating']['precision']['soft_reference_weights']
 
 
 def test_jerk_units_reset_and_three_state_gradients():
