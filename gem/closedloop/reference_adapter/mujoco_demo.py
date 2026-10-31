@@ -1,4 +1,4 @@
-"""Stage2-A 音乐输入到真实 MuJoCo 控制的装配与交互运行。
+"""Stage2-A 音乐或英文文本输入到真实 MuJoCo 控制的装配与交互运行。
 
 任意音频先复用 EDGE35 提取和冻结 Stage1 自主生成器，缓存原始世界动作及真实
 生成的导数尾帧；生成历史只来自已生成的名义动作。这是固定参考 Stage2-A 演示，
@@ -15,6 +15,7 @@ from pathlib import Path
 import queue
 import time
 from types import SimpleNamespace
+from dataclasses import replace
 
 import numpy as np
 import torch
@@ -62,13 +63,15 @@ def load_controller(config, checkpoint, device):
 @torch.no_grad()
 def prepare_reference(config, prepared, bundle, seed, device):
     """内容寻址的固定名义缓存；音乐末尾额外帧由 GENMO 生成而非线性外推。"""
-    from .nominal import load_frozen_genmo
-    from tools.eval.generate_stage1_music_dances import generate
-    identity = dict(schema="genmo.sm_adapter.mujoco.nominal.v1", seed=seed,
+    from gem.runtime.multimodal_stage1 import generate_stage1_reference
+    identity = dict(schema="genmo.sm_adapter.mujoco.nominal.v3", seed=seed,
                     audio_sha256=prepared.identity["audio_sha256"],
                     feature_sha256=prepared.identity["feature_values_sha256"],
                     assets={k: file_digest(config["genmo"][k]) for k in ("checkpoint", "stats", "kinematics")},
-                    method="frozen_stage1_autoregressive_120_prefix12_ddim20_cfg2.5",
+                    method="frozen_stage1_autoregressive_120_prefix12",
+                    sample_steps=config["genmo"].get("sample_steps", 20),
+                    guidance_scale=config["genmo"].get("guidance_scale", 2.5),
+                    duration_s=prepared.duration,
                     contact="sigmoid_logits_with_contact_valid",
                     history="past_generated_nominal_only_not_future_executed_state")
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -83,19 +86,51 @@ def prepare_reference(config, prepared, bundle, seed, device):
         directory.mkdir(parents=True, exist_ok=True)
         print("[REFERENCE] 首次音乐：冻结 GENMO 生成完整参考；完成后打开物理窗口。", flush=True)
         torch.manual_seed(seed)
-        actor = load_frozen_genmo(config["genmo"], device).stage1
-        music = torch.from_numpy(prepared.features).float()
-        # 50Hz 最后时刻的 t+11 需要至少 0.22s 真正生成的名义尾部。
-        qpos, contact, contact_valid, windows = generate(actor, actor, music, len(music)+8, seed, directory)
-        payload = dict(identity=identity, world_qpos=qpos[None], joint_names=actor.endecoder.kinematics.joint_order,
-                       contact=(contact.sigmoid()*contact_valid[:, None])[None],
-                       contact_valid=contact_valid, windows=windows)
+        features = directory/"music_features.pt"
+        torch.save(torch.from_numpy(prepared.features).float(), features)
+        end = round(prepared.duration*600)
+        task = dict(condition_kind="music", music_features=str(features), duration_ticks=end, seed=seed)
+        generated = generate_stage1_reference(config["genmo"], task, device=device,
+                                              required_end_tick=(end//12)*12+132)
+        payload = dict(identity=identity, **generated)
         temporary = directory/"reference.pending.pt"
         torch.save(payload, temporary)
         temporary.replace(filename)
-        del actor
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    nominal = make_nominal(payload["world_qpos"].to(device), payload["joint_names"], bundle.spec,
+                           contact=payload["contact"].to(device))
+    return nominal, dict(path=str(filename), **identity)
+
+
+@torch.no_grad()
+def prepare_text_reference(config, text, duration_s, bundle, seed, device):
+    """英文指令通过同一Stage1生成完整固定参考，文本资产纳入缓存身份。"""
+    from gem.runtime.multimodal_stage1 import generate_stage1_reference
+    encoder = Path(config["genmo"]["text_encoder_path"])
+    identity = dict(schema="genmo.sm_adapter.mujoco.text.v1", text=text.strip(),
+                    duration_s=duration_s, seed=seed,
+                    assets={k: file_digest(config["genmo"][k]) for k in ("checkpoint", "stats", "kinematics")},
+                    t5={name: file_digest(encoder/name) for name in ("model.safetensors", "config.json", "spiece.model")},
+                    sample_steps=config["genmo"].get("sample_steps", 20),
+                    guidance_scale=config["genmo"].get("guidance_scale", 2.5))
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    directory = Path(config["cache_root"])/"nominal"/key
+    filename = directory/"reference.pt"
+    if filename.exists():
+        payload = torch.load(filename, map_location="cpu", weights_only=False)
+        if payload["identity"] != identity:
+            raise ValueError("文本参考缓存身份不匹配")
+    else:
+        directory.mkdir(parents=True, exist_ok=True)
+        end = round(duration_s*600)
+        generated = generate_stage1_reference(
+            config["genmo"], dict(condition_kind="text", text=text, duration_s=duration_s, seed=seed),
+            device=device, required_end_tick=(end//12)*12+132,
+        )
+        payload = dict(identity=identity, **generated)
+        torch.save(payload, directory/"reference.pending.pt")
+        (directory/"reference.pending.pt").replace(filename)
     nominal = make_nominal(payload["world_qpos"].to(device), payload["joint_names"], bundle.spec,
                            contact=payload["contact"].to(device))
     return nominal, dict(path=str(filename), **identity)
@@ -108,19 +143,28 @@ def run(args, config, output):
     device = torch.device(args.device)
     torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed)
-    prepared = prepare_music(Track(args.audio.resolve(), args.audio.stem),
-                             Path(config["cache_root"])/"music", decode_audio=not args.mute)
     checkpoint = args.adapter_checkpoint or Path(config["adapter_checkpoint"])
     engine, settings, checkpoint_state = load_controller(config, checkpoint, device)
-    nominal, identity = prepare_reference(config, prepared, engine.step.bundle, args.seed, device)
-    audio = AudioTrack.from_features(torch.from_numpy(prepared.features).float().to(device)[None])
+    if args.audio:
+        prepared = prepare_music(Track(args.audio.resolve(), args.audio.stem),
+                                 Path(config["cache_root"])/"music", decode_audio=not args.mute)
+        nominal, identity = prepare_reference(config, prepared, engine.step.bundle, args.seed, device)
+        audio = replace(AudioTrack.from_features(torch.from_numpy(prepared.features).float().to(device)[None]),
+                        task_end_tick=round(prepared.duration*600))
+        task = dict(id=args.audio.stem, split="interactive", condition_kind="music", duration_s=prepared.duration)
+    else:
+        nominal, identity = prepare_text_reference(config, args.text, args.duration_s,
+                                                   engine.step.bundle, args.seed, device)
+        audio = AudioTrack.without_audio(round(args.duration_s*600), like=nominal.world_qpos[:, 0])
+        prepared = SimpleNamespace(sample_rate=48000)
+        task = dict(id="text_"+hashlib.sha256(args.text.encode()).hexdigest()[:12], split="interactive",
+                    condition_kind="text", text=args.text, duration_s=args.duration_s)
     kin = engine.step.runtime.kin
     from supermimic.bridge.reference import build_reference
     from supermimic.mdp import flatten_state
     first = build_reference(nominal.pose_at, torch.tensor([0], device=device), nominal.lower, nominal.upper, kin)
     initial = flatten_state((first.root_p[:, 0], first.root_R[:, 0], first.root_v[:, 0], first.root_w[:, 0],
                              first.q[:, 0], first.qd[:, 0]))
-    task = dict(id=args.audio.stem, split="interactive")
     bank = VectorBank.from_entries([(task, initial, nominal, audio)], kin, engine.step.rewards.music)
     control = VectorControl(engine, bank)
     control.disable_root_orientation = not settings.get("root_orientation", True)
@@ -133,7 +177,7 @@ def run(args, config, output):
         import mujoco.viewer
         viewer = mujoco.viewer.launch_passive(env.model, env.data, key_callback=keys.put)
         viewer.cam.distance, viewer.cam.azimuth, viewer.cam.elevation = 2.7, 130, -15
-    player = AudioPlayer(prepared, enabled=not args.mute)
+    player = AudioPlayer(prepared, enabled=bool(args.audio) and not args.mute)
     launch = dict(argv=vars(args), checkpoint=str(checkpoint), checkpoint_sha256=file_digest(checkpoint),
                   checkpoint_updates=checkpoint_state.get("accepted_updates"), reference=identity,
                   physics_backend="mujoco_cpu", control_hz=50, physics_hz=200,
@@ -228,14 +272,14 @@ def run(args, config, output):
                             ghost.append(viewer.user_scn, viewer.cam)
                     viewer.sync()
                 if i >= limit:
-                    reason = "administrative_max_seconds" if args.max_seconds and i < int(bank.ends[0]) else "music_end"
+                    reason = "administrative_max_seconds" if args.max_seconds and i < int(bank.ends[0]) else "task_end"
                     if args.headless or args.max_seconds:
                         break
                     if not paused:
                         save_episode(reason)
                         records, timings = [], []
                         paused = True
-                        print("[END] 歌曲结束，R 重播，B 切换对照，Esc 退出。", flush=True)
+                        print("[END] 任务结束，R 重播，B 切换对照，Esc 退出。", flush=True)
                 if paused:
                     time.sleep(.02)
                     deadline = time.perf_counter()

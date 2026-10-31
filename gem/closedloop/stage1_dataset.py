@@ -86,6 +86,7 @@ STAGE1_FLOOR_ZERO_SEMANTICS = frozenset(
         "umr_foot_sole_ground_zero_v1",
         "source_csv_root_z_preserved_v1",
         "mixed_floor_zero_fk_contact_v2",
+        "retargeted_text_floor_zero_v1",
     }
 )
 _COMMON_TIMEBASE_HZ = 150
@@ -264,6 +265,7 @@ class BumiClosedLoopStage1Dataset(Dataset):
         limit_size: int | None = None,
         prefix_zero_probability: float = 0.0,
         motion_frames: int = MOTION_WINDOW_FRAMES,
+        sequence_reader: Any | None = None,
     ) -> None:
         super().__init__()
         if type(motion_frames)is not int or motion_frames not in (60,120):raise ValueError('Stage1 supervision requires actual 60/120 frames')
@@ -299,7 +301,7 @@ class BumiClosedLoopStage1Dataset(Dataset):
             raise ValueError("eval_decision_mode must be 'start', 'center', or 'end'")
 
         self.kinematics = BumiKinematics(kinematics_path)
-        self.reader = BumiMusicDatasetReader(
+        self.reader = sequence_reader if sequence_reader is not None else BumiMusicDatasetReader(
             root,
             self.dataset_name,
             self.split,
@@ -375,10 +377,14 @@ class BumiClosedLoopStage1Dataset(Dataset):
         if isinstance(supplied, torch.Tensor) and isinstance(available, torch.Tensor):
             supplied = supplied.float()
             available = available.bool()
+            if available.shape == (len(qpos),):
+                available = available[:, None].expand(-1, 2)
+            if available.shape != (len(qpos), 2):
+                raise ValueError("foot_contact_available must have shape [T] or [T,2]")
             if bool(available.all()):
                 return (
                     supplied.contiguous(),
-                    available[:, None].expand(-1, 2).contiguous(),
+                    available.contiguous(),
                     str(sequence.get("foot_contact_source", "versioned_motion_payload")),
                 )
 
@@ -394,9 +400,9 @@ class BumiClosedLoopStage1Dataset(Dataset):
         )
         if not isinstance(supplied, torch.Tensor):
             return derived.contact, derived.valid_mask, "derived_from_full_sequence_qpos_fk"
-        if not isinstance(available, torch.Tensor) or available.shape != (len(qpos),):
-            raise ValueError("foot_contact_available must have shape [T]")
-        merged = torch.where(available[:, None], supplied.to(derived.contact), derived.contact)
+        if not isinstance(available, torch.Tensor) or available.shape != (len(qpos), 2):
+            raise ValueError("foot_contact_available must have shape [T] or [T,2]")
+        merged = torch.where(available, supplied.to(derived.contact), derived.contact)
         return merged.contiguous(), derived.valid_mask, "payload_with_fk_fallback"
 
     @torch.no_grad()
@@ -468,21 +474,36 @@ class BumiClosedLoopStage1Dataset(Dataset):
             raise IndexError(row_index)
         row = self.rows[int(row_index)]
         sequence = self.reader.load_aligned_sequence(row)
+        return self.get_sequence_window(sequence, start_frame=start_frame)
+
+    def get_sequence_window(
+        self, sequence: Mapping[str, Any], start_frame: int | None = None,
+        *, end_frame: int | None = None,
+    ) -> dict[str, Any]:
+        """复用完整源序列构窗；文本区间只截监督，因果历史与估地始终看完整来源。
+
+        ``end_frame`` 为监督可用的右开边界。边界之后的真实一帧只允许作为根位移
+        halo，不产生区间外动作监督或文本帧；不会把 caption 开始当作动作历史起点。
+        """
+        row = sequence["row"]
         qpos = sequence["qpos"]
         music = sequence["music"]
         sequence_length = int(qpos.shape[0])
+        target_end = sequence_length if end_frame is None else int(end_frame)
+        if not 0 < target_end <= sequence_length:
+            raise ValueError("supervision end_frame must lie inside the full sequence")
         decision_frame = (
             self._select_decision_frame(sequence_length)
             if start_frame is None
             else int(start_frame)
         )
-        if not 0 <= decision_frame < sequence_length:
+        if not 0 <= decision_frame < target_end:
             raise ValueError(
                 f"{row['sample_id']}: decision frame {decision_frame} outside "
                 f"[0,{sequence_length - 1}]"
             )
 
-        future_count = min(self.motion_frames, sequence_length - decision_frame)
+        future_count = min(self.motion_frames, target_end - decision_frame)
         future_valid = torch.zeros(self.motion_frames, dtype=torch.bool)
         future_valid[:future_count] = True
         music_features = self._zero_pad(

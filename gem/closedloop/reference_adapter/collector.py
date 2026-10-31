@@ -66,10 +66,11 @@ class ControlStep:
         reward, raw, weighted, music = self.rewards(z, corrected, state_next, proposal.action, nominal, self.adapter.bounds)
         failed = self.runtime.termination(state_next, nominal)
         tick = z.tick+12
-        music_end = tick+12 > z.audio.end_tick
+        task_end = tick+12 > z.audio.control_end_tick
         reference_end = tick+132 > z.nominal_reference.upper
-        terminated = failed | music_end | (reference_end and z.mode == "fixed")
-        reason = "physical_failure" if bool(failed.any()) else "music_end" if music_end else "reference_end" if reference_end else "running"
+        terminated = failed | task_end | (reference_end and z.mode == "fixed")
+        end_reason = "task_end" if z.audio.condition_kind == "text" else "music_end"
+        reason = "physical_failure" if bool(failed.any()) else end_reason if task_end else "reference_end" if reference_end else "running"
         truncated = z.mode == "rolling" and ((z.plan_boundary_tick is not None and tick >= z.plan_boundary_tick) or reference_end)
         # 没有下一Goal支持的滚动缓存必须更早结束想象；不能以无效输入bootstrap。
         continuation = (1-self.runtime.termination(state_next, nominal, soft=True)) * (~terminated)

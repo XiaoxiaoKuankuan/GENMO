@@ -25,6 +25,7 @@ from .critic import AdapterCritic
 from .features import critic_dimension
 from .imagination import Imagination
 from .nominal import load_nominal, check_support
+from .tasks import condition_kind, condition_contract, task_end_tick
 
 
 def read_config(path):
@@ -94,17 +95,28 @@ def read_tasks(path, *, preparing=False):
         raise ValueError("tasks必须为非空JSON数组")
     songs, hashes, audio_hashes, ids = {}, {}, {}, set()
     for task in tasks:
-        for key in ("id", "song_id", "split", "seed", "initial_state", "music_features"):
+        for key in ("id", "split", "seed", "initial_state"):
             if key not in task:
                 raise ValueError(f"任务缺少{key}")
+        if "condition_kind" in task:
+            if not task.get("source_group_id"):
+                raise ValueError("联合任务必须记录source_group_id以隔离同源动作")
+            task_end_tick(task)
+        task.setdefault("song_id", task.get("source_group_id", task["id"]))
         if task["id"] in ids or task["split"] not in ("train", "validation", "audit", "evaluation"):
             raise ValueError("任务id重复或缺少显式数据划分")
         ids.add(task["id"])
         require_file(task["initial_state"], "initial_state.npy")
-        music = require_file(task["music_features"], "music_features")
-        for mapping, key in ((songs, task["song_id"]), (hashes, file_digest(music))):
+        contract = condition_contract(task)
+        group = task.get("source_group_id", task["song_id"])
+        # 文本内容可以描述不同真实动作；隔离依据是原动作分组，不是常见caption字符串。
+        identities = [(songs, group)]
+        identities.extend((songs, token) for token in task.get("source_identity_tokens", ()))
+        if condition_kind(task) == "music":
+            identities.append((hashes, contract["music_sha256"]))
+        for mapping, key in identities:
             if mapping.setdefault(key, task["split"]) != task["split"]:
-                raise ValueError("同歌或相同音频内容泄漏到训练/验证两侧")
+                raise ValueError("同源动作/歌曲或相同音频内容泄漏到不同数据划分")
         if task.get("audio_path"):
             audio_hash = file_digest(require_file(task["audio_path"], "audio_path"))
             if task.get("audio_sha256") != audio_hash or audio_hashes.setdefault(audio_hash, task["split"]) != task["split"]:
@@ -115,24 +127,39 @@ def read_tasks(path, *, preparing=False):
 
 
 def raw_task(task, device):
-    path = require_file(task["music_features"], "music_features")
-    music = torch.from_numpy(np.load(path, allow_pickle=False)) if path.suffix == ".npy" else torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(music, torch.Tensor) or music.ndim != 2 or music.shape[1] != 35:
-        raise ValueError("音乐必须是原库EDGE35 Tensor或npy")
+    music = None
+    if condition_kind(task) == "music":
+        path = require_file(task["music_features"], "music_features")
+        music = torch.from_numpy(np.load(path, allow_pickle=False)) if path.suffix == ".npy" else torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(music, torch.Tensor) or music.ndim != 2 or music.shape[1] != 35:
+            raise ValueError("音乐必须是原库EDGE35 Tensor或npy")
+        music = music.float().to(device)[None]
     initial = torch.from_numpy(np.load(task["initial_state"], allow_pickle=False)).float().reshape(1, 55).to(device)
     if not torch.isfinite(initial).all() or initial[:, 3:7].norm() < 1e-6:
         raise ValueError("初态state55非有限或四元数无效")
-    return music.float().to(device)[None], initial
+    return music, initial
 
 
 def task_assets(task, engine, device):
     music, initial = raw_task(task, device)
-    audio = AudioTrack.from_features(music, start_tick=task.get("music_start_tick", 0),
-                                    sigma_s=engine.step.rewards.music_sigma_s)
+    if music is None:
+        audio = AudioTrack.without_audio(task_end_tick(task), like=initial,
+                                        sigma_s=engine.step.rewards.music_sigma_s)
+    else:
+        from dataclasses import replace
+        audio = AudioTrack.from_features(music, start_tick=task.get("music_start_tick", 0),
+                                        sigma_s=engine.step.rewards.music_sigma_s)
+        end = task_end_tick(task, audio)
+        if end > audio.end_tick:
+            raise ValueError("音乐任务时长超过实际音频支持")
+        audio = replace(audio, task_end_tick=end)
     nominal, contract = load_nominal(task["nominal_reference"], engine.step.bundle, device=device,
-                                     music_path=task["music_features"], initial_path=task["initial_state"], seed=task["seed"],
-                                     music_start_tick=task.get("music_start_tick", 0))
-    contract.update(check_support(nominal, audio.end_tick))
+                                     music_path=task.get("music_features"), initial_path=task["initial_state"], seed=task["seed"],
+                                     music_start_tick=task.get("music_start_tick", 0), task=task)
+    expected_checkpoint = engine.stage1_checkpoint_sha256
+    if contract.get("genmo_checkpoint_sha256") != expected_checkpoint:
+        raise ValueError("名义缓存不是当前冻结Stage1 checkpoint生成，必须重新准备缓存")
+    contract.update(check_support(nominal, audio.control_end_tick))
     return initial, nominal, audio, contract
 
 
@@ -149,6 +176,8 @@ def build_engine(cfg, device="cpu", *, calibrating=False):
         baseline = torch.load(require_file(cfg["music_baseline"], "music_baseline"), map_location="cpu", weights_only=False)
         if baseline.get("source") != "zero_adapter_real_training_episodes" or tuple(baseline["joint_names"]) != tuple(bundle.spec.joint_names):
             raise ValueError("s0必须由零Adapter真实训练集速度统计得到，不能在线自归一化")
+        if cfg.get("task_sampling") and any(baseline.get("modality_counts", {}).get(k, 0) <= 0 for k in ("music", "text")):
+            raise ValueError("联合训练必须使用包含music/text真实训练采集的固定s0")
         s0 = baseline["s0"]
     adapter = ReferenceAdapter(bundle.spec).to(device)
     music_cfg = {k: v for k, v in cfg["music"].items() if k not in ("sigma_s", "lag_steps")}
@@ -158,7 +187,9 @@ def build_engine(cfg, device="cpu", *, calibrating=False):
     step = ControlStep(adapter, bundle, runtime, rewards, observation_noise=cfg["observation_noise"])
     dynamics = DynamicsModel(bundle).to(device)
     critic = AdapterCritic(critic_dimension(adapter)).to(device)
-    return Imagination(step, dynamics, critic, bptt_steps=cfg["bptt_steps"], gamma=cfg["training"]["gamma_per_control"])
+    engine = Imagination(step, dynamics, critic, bptt_steps=cfg["bptt_steps"], gamma=cfg["training"]["gamma_per_control"])
+    engine.stage1_checkpoint_sha256 = file_digest(require_file(cfg["genmo"]["checkpoint"], "genmo.checkpoint"))
+    return engine
 
 
 def behavior_config(cfg):

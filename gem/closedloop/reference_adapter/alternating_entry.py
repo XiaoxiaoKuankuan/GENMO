@@ -40,6 +40,14 @@ def normalize_extra_state(value=None):
 
 def validation_ranking(report):
     """只对有限且没有参考拒绝的同一评价预算比较，评价歌曲不能进入best排序。"""
+    if report.get('by_modality') and set(report['by_modality']) == {'music', 'text'}:
+        groups = report['by_modality']
+        values = [sum(groups[kind][key] for kind in ('music', 'text'))/2
+                  if all(groups[kind].get(key) is not None for kind in ('music', 'text')) else None
+                  for key in ('completion_rate', 'mean_root_position_rmse_m', 'mean_full_horizon_tracking')]
+        if report.get('constraint_failure_count', 0) or any(v is None or not math.isfinite(v) for v in values):
+            return None
+        return values[0], -values[1], values[2]
     values = [report.get(k) for k in ('completion_rate', 'mean_root_position_rmse_m',
                                      'mean_full_horizon_tracking', 'mean_jerk_rms')]
     if report.get('constraint_failure_count', 0) or any(v is None or not math.isfinite(v) for v in values):
@@ -55,12 +63,14 @@ def select_validation_best(previous, zero, candidate, zero_checkpoint, *, adapte
         best = dict(adapter_updates=0, ranking=zero_rank, selection_split='validation_only',
                     evaluation_scope=scope, model_identity='initial_zero_Adapter',
                     checkpoint_available=zero_checkpoint is not None,
-                    path=zero_checkpoint['path'] if zero_checkpoint else None)
+                    path=zero_checkpoint['path'] if zero_checkpoint else None,
+                    by_modality=zero.get('by_modality'))
     ranking = validation_ranking(candidate)
     if adapter_updates > 0 and ranking is not None and (best is None or ranking > tuple(best['ranking'])):
         best = dict(adapter_updates=adapter_updates, ranking=ranking,
                     selection_split='validation_only', evaluation_scope=scope,
-                    model_identity='trained_Adapter', checkpoint_available=False)
+                    model_identity='trained_Adapter', checkpoint_available=False,
+                    by_modality=candidate.get('by_modality'))
     return best
 
 
@@ -87,7 +97,11 @@ def validation_degradation(previous, zero, current, rules):
     if current['completion_rate'] < zero['completion_rate']-rules['completion_absolute_drop']+1e-12:
         reasons.append('completion_rate')
     consecutive = (previous or {}).get('consecutive', 0)+1 if reasons else 0
-    return dict(consecutive=consecutive, reasons=reasons, stop=False, action='report_only',
+    by_modality = {kind: validation_degradation((previous or {}).get('by_modality', {}).get(kind),
+                        zero['by_modality'][kind], group, rules)
+                   for kind, group in current.get('by_modality', {}).items()
+                   if kind in zero.get('by_modality', {})}
+    return dict(consecutive=consecutive, reasons=reasons, stop=False, action='report_only', by_modality=by_modality,
                 sustained_degradation=consecutive >= rules['consecutive_full_evaluations'],
                 selection_split='validation_only', rules=rules)
 
@@ -326,13 +340,24 @@ def main():
         engine = build_engine(cfg, 'cuda:0')
         enable_wm_normalization(engine.dynamics)
         bank = VectorBank(read_tasks(cfg['tasks']), engine, 'cuda:0')
-        if len(bank.by_split['train']) != 64:
-            raise ValueError('正式配置必须加载既有64首GENMO生成训练缓存')
+        if not len(bank.by_split['train']):
+            raise ValueError('正式训练需要非空冻结Stage1生成缓存')
+        multimodal = cfg.get('task_sampling') is not None
+        if multimodal:
+            if cfg['task_sampling'] != {'music': .5, 'text': .5}:
+                raise ValueError('首版联合训练固定music/text各50%的采样比例')
+            for split in ('train', 'validation', 'evaluation'):
+                if set(bank.task_modalities[bank.by_split[split]].tolist()) != {0, 1}:
+                    raise ValueError(f'联合{split}必须同时包含music/text任务')
+            if settings['critic_enabled'] or cfg['bptt_steps'] != 64 or train['wm_fit_window'] != 8:
+                raise ValueError('联合Stage2沿用无Critic/H64/WM H8基线')
         control = VectorControl(engine, bank)
         control.adapter.disable_root_xy = True
         control.disable_root_orientation = not settings.get('root_orientation', True)
         # 直接使用有界十帧输出；正式训练不构造导数投影或参考拒绝器。
         calibration = json.loads(Path(settings['calibration']).read_text())
+        if multimodal and any(calibration.get('modality_counts', {}).get(k, 0) <= 0 for k in ('music', 'text')):
+            raise ValueError('联合精度标尺必须来自music/text零策略真实训练采集')
         control.precision = PrecisionObjective(calibration['scales'], **settings['precision'])
         extra['precision_scales'] = control.precision.scales
         control.soft_joint_limit_cost = False
@@ -345,7 +370,8 @@ def main():
         optimizers = dict(adapter=torch.optim.Adam(control.adapter.parameters(), lr=train['adapter_lr'], betas=(.9, .95)),
             wm=torch.optim.Adam(engine.dynamics.model.net.parameters(), lr=train['wm_lr']),
             critic=torch.optim.Adam(critic.parameters(), lr=train['critic_lr']))
-        replay = VectorReplay(train['replay_capacity'], vector['num_envs'], 'cuda:0', compute_mc=False)
+        replay = VectorReplay(train['replay_capacity'], vector['num_envs'], 'cuda:0', compute_mc=False,
+                              task_modalities=bank.task_modalities if multimodal else None)
         tangent = TangentReplay(1)  # 完整旧checkpoint容器保持空，不参与监督。
         frozen = engine.step.bundle.frozen_snapshot()
         initial = dict(adapter=parameter_identity(control.adapter), wm=parameter_identity(engine.dynamics),
@@ -369,8 +395,8 @@ def main():
             collector.reset(split='train', perturb=True)
             if args.resume:
                 ck = torch.load(args.resume, map_location='cpu', weights_only=False, mmap=True)
-                for key in ('alternating', 'bptt_steps', 'training'):
-                    if ck['config'].get(key) != cfg[key]:
+                for key in ('alternating', 'bptt_steps', 'training', 'task_sampling'):
+                    if ck['config'].get(key) != cfg.get(key):
                         raise ValueError('恢复算法/时域/优化合同不符；不能加载旧审计或退化Adapter')
                 state.update(load_vector(args.resume, engine, critic, optimizers, replay, tangent, collector, cfg))
                 extra = normalize_extra_state(ck.get('extra_state'))

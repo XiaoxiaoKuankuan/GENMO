@@ -57,7 +57,7 @@ def critic_features(z, adapter, bundle, kin):
         goal, goal_valid = z.executed_state.new_zeros(len(z.executed_state), 570), 0.
     fields = adapter_fields(z, adapter, bundle, current, goal)
     clock = z.executed_state.new_tensor([
-        (z.tick-z.audio.start_tick)/600, max(0, z.audio.end_tick-z.tick)/600,
+        (z.tick-z.audio.start_tick)/600, max(0, z.audio.control_end_tick-z.tick)/600,
         max(0, z.nominal_reference.upper-z.tick)/600,
         (z.plan_boundary_tick-z.tick)/600 if z.plan_boundary_tick is not None else -1.,
         (z.tick-z.known_at_tick)/600, float(z.mode == "rolling"), goal_valid,

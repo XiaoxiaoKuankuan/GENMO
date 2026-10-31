@@ -41,6 +41,8 @@ class Stage1GuidedDenoiser(nn.Module):
 
     def __init__(self, actor):
         super().__init__()
+        if bool(getattr(actor.denoiser, "encode_text", False)):
+            raise ValueError("music-only ONNX graph cannot export joint text conditions; use the multimodal PyTorch runtime")
         self.actor = actor
 
     def forward(

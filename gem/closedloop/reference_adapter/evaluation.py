@@ -10,6 +10,11 @@ import torch
 
 
 def beat_report(qd, ticks, audio, tolerance_s=.1):
+    if audio.condition_kind == "text":
+        return dict(applicable=False, reason="text_task_without_audio", music_beat_count=0,
+                    motion_beat_count=None, precision=None, recall=None, f1=None,
+                    legacy_mean_distance_s=None, legacy_alignment=None,
+                    audio_to_motion_s=None, motion_to_audio_s=None)
     from gem.robots.bumi.metrics import _derive_motion_beats, _beat_alignment
     qd, ticks = qd.detach().cpu(), ticks.detach().cpu()
     valid = ((ticks >= audio.start_tick) & (ticks <= audio.end_tick))[None]
@@ -25,7 +30,7 @@ def beat_report(qd, ticks, audio, tolerance_s=.1):
         music_mask[0, nearest] = True
     distance, alignment = _beat_alignment(music_mask, motion_mask, valid, fps=50)
     duration = max((int(ticks[-1])-int(ticks[0]))/600, .02)
-    result = dict(music_beat_count=len(beat_ticks), motion_beat_count=len(motion_ticks),
+    result = dict(applicable=True, music_beat_count=len(beat_ticks), motion_beat_count=len(motion_ticks),
                   motion_beats_per_second=len(motion_ticks)/duration,
                   legacy_mean_distance_s=float(distance) if len(beat_ticks) and len(motion_ticks) else None,
                   legacy_alignment=float(alignment) if len(beat_ticks) and len(motion_ticks) else None)
@@ -76,7 +81,9 @@ def summarize(rows, *, contacts=None, runtime=None):
         speed = body_v[:, foot_idx, :2].norm(dim=-1)
         slip = float(speed[mask].mean()) if mask.any() else 0.
     return dict(steps=len(rows), reason=rows[-1].reason, physical_failure=rows[-1].reason == "physical_failure",
-                supported_reference_complete=rows[-1].reason in ("music_end", "reference_end"),
+                supported_reference_complete=rows[-1].reason in ("music_end", "task_end", "reference_end"),
+                condition_kind=rows[0].start.audio.condition_kind,
+                full_task_complete=rows[-1].reason in ("music_end", "task_end"),
                 full_music_complete=rows[-1].reason == "music_end", final_tick=rows[-1].end.tick,
                 total_reward=float(sum(r.reward.sum() for r in rows)), sm_terms=terms,
                 weighted_reward_sums=weighted_sums,

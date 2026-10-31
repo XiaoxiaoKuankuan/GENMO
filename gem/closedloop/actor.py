@@ -10,6 +10,11 @@ physical qpos30 仅通过 BumiEndecoder.normalize 映射到网络 x0 域；未�
 历史和前缀残差只计算一次并共用于两个分支。contact2 沿用原独立 head，永不作为条件。
 最终 physical 输出再次按输入前缀组合，避免 normalize/denormalize 舍入改变承诺值；
 qpos28 与 FK 继续使用原 codec，历史不拼入 120 帧动作时间轴。
+
+联合分支可启用冻结T5的150×1024文本特征；每条样本音乐/文本互斥，逐token mask
+与has_text显式区分缺失和有效条件。文本块始终计算并在整个残差出口门控，空条件用
+零sentinel避免attention全mask，DDP不跳过可训练分支。语义dropout仅在本Actor执行
+一次；联合CFG仅移除本次语义输入，历史/前缀仍共享。旧音乐配置及权重接口保持不变。
 """
 
 from __future__ import annotations
@@ -25,6 +30,10 @@ from gem.closedloop.contracts import (
     PROPRIO_CONTRACT_VERSION,
     STAGE1_CONDITION_KEYS,
     STAGE1_CONTRACT_VERSION,
+    MULTIMODAL_STAGE1_CONTRACT_VERSION,
+    TEXT_CONDITION_KEYS,
+    TEXT_MAX_TOKENS,
+    TEXT_FEATURE_DIM,
     validate_stage1_condition_batch,
     validate_stage1_training_batch,
 )
@@ -109,6 +118,7 @@ class Stage1Actor(nn.Module):
         music_mask_prob: float = 0.1,
         diffusion_steps: int = 1000,
         noise_schedule: str = "cosine",
+        semantic_mask_prob: float | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(endecoder, BumiEndecoder):
@@ -122,7 +132,6 @@ class Stage1Actor(nn.Module):
         if (
             denoiser.output_dim != 30
             or denoiser.max_len != 120
-            or denoiser.encode_text
             or denoiser.input_remove_condition
             or denoiser.input_remove_global
             or denoiser.avgbeta
@@ -137,6 +146,12 @@ class Stage1Actor(nn.Module):
         self.cond_exists_embedder = cond_exists_embedder
         self.history_steps = int(history_steps)
         self.music_mask_prob = float(music_mask_prob)
+        self.text_conditioning = bool(denoiser.encode_text)
+        self.semantic_mask_prob = float(music_mask_prob if semantic_mask_prob is None else semantic_mask_prob)
+        if not 0 <= self.semantic_mask_prob <= 1:
+            raise ValueError("semantic_mask_prob must lie in [0,1]")
+        if self.text_conditioning and (denoiser.encoded_text_dim != TEXT_FEATURE_DIM or denoiser.text_mask_prob != 0):
+            raise ValueError("joint Stage1 needs frozen 1024D text and single Actor-level dropout")
         self.proprio_normalizer = FixedProprioNormalizer(proprio_scales)
         self.history_encoder = TemporalHistoryEncoder(history_hidden_dim, denoiser.latent_dim)
         self.prefix_encoder = PrefixEncoder(history_hidden_dim, denoiser.latent_dim)
@@ -173,6 +188,18 @@ class Stage1Actor(nn.Module):
                 "exists": self._module_interface(cond_exists_embedder),
             },
         }
+        if self.text_conditioning:
+            self.interface_config.update(
+                condition_contract_version=MULTIMODAL_STAGE1_CONTRACT_VERSION,
+                text_conditioning=True,
+                text_max_tokens=TEXT_MAX_TOKENS,
+                text_feature_dim=TEXT_FEATURE_DIM,
+                text_encoder="frozen_t5_3b",
+                semantic_mask_prob=self.semantic_mask_prob,
+                cfg_policy="single_semantic_dropout_shared_history_and_prefix",
+                text_layers=list(denoiser.text_encode_layer_idx),
+                text_encoder_cfg=dict(denoiser.text_encoder_cfg),
+            )
 
     @staticmethod
     def _module_interface(module):
@@ -204,7 +231,10 @@ class Stage1Actor(nn.Module):
     def adapt_conditions(self, conditions: Mapping[str, Any]) -> dict[str, torch.Tensor]:
         """只选择既有十个条件字段；不查询 target、contact 标签或训练 metadata。"""
         selected = {key: conditions[key] for key in STAGE1_CONDITION_KEYS}
+        selected.update({key: conditions[key] for key in TEXT_CONDITION_KEYS if key in conditions})
         validate_stage1_condition_batch(selected, history_steps=self.history_steps)
+        if not self.text_conditioning and "has_text" in selected and bool(selected["has_text"].any()):
+            raise ValueError("music-only Stage1 cannot consume text conditions")
         dtype = next(self.denoiser.parameters()).dtype
         future_valid = selected["future_valid"]
         known_mask = selected["known_qpos30_mask"]
@@ -221,7 +251,7 @@ class Stage1Actor(nn.Module):
             selected["proprio_history"].to(dtype=dtype), history_valid
         )
         relative = selected["proprio_history_times"] - selected["decision_time"][:, None]
-        return {
+        result = {
             "music_embed": music_embed,
             "music_valid": music_valid,
             "known_physical": selected["known_qpos30"],
@@ -235,6 +265,13 @@ class Stage1Actor(nn.Module):
                 selected["future_times"] - selected["decision_time"][:, None]
             ).to(dtype),
         }
+        if self.text_conditioning:
+            batch_size = len(future_valid)
+            text = selected.get("text_features", physical.new_zeros((batch_size, TEXT_MAX_TOKENS, TEXT_FEATURE_DIM))).to(dtype)
+            text_mask = selected.get("text_attention_mask", torch.zeros((batch_size, TEXT_MAX_TOKENS), dtype=torch.bool, device=physical.device))
+            has_text = selected.get("has_text", torch.zeros(batch_size, dtype=torch.bool, device=physical.device))
+            result.update(text_features=torch.where(text_mask[..., None], text, 0.0), text_attention_mask=text_mask, has_text=has_text)
+        return result
 
     def _residual(self, adapted):
         history = self.history_encoder(
@@ -264,15 +301,25 @@ class Stage1Actor(nn.Module):
         value = torch.where(adapted["known_mask"], adapted["known_x"], value)
         return torch.where(adapted["future_valid"][..., None], value, 0.0)
 
-    def _denoise(self, xt, timesteps, adapted, f_cond):
+    def _denoise(self, xt, timesteps, adapted, f_cond, drop_semantic=None):
         xt = self._constrain(xt, adapted)
         # 全 padding 条件也允许推理：开放一个零 sentinel key，随后把该样本全部输出屏蔽。
         # 原 Transformer 不接受全 mask softmax，长度 clamp 不会影响任何有效样本。
         length = adapted["future_valid"].sum(dim=1).clamp_min(1)
+        y = {"f_cond": f_cond, "length": length}
+        if self.text_conditioning:
+            active = adapted["has_text"]
+            if drop_semantic is not None:
+                active = active & ~drop_semantic
+            mask = adapted["text_attention_mask"] & active[:, None]
+            # 缺失文本开放一个零sentinel，避免全mask softmax；文本块整体残差另行门控。
+            sentinel = torch.arange(TEXT_MAX_TOKENS, device=xt.device)[None] == 0
+            safe_mask = mask | (~active[:, None] & sentinel)
+            y.update(encoded_text=torch.where(mask[..., None], adapted["text_features"], 0.0), text_attention_mask=safe_mask, text_gate=active)
         output = self.denoiser(
             xt,
             timesteps,
-            y={"f_cond": f_cond, "length": length},
+            y=y,
             inputs={},
         )
         return {
@@ -304,12 +351,13 @@ class Stage1Actor(nn.Module):
         xt = torch.where(valid, xt, noise)
         xt = self._constrain(xt, adapted)
         drop_music = torch.zeros(target_x.shape[0], device=target_x.device, dtype=torch.bool)
-        if self.training and self.music_mask_prob:
+        dropout_probability = self.semantic_mask_prob if self.text_conditioning else self.music_mask_prob
+        if self.training and dropout_probability:
             drop_music = (
-                torch.rand(target_x.shape[0], device=target_x.device) < self.music_mask_prob
+                torch.rand(target_x.shape[0], device=target_x.device) < dropout_probability
             )
-        output = self._denoise(xt, timesteps, adapted, self.encode_conditions(adapted, drop_music))
-        return {**output, "target_x_start": target_x, "xt": xt, "music_dropout_mask": drop_music}
+        output = self._denoise(xt, timesteps, adapted, self.encode_conditions(adapted, drop_music), drop_music)
+        return {**output, "target_x_start": target_x, "xt": xt, "music_dropout_mask": drop_music, "semantic_dropout_mask": drop_music}
 
     def forward(self, batch, timesteps=None, noise=None):
         """监督去噪的 nn.Module 入口；纯条件推理显式调用 sample。"""
@@ -337,7 +385,7 @@ class Stage1Actor(nn.Module):
             cond = self._denoise(value, timestep, adapted, conditional)
             if guidance_scale == 1.0:
                 return cond
-            uncond = self._denoise(value, timestep, adapted, unconditional)
+            uncond = self._denoise(value, timestep, adapted, unconditional, drop_all)
             # 沿用原 CFG 的 head 插值；两个分支的唯一条件差异是音乐可见性。
             guided = uncond["pred_x_start"] + guidance_scale * (
                 cond["pred_x_start"] - uncond["pred_x_start"]

@@ -27,6 +27,10 @@ from gem.runtime.bumi_music_contract import BUMI_ONNX_INPUTS, BUMI_ONNX_OUTPUTS
 from gem.utils.music_features import EDGE_FEATURE_DIM, EDGE_TARGET_FPS
 
 STAGE1_CONTRACT_VERSION = "genmo.bumi_closedloop.stage1.v1"
+MULTIMODAL_STAGE1_CONTRACT_VERSION = "genmo.bumi_closedloop.music_text.v1"
+TEXT_CONDITION_KEYS = ("text_features", "text_attention_mask", "has_text")
+TEXT_MAX_TOKENS = 150
+TEXT_FEATURE_DIM = 1024
 PROPRIO_CONTRACT_VERSION = "genmo.bumi_proprio48.v1"
 
 MUSIC_FPS = EDGE_TARGET_FPS
@@ -219,6 +223,14 @@ class Stage1TrainingBatch(Stage1ConditionBatch):
     target_contact_valid: torch.Tensor
 
 
+class Stage1MultimodalConditionBatch(Stage1ConditionBatch):
+    """音乐/文本互斥联合条件；文本token不沿动作时间轴展开，缺失时mask全false。"""
+
+    text_features: torch.Tensor
+    text_attention_mask: torch.Tensor
+    has_text: torch.Tensor
+
+
 STAGE1_CONDITION_KEYS = (
     "music_features",
     "music_valid",
@@ -339,6 +351,24 @@ def validate_stage1_condition_batch(
         _require_bool(values[key], key)
 
     devices = {value.device for value in values.values()}
+    if any(key in batch for key in TEXT_CONDITION_KEYS):
+        missing_text = set(TEXT_CONDITION_KEYS) - set(batch)
+        if missing_text:
+            raise ValueError(f"incomplete text conditions: {sorted(missing_text)}")
+        text = _require_tensor(batch, "text_features")
+        mask = _require_tensor(batch, "text_attention_mask")
+        has_text = _require_tensor(batch, "has_text")
+        _require_shape(text, "text_features", (batch_size, TEXT_MAX_TOKENS, TEXT_FEATURE_DIM))
+        _require_shape(mask, "text_attention_mask", (batch_size, TEXT_MAX_TOKENS))
+        _require_shape(has_text, "has_text", (batch_size,))
+        _require_float_finite(text, "text_features")
+        _require_bool(mask, "text_attention_mask")
+        _require_bool(has_text, "has_text")
+        if not torch.equal(mask.any(-1), has_text):
+            raise ValueError("text_attention_mask must have tokens exactly where has_text is true")
+        if bool((has_text & values["music_valid"].any(-1)).any()):
+            raise ValueError("music and text conditions are mutually exclusive per sample")
+        devices.update((text.device, mask.device, has_text.device))
     if len(devices) != 1:
         raise ValueError(f"all Stage1 condition tensors must share one device; got {devices}")
 
@@ -366,6 +396,8 @@ def validate_stage1_condition_batch(
     future_valid = values["future_valid"]
     if bool((known_mask & ~future_valid[:, :, None]).any()):
         raise ValueError("known_qpos30_mask must be false where future_valid is false")
+    if bool((values["music_valid"] & ~future_valid).any()):
+        raise ValueError("music_valid must be false where future_valid is false")
 
     if bool(((~future_valid[:, :-1]) & future_valid[:, 1:]).any()):
         raise ValueError("future_valid must form a temporal prefix")
@@ -395,7 +427,8 @@ def validate_stage1_training_batch(
 ) -> None:
     """校验第 3 步条件、qpos30/contact2 target 及逐坐标有效性。
 
-    ``future_valid`` 表示该 30 Hz 时间点存在真实、对齐的音乐与 qpos 状态；
+    ``future_valid`` 表示该30Hz时间点存在真实qpos状态；联合模型的music_valid独立，
+    文本样本不伪造有效音乐，旧音乐批次仍要求二者相等。
     ``target_qpos30_valid`` 进一步表达同一真实帧的 root XY 位移可能因缺少 ``t+1`` 而无效。
     未知 target 可以保存任意有限占位值，只有 bool mask 具有有效性语义。
     """
@@ -429,7 +462,7 @@ def validate_stage1_training_batch(
 
     future_valid = _require_tensor(batch, "future_valid")
     music_valid = _require_tensor(batch, "music_valid")
-    if not torch.equal(music_valid, future_valid):
+    if "has_text" not in batch and not torch.equal(music_valid, future_valid):
         raise ValueError("music_valid must exactly equal future_valid for paired Stage1 data")
     qpos_valid = values["target_qpos30_valid"]
     contact_valid = values["target_contact_valid"]
@@ -447,7 +480,15 @@ def validate_stage1_training_batch(
     if bool((delta_valid[:, :, 0] != delta_valid[:, :, 1]).any()):
         raise ValueError("target root_delta_xy_heading x/y validity must match")
     expected_internal_delta = future_valid[:, 1:, None].expand(-1, -1, delta_stop - delta_start)
-    if not torch.equal(delta_valid[:, :-1], expected_internal_delta):
+    if "has_text" in batch:
+        # caption右边界可以读取完整源动作的t+1 halo，只监督最后有效帧位移，
+        # 并不把下一帧姿态纳入该文本窗口。有效帧之间的位移仍必须完整。
+        internal_missing = expected_internal_delta & ~delta_valid[:, :-1]
+        invalid_delta = delta_valid[:, :-1] & ~future_valid[:, :-1, None]
+        invalid_internal_delta = bool((internal_missing | invalid_delta).any())
+    else:
+        invalid_internal_delta = not torch.equal(delta_valid[:, :-1], expected_internal_delta)
+    if invalid_internal_delta:
         raise ValueError(
             "target root_delta_xy_heading[t] must be valid exactly when the in-window "
             "state at t+1 is valid"

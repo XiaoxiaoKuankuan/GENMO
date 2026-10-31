@@ -14,8 +14,10 @@ import torch
 
 from supermimic.bridge.bundle import atomic_save, file_digest
 from .reference import make_nominal
+from .tasks import condition_contract, task_end_tick
 
 NOMINAL_SCHEMA = "genmo.reference_adapter.nominal.v1"
+MULTIMODAL_NOMINAL_SCHEMA = "genmo.reference_adapter.nominal.multimodal.v2"
 
 
 def required_support_tick(music_end_tick):
@@ -30,12 +32,16 @@ def check_support(nominal, music_end_tick):
     return dict(music_end_tick=music_end_tick, required_support_tick=required, actual_support_tick=nominal.upper)
 
 
-def load_nominal(path, bundle, *, device, music_path, initial_path, seed, music_start_tick=0):
+def load_nominal(path, bundle, *, device, music_path=None, initial_path, seed, music_start_tick=0, task=None):
     payload = torch.load(path, map_location=device, weights_only=False)
-    if payload.get("schema") != NOMINAL_SCHEMA or payload.get("source") != "frozen_genmo_accepted_reference":
+    schema = MULTIMODAL_NOMINAL_SCHEMA if task is not None and "condition_kind" in task else NOMINAL_SCHEMA
+    if payload.get("schema") != schema or payload.get("source") != "frozen_genmo_accepted_reference":
         raise ValueError("必须使用有来源的冻结GENMO名义缓存，不能以执行状态/动作标签代替")
-    expected = dict(music_sha256=file_digest(music_path), initial_sha256=file_digest(initial_path), seed=seed,
-                    music_start_tick=music_start_tick)
+    expected = dict(initial_sha256=file_digest(initial_path), seed=seed)
+    if schema == MULTIMODAL_NOMINAL_SCHEMA:
+        expected.update(condition_contract(task))
+    else:
+        expected.update(music_sha256=file_digest(music_path), music_start_tick=music_start_tick)
     if any(payload["contract"].get(k) != v for k, v in expected.items()):
         raise ValueError("缓存与音乐/初态/噪声种子不匹配")
     if payload["contract"].get("forecast_enabled") is not False:
@@ -65,6 +71,23 @@ def load_frozen_genmo(config, device):
 
 @torch.no_grad()
 def prepare_cache(env, bundle, genmo_cfg, task, music, initial, destination, *, bootstrap_latency_ticks):
+    if "condition_kind" in task:
+        from gem.runtime.multimodal_stage1 import generate_stage1_reference
+        end = task_end_tick(task)
+        output = generate_stage1_reference(genmo_cfg | {"robot_spec_joint_names": list(bundle.spec.joint_names)},
+            task, device=initial.device, required_end_tick=required_support_tick(end))
+        nominal = make_nominal(output["world_qpos"], output["joint_names"], bundle.spec,
+                               start_tick=output.get("start_tick", 0), contact=output.get("contact"))
+        support = check_support(nominal, end)
+        contract = dict(output.get("generation_contract", {}), **condition_contract(task))
+        contract.update(initial_sha256=file_digest(task["initial_state"]), seed=int(task["seed"]),
+            genmo_checkpoint_sha256=file_digest(genmo_cfg["checkpoint"]), forecast_enabled=False,
+            generation_scope="frozen_multimodal_stage1_without_adapter", **support)
+        atomic_save(dict(schema=MULTIMODAL_NOMINAL_SCHEMA, source="frozen_genmo_accepted_reference",
+            contract=contract, world_qpos=output["world_qpos"].cpu(),
+            contact=output["contact"].cpu() if output.get("contact") is not None else None,
+            start_tick=output.get("start_tick", 0), joint_names=tuple(output["joint_names"])), destination)
+        return contract
     from gem.closedloop.mb_control.sm_adapter import SMAdapter
     from gem.closedloop.mb_control.scheduler import Scheduler
     from gem.closedloop.mb_control.collector import PhysicalCollector as GenmoCollector

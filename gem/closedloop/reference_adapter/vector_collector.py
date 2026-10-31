@@ -37,8 +37,7 @@ class VectorCollector:
         return torch.rand(shape, device=self.device, generator=self.generator)
 
     def sampling(self, count, split='train', *, random_start=True):
-        ids = self.bank.by_split[split]
-        songs = ids[torch.randint(len(ids), (count,), device=self.device, generator=self.generator)]
+        songs = self.bank.sample_tasks(count, split, generator=self.generator)
         frames = torch.zeros(count, device=self.device, dtype=torch.long)
         if random_start:
             end = self.bank.ends[songs]

@@ -14,6 +14,39 @@ pytest.importorskip("mujoco")
 from gem.closedloop.reference_adapter.mujoco_env import MujocoPhysicalEnv, NominalGhost
 
 
+def test_music_reference_cache_tracks_sampling_parameters(system, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from gem.closedloop.reference_adapter.mujoco_demo import prepare_reference
+    from gem.runtime import multimodal_stage1
+    engine, original = system
+    calls = []
+
+    def generate(config, task, **kwargs):
+        calls.append((config["sample_steps"], config["guidance_scale"]))
+        return dict(world_qpos=original.nominal_reference.world_qpos,
+                    joint_names=engine.step.bundle.spec.joint_names,
+                    contact=torch.zeros(1, len(original.nominal_reference.world_qpos[0]), 2))
+
+    monkeypatch.setattr(multimodal_stage1, "generate_stage1_reference", generate)
+    genmo = {"sample_steps": 2, "guidance_scale": 1.5}
+    for name in ("checkpoint", "stats", "kinematics"):
+        path = tmp_path / name
+        path.write_text(name)
+        genmo[name] = str(path)
+    config = dict(genmo=genmo, cache_root=str(tmp_path / "cache"))
+    prepared = SimpleNamespace(identity=dict(audio_sha256="audio", feature_values_sha256="feature"),
+                               features=np.zeros((31, 35)), duration=1.)
+    _, first = prepare_reference(config, prepared, engine.step.bundle, 42, "cpu")
+    _, repeat = prepare_reference(config, prepared, engine.step.bundle, 42, "cpu")
+    genmo["sample_steps"] = 3
+    _, changed_steps = prepare_reference(config, prepared, engine.step.bundle, 42, "cpu")
+    genmo["guidance_scale"] = 2.
+    _, changed_cfg = prepare_reference(config, prepared, engine.step.bundle, 42, "cpu")
+    assert first["path"] == repeat["path"]
+    assert len({first["path"], changed_steps["path"], changed_cfg["path"]}) == 3
+    assert calls == [(2, 1.5), (3, 1.5), (3, 2.)]
+
+
 def initial_for(spec):
     from supermimic.rotations import mat_to_quat, so3_exp
     state = torch.zeros(1, 55)

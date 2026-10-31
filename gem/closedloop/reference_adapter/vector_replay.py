@@ -12,11 +12,13 @@ from .vector_control import select_state
 
 
 class VectorReplay:
-    def __init__(self, capacity, num_envs, device, gamma=.99, *, compute_mc=True):
+    def __init__(self, capacity, num_envs, device, gamma=.99, *, compute_mc=True, task_modalities=None):
         self.slots = max(20, capacity//num_envs)
         self.num_envs, self.capacity = num_envs, self.slots*num_envs
         self.device, self.gamma = device, gamma
         self.compute_mc = compute_mc
+        self.task_modalities = (torch.as_tensor(task_modalities, device=device, dtype=torch.long)
+                                if task_modalities is not None else None)
         self.data, self.dynamic_keys = {}, ()
         self.cursor = self.size = self.total_vector_steps = 0
         self.completed_segments = self.completed_full_songs = self.head_truncated_terminals = 0
@@ -74,38 +76,61 @@ class VectorReplay:
         near = (self.data['z_frame'][written, envs][None]-self.data['z_frame'][rows, cols]) < 16
         self.data['near_failure'][rows, cols] |= valid & near & failed[envs][None]
 
-    def _random(self, count):
+    def _random(self, count, modality=None):
         if not self.size:
             raise ValueError('真实回放为空')
         rank = torch.randint(self.size, (count,), device=self.device)
         row = (self.cursor-self.size+rank)%self.slots
         env = torch.randint(self.num_envs, (count,), device=self.device)
+        if modality is not None:
+            valid = self.task_modalities[self.data['z_song'][row, env]] == modality
+            row, env = row[valid], env[valid]
         return row, env
 
-    def starts(self, batch, *, horizon=None, ends=None):
+    def starts(self, batch, *, horizon=None, ends=None, _modality=None):
+        if self.task_modalities is not None and _modality is None:
+            parts = [self.starts(batch//2+(kind < batch%2), horizon=horizon, ends=ends, _modality=kind)
+                     for kind in (0, 1)]
+            return {k: torch.cat([part[k] for part in parts]) for k in self.dynamic_keys}
         if horizon is not None:
             if ends is None:
                 raise ValueError('长BPTT起点必须核对实际名义支持')
             rows, envs, remaining = [], [], batch
             for _ in range(20):
-                row, env = self._random(max(remaining*2, 64))
+                row, env = self._random(max(remaining*4, 128), _modality)
                 valid = self.data['z_frame'][row, env]+horizon < ends[self.data['z_song'][row, env]]
                 ids = valid.nonzero().flatten()[:remaining]
                 rows.append(row[ids]); envs.append(env[ids]); remaining -= len(ids)
                 if remaining == 0:
                     break
             if remaining:
-                raise ValueError(f'缺少实际支持H{horizon}的真实起点，不能默认退回H8')
+                raise ValueError(f'模态{_modality}缺少实际支持H{horizon}的真实起点，不能默认退回H8')
             row, env = torch.cat(rows), torch.cat(envs)
             return {k: self.data['z_'+k][row, env] for k in self.dynamic_keys}
-        row, env = self._random(batch)
+        if _modality is not None:
+            rows, envs, remaining = [], [], batch
+            for _ in range(20):
+                row, env = self._random(max(remaining*4, 128), _modality)
+                take = min(len(row), remaining)
+                rows.append(row[:take]); envs.append(env[:take]); remaining -= take
+                if not remaining:
+                    break
+            if remaining:
+                raise ValueError(f'模态{_modality}缺少真实回放起点')
+            row, env = torch.cat(rows), torch.cat(envs)
+        else:
+            row, env = self._random(batch)
         return {k: self.data['z_'+k][row, env] for k in self.dynamic_keys}
 
-    def windows(self, batch, length=8):
+    def windows(self, batch, length=8, _modality=None):
+        if self.task_modalities is not None and _modality is None:
+            parts = [self.windows(batch//2+(kind < batch%2), length, _modality=kind) for kind in (0, 1)]
+            return dict(origin='real', **{key: torch.cat([part[key] for part in parts])
+                                         for key in ('state', 'action', 'xi', 'next_state', 'mask')})
         selected_rows, selected_envs = [], []
         remaining = batch
         for _ in range(20):
-            row, env = self._random(max(remaining*3, 128))
+            row, env = self._random(max(remaining*6, 128), _modality)
             indices = (row[:, None]+torch.arange(length, device=self.device)[None])%self.slots
             column = env[:, None]
             episodes = self.data['z_episode'][indices, column]
@@ -121,7 +146,7 @@ class VectorReplay:
             if remaining == 0:
                 break
         if remaining:
-            raise ValueError(f'缺少连续真实{length}步窗口，尚缺{remaining}')
+            raise ValueError(f'模态{_modality}缺少连续真实{length}步窗口，尚缺{remaining}')
         rows, envs = torch.cat(selected_rows), torch.cat(selected_envs)[:, None]
         return dict(origin='real', state=self.data['z_state'][rows, envs], action=self.data['applied_action'][rows, envs],
             xi=self.data['z_xi'][rows, envs], next_state=self.data['next_state'][rows, envs],
@@ -141,6 +166,7 @@ class VectorReplay:
 
     def state_dict(self):
         return dict(slots=self.slots, num_envs=self.num_envs, gamma=self.gamma, compute_mc=self.compute_mc, cursor=self.cursor,
+            task_modalities=self.task_modalities.detach().cpu() if self.task_modalities is not None else None,
             size=self.size, total_vector_steps=self.total_vector_steps, dynamic_keys=self.dynamic_keys,
             completed_segments=self.completed_segments, completed_full_songs=self.completed_full_songs,
             head_truncated_terminals=self.head_truncated_terminals,
@@ -149,6 +175,10 @@ class VectorReplay:
     def load_state_dict(self, state):
         if state['slots'] != self.slots or state['num_envs'] != self.num_envs:
             raise ValueError('完整Replay恢复需要相同容量和环境数')
+        prior_modalities = state.get('task_modalities')
+        if (prior_modalities is None) != (self.task_modalities is None) or (
+                prior_modalities is not None and not torch.equal(prior_modalities.cpu(), self.task_modalities.cpu())):
+            raise ValueError('Replay模态采样合同改变，不能把旧单模态回放冒充联合恢复')
         self.compute_mc = state.get('compute_mc', True)
         for key in ('gamma', 'cursor', 'size', 'total_vector_steps', 'dynamic_keys', 'completed_segments',
                     'completed_full_songs', 'head_truncated_terminals'):

@@ -23,10 +23,25 @@ class AudioTrack:
     mean_target: torch.Tensor
     has_beats: torch.Tensor
     sigma_s: float = .04
+    task_end_tick: int | None = None
+    condition_kind: str = "music"
 
     @property
     def end_tick(self):
         return self.start_tick + (self.features.shape[1] - 1) * MUSIC_TICKS
+
+    @property
+    def control_end_tick(self):
+        return self.end_tick if self.task_end_tick is None else self.task_end_tick
+
+    @classmethod
+    def without_audio(cls, end_tick, *, like, sigma_s=.04):
+        """仅在内存表示无音频mask；任务期限独立保存，不写伪EDGE文件。"""
+        count = max(2, (int(end_tick)+MUSIC_TICKS-1)//MUSIC_TICKS+1)
+        values = like.new_zeros(len(like), count, 35)
+        valid = torch.zeros(values.shape[:2], device=like.device, dtype=torch.bool)
+        return replace(cls.from_features(values, valid=valid, sigma_s=sigma_s),
+                       task_end_tick=int(end_tick), condition_kind="text")
 
     @classmethod
     def from_features(cls, features, *, start_tick=0, valid=None, sigma_s=.04):
@@ -72,7 +87,8 @@ class AudioTrack:
         valid = self.valid[:, clipped] & mask[None]
         values = self.features[:, clipped] * valid[..., None]
         times = (self.start_tick + idx * MUSIC_TICKS - tick).to(values) / CLOCK_HZ
-        return values, valid, times[None].expand(len(values), -1)
+        times = times[None].expand(len(values), -1)
+        return values, valid, times if self.condition_kind == "music" else torch.zeros_like(times)
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""输入 WAV/MP3，在 MuJoCo 查看冻结 GENMO 参考与 SM＋Adapter 真实执行。
+"""输入 WAV/MP3 或英文文本，在 MuJoCo 查看共享 GENMO 参考与 SM＋Adapter 执行。
 
 默认读取本机明确绑定的 Stage1/SM/Adapter 资产；首次音乐先生成固定 Stage2-A
 名义参考，随后启动原生 MuJoCo 交互窗口，蓝色半透明机器人显示原始参考。
@@ -21,7 +21,10 @@ sys.path.insert(0, str(ROOT))
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--audio", type=Path, required=True, help="完整音乐文件路径，WAV/MP3/FLAC等")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--audio", type=Path, help="完整音乐文件路径，WAV/MP3/FLAC等")
+    source.add_argument("--text", help="英文动作描述，与音乐互斥")
+    p.add_argument("--duration-s", type=float, help="文本任务持续时间，必须显式指定")
     p.add_argument("--config", type=Path, default=ROOT/"configs/closedloop/adapter_sim2sim_mujoco.yaml")
     p.add_argument("--adapter-checkpoint", type=Path)
     p.add_argument("--zero-adapter", action="store_true")
@@ -34,8 +37,15 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output", type=Path, help="必须是尚不存在的独立目录")
     args = p.parse_args()
-    if not args.audio.expanduser().is_file(): p.error("音乐文件不存在")
-    args.audio = args.audio.expanduser().resolve()
+    if args.audio:
+        if not args.audio.expanduser().is_file(): p.error("音乐文件不存在")
+        args.audio = args.audio.expanduser().resolve()
+        if args.duration_s is not None: p.error("音乐演示使用完整音频时长，duration-s只用于文本")
+    else:
+        import math
+        if not args.text.strip() or args.duration_s is None or not math.isfinite(args.duration_s) or args.duration_s < .02:
+            p.error("文本必须非空且提供至少0.02秒的 --duration-s")
+        args.mute = True
     if args.max_seconds is not None and args.max_seconds < .02: p.error("max-seconds 至少0.02")
     if args.fast and not (args.headless and args.mute): p.error("--fast 只能与 --headless --mute 一起使用")
     library = Path(sys.prefix)/"lib"

@@ -1,0 +1,263 @@
+# 共享Stage1的音乐/英文文本数据入口；只读使用原30Hz发布，独立发布allowlist和统计量。
+# 每次样本仅一种语义，先50/50选模态，再按固定来源配比抽母动作、caption和窗口。
+# split_allowlist由tools/data/bumi/prepare_multimodal_stage1.py生成，统计量仅使用过滤后的train。
+contract_version: genmo.bumi_closedloop.stage1_dataset.v1
+music_root: ${oc.env:BUMI_MUSIC_ROOT,/data0/user/liwei/datasets/bumi_music_umr70_mine_pass_90505_v1}
+text_root: ${oc.env:BUMI_TEXT_ROOT,/data0/user/liwei/datasets/bumi_text_crop120_v2}
+asset_root: ${oc.env:BUMI_MULTIMODAL_ASSETS,/data0/user/liwei/GENMO_assets/bumi_music_text_v1}
+split_allowlist: ${asset_root}/split_allowlist.json
+qpos30_stats:
+  path: ${asset_root}/qpos30_train_stats.json
+modality_probabilities: {music: 0.5, text: 0.5}
+source_probabilities:
+  music: {aistpp: 0.20, aioz_gdance: 0.35, finedance: 0.25, mine: 0.20}
+  text: {motionmillion: 0.05, humanml3d: 0.25, kitml: 0.10, bones_seed: 0.60}
+sample_contract:
+  history_steps: 50
+  prefix_min_frames: 6
+  prefix_max_frames: 30
+  prefix_zero_probability: 0.15
+  prefix_random_seed: 42
+  future_frames: 120
+  motion_fps: 30
+  proprio_fps: 50
+dataset_defaults: &defaults
+  kinematics_path: ${oc.env:BUMI_KINEMATICS_PATH,configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json}
+  history_steps: ${sample_contract.history_steps}
+  prefix_min_frames: ${sample_contract.prefix_min_frames}
+  prefix_max_frames: ${sample_contract.prefix_max_frames}
+  prefix_zero_probability: ${sample_contract.prefix_zero_probability}
+  prefix_random_seed: ${sample_contract.prefix_random_seed}
+  motion_frames: 120
+datasets:
+  train:
+    aistpp:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/AIST++
+      dataset_name: aistpp_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    aioz_gdance:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    finedance:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/FineDance
+      dataset_name: finedance_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    mine:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/Mine
+      dataset_name: mine_bumi
+      split: train
+      duration_aware_sampling: true
+      random_decision: true
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    motionmillion:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: motionmillion
+      split: train
+      require_temporal_annotations: false
+    humanml3d:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: humanml3d
+      split: train
+      require_temporal_annotations: false
+    kitml:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: kitml
+      split: train
+      require_temporal_annotations: false
+    bones_seed:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: bones_seed
+      split: train
+      require_temporal_annotations: true
+  val:
+    aistpp:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/AIST++
+      dataset_name: aistpp_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    aioz_gdance:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    finedance:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/FineDance
+      dataset_name: finedance_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    mine:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/Mine
+      dataset_name: mine_bumi
+      split: val
+      duration_aware_sampling: false
+      random_decision: false
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    motionmillion:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: motionmillion
+      split: val
+      require_temporal_annotations: false
+    humanml3d:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: humanml3d
+      split: val
+      require_temporal_annotations: false
+    kitml:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: kitml
+      split: val
+      require_temporal_annotations: false
+    bones_seed:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: bones_seed
+      split: val
+      require_temporal_annotations: true
+  test:
+    aistpp:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/AIST++
+      dataset_name: aistpp_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    aioz_gdance:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/AIOZ-GDANCE
+      dataset_name: aioz_gdance_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    finedance:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/FineDance
+      dataset_name: finedance_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    mine:
+      <<: *defaults
+      modality: music
+      root: ${music_root}/Mine
+      dataset_name: mine_bumi
+      split: test
+      duration_aware_sampling: false
+      random_decision: false
+      require_quality_filter: true
+      validate_payloads_on_init: false
+      validate_source_hashes_on_init: false
+      joint_limit_tolerance: 0.0001
+    motionmillion:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: motionmillion
+      split: test
+      require_temporal_annotations: false
+    humanml3d:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: humanml3d
+      split: test
+      require_temporal_annotations: false
+    kitml:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: kitml
+      split: test
+      require_temporal_annotations: false
+    bones_seed:
+      <<: *defaults
+      modality: text
+      root: ${text_root}
+      dataset_name: bones_seed
+      split: test
+      require_temporal_annotations: true

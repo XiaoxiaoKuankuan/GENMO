@@ -1,0 +1,54 @@
+# 音乐/英文文本共享Stage1，从随机主干开始；T5只作为冻结条件编码器。
+# 默认8步供显式短验收，正式预算由命令覆盖；完整checkpoint支持恢复采样位置。
+# 1024/16/8与现有音乐架构一致，唯一联合统计量由data.yaml的train产生。
+base_config: ../closedloop/stage1_train.yaml
+dataset_config: configs/multimodal/data.yaml
+warm_start_checkpoint: null
+stage1_checkpoint: null
+resume_checkpoint: null
+sample_contract:
+  history_steps: 50
+  prefix_min_frames: 6
+  prefix_max_frames: 30
+  prefix_zero_probability: 0.15
+  prefix_random_seed: 42
+model:
+  text_conditioning: true
+  text_max_tokens: 150
+  text_feature_dim: 1024
+  semantic_mask_prob: 0.1
+  text_encoder_path: ${oc.env:BUMI_T5_MODEL_PATH,/data0/user/liwei/models/t5-3b_bed96aab}
+  text_encoder_micro_batch_size: 16
+  text_encoder_cache_entries: 4096
+data_loader:
+  batch_size: 2
+  num_workers: 0
+  samples_per_epoch: 8192
+train:
+  max_steps: 8
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+scheduler:
+  total_steps: 600000
+  warmup_steps: 500
+  min_lr_ratio: 0.1
+trainer:
+  enabled: true
+  require_warm_start: false
+  precision: bf16
+  gradient_accumulation: 1
+  log_every_steps: 10
+  validate_every_steps: 500
+  save_every_steps: 5000
+validation:
+  split: val
+  samples_per_source: 2
+  sample_steps: 20
+  guidance_scale: 2.5
+  seed: 12345
+runtime:
+  seed: 42
+  device: cuda
+  cpu_threads: 1
+  output_dir: null

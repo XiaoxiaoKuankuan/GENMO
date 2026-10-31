@@ -30,8 +30,8 @@ def main():
         raise ValueError('重复物理评价次数必须为正')
     repo = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo))
-    import yaml
-    cfg = yaml.safe_load(Path(args.config).read_text())
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)
     sys.path.insert(0, cfg['supermimic']['repo'])
     from isaaclab.app import add_launcher_args, launch_simulation
     launcher_parser = argparse.ArgumentParser()

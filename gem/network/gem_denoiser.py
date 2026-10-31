@@ -262,6 +262,8 @@ class NetworkEncoderRoPE(nn.Module):
 
         if self.encode_text and "encoded_text" in y and len(self.text_encode_layer_idx) > 0:
             enc_text = y["encoded_text"].clone()
+            text_attention_mask = y.get("text_attention_mask")
+            text_gate = y.get("text_gate")
             if self.training and self.text_mask_prob > 0:
                 mask = torch.rand((B,), device=x.device) < self.text_mask_prob
                 enc_text = enc_text * (1 - mask[:, None, None].float())
@@ -319,14 +321,18 @@ class NetworkEncoderRoPE(nn.Module):
         for i, block in enumerate(self.blocks):
             if self.encode_text and i in self.text_encode_layer_idx:
                 text_block = self.text_encoder_layers[f"{i}"]
-                x = text_block(
+                before_text = x
+                with_text = text_block(
                     x,
                     emb_text,
                     attn_mask=attnmask,
                     tgt_key_padding_mask=pmask,
+                    memory_key_padding_mask=(~text_attention_mask if text_attention_mask is not None else None),
                     multi_text_data=multi_text_data,
                     motion_text_pos_enc=self.motion_text_pos_enc,
                 )
+                # 联合模型始终执行整个文本块；缺失/CFG丢弃只门控其残差，保持DDP固定计算图。
+                x = with_text if text_gate is None else before_text + text_gate[:, None, None].to(x) * (with_text - before_text)
             x = block(x, attn_mask=attnmask, tgt_key_padding_mask=pmask)
 
         # Output

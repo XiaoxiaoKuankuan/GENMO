@@ -49,6 +49,8 @@ from gem.closedloop.training import (
     initialize_stage1_weights,
     load_stage1_data_config,
     repository_path,
+    prepare_text_batch,
+    stage1_conditions,
 )
 from gem.robots.bumi.kinematics import sha256_file
 
@@ -117,6 +119,9 @@ def all_objects(value, world):
 
 
 def fingerprint_data(data):
+    if data.get("modality_probabilities") is not None:
+        from gem.closedloop.stage1_multimodal_dataset import multimodal_data_identity
+        return hashlib.sha256(json.dumps(multimodal_data_identity(data), sort_keys=True).encode()).hexdigest()
     entries = {}
     for split, datasets in data.datasets.items():
         for name, entry in datasets.items():
@@ -148,8 +153,8 @@ def make_scheduler(optimizer, options):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, scale)
 
 
-def runtime_contract(config, data, world):
-    return {
+def runtime_contract(config, data, world, actor=None):
+    result = {
         "world_size": world,
         "batch_size": int(config.data_loader.batch_size),
         "gradient_accumulation": int(config.trainer.gradient_accumulation),
@@ -159,7 +164,8 @@ def runtime_contract(config, data, world):
             "contract": "global_weighted_rank_stride_deterministic_draw.v1",
             "seed": int(config.runtime.seed),
             "epoch_size_per_rank": int(config.data_loader.samples_per_epoch),
-            "weights": plain(data.train_sampling_reference),
+            "weights": plain(data.get("train_sampling_reference", data.get("source_probabilities", {}))),
+            **({"modality_probabilities": plain(data.modality_probabilities)} if data.get("modality_probabilities") is not None else {}),
         },
         "training_contract": {
             "learning_rate": float(config.train.learning_rate),
@@ -170,10 +176,28 @@ def runtime_contract(config, data, world):
             "loss_weights_file_sha256": sha256_file(repository_path(config.loss.weights_from)),
         },
     }
+    if config.model.get("text_conditioning", False):
+        from gem.runtime.frozen_text_encoder import FrozenTextEncoder
+        path = repository_path(config.model.get("text_encoder_path", "inputs/t5-3b"))
+        if config.endecoder.get("allow_placeholder_stats", False) and not path.exists():
+            # 仅合成单测显式启用placeholder时允许没有真实编码器资产。
+            assets = {"test_only_placeholder": True}
+        else:
+            encoder = FrozenTextEncoder(path,
+                micro_batch_size=int(config.model.get("text_encoder_micro_batch_size", 32)),
+                cache_entries=int(config.model.get("text_encoder_cache_entries", 100000)))
+            assets = {name: {"sha256": entry["sha256"]} for name, entry in encoder.assets.items()}
+            if actor is not None:
+                actor.__dict__["_frozen_text_encoder"] = encoder
+        result["training_contract"]["text_encoder_assets"] = assets
+    return result
 
 
 def build_monitor_loaders(data, options):
     """每个来源都有固定覆盖，不让ConcatDataset前几个batch代表四库。"""
+    if data.get("modality_probabilities") is not None:
+        from gem.closedloop.stage1_multimodal_dataset import build_multimodal_monitor_loaders
+        return build_multimodal_monitor_loaders(data, options)
     result = {}
     for name, entry in data.datasets[str(options.split)].items():
         arguments = OmegaConf.to_container(entry, resolve=True)
@@ -206,8 +230,8 @@ def monitor(actor, losses, loaders, options, device, step):
         for name, loader in loaders.items():
             rows = []
             for source in loader:
-                batch = batch_to_device(source, device)
-                conditions = {key: batch[key] for key in STAGE1_CONDITION_KEYS}
+                batch = prepare_text_batch(actor, batch_to_device(source, device))
+                conditions = stage1_conditions(batch)
                 generated = actor.sample(
                     conditions,
                     steps=int(options.sample_steps),
@@ -240,7 +264,8 @@ def monitor(actor, losses, loaders, options, device, step):
                 ):
                     raise AssertionError("sampling output contract changed")
                 loss, values = losses(
-                    batch, generated["normalized"], generated["contact_logits"], global_step=step
+                    batch, generated["normalized"], generated["contact_logits"],
+                    global_step=int(options.get("loss_global_step", 1_000_000_000)) if actor.text_conditioning else step,
                 )
                 rows.append(
                     {
@@ -249,6 +274,7 @@ def monitor(actor, losses, loaders, options, device, step):
                         "known_coordinates": int(known.sum()),
                         "qpos30_shape": list(generated["qpos30"].shape),
                         "contact_shape": list(generated["contact"].shape),
+                        "modality": "text" if "has_text" in batch and bool(batch["has_text"].any()) else "music",
                         **_loss_values(loss, values),
                     }
                 )
@@ -257,13 +283,32 @@ def monitor(actor, losses, loaders, options, device, step):
         restore_rng(rng, device)
         actor.train(was_training)
         losses.train(was_training)
-    return {
+    result = {
         "step": step,
         "sources": reports,
         "sampling_received_target_fields": False,
         "fixed_seed": int(options.seed),
         "completed_samples": sum(len(x) for x in reports.values()),
     }
+    if actor.text_conditioning:
+        modal_sources = {"music": [], "text": []}
+        modal_totals = {"music": [], "text": []}
+        for rows in reports.values():
+            for modality in modal_sources:
+                values = [r["raw_reconstruction_loss"] for r in rows if r["modality"] == modality]
+                if values:
+                    modal_sources[modality].append(sum(values) / len(values))
+                    totals = [r["loss"] for r in rows if r["modality"] == modality]
+                    modal_totals[modality].append(sum(totals) / len(totals))
+        if any(not values for values in modal_sources.values()):
+            raise ValueError("joint validation must cover both music and text")
+        result["modalities"] = {key: sum(values) / len(values) for key, values in modal_sources.items()}
+        result["modality_total_loss"] = {key: sum(values) / len(values) for key, values in modal_totals.items()}
+        result["selection_score"] = sum(result["modalities"].values()) / 2
+        result["selection_metric"] = "raw_reconstruction_loss"
+        result["selection_rule"] = "equal_modalities_equal_sources_reconstruction"
+        result["validation_loss_step"] = int(options.get("loss_global_step", 1_000_000_000))
+    return result
 
 
 def model_digest(actor):
@@ -362,7 +407,7 @@ def run_persistent(config, output_dir):
             return report
         if config.mode != "train":
             raise ValueError("mode must be train or validate")
-        contract = runtime_contract(config, data, world)
+        contract = runtime_contract(config, data, world, actor=actor)
         batch_size = contract["batch_size"]
         accumulation = contract["gradient_accumulation"]
         epoch_size = int(config.data_loader.samples_per_epoch)
@@ -383,6 +428,7 @@ def run_persistent(config, output_dir):
         scheduler = make_scheduler(optimizer, config.scheduler)
         step, epoch, offset = 0, 0, 0
         restore_report = None
+        best_validation = None
         if resume:
             restored = load_training_checkpoint(
                 actor,
@@ -396,6 +442,7 @@ def run_persistent(config, output_dir):
             rank_state = restored["runtime_state"]["rank_states"][rank]
             epoch, offset = rank_state["sampler_epoch"], rank_state["sampler_offset"]
             weight_report = restored["warm_start_report"]
+            best_validation = restored["runtime_state"].get("best_validation")
             if config.trainer.get("require_warm_start", False):
                 if not weight_report or weight_report.get("mode") != "weights_only_warm_start":
                     raise ValueError("Formal resume requires recorded music warm-start lineage")
@@ -497,7 +544,7 @@ def run_persistent(config, output_dir):
                     epoch, offset = epoch + 1, 0
                     loader.sampler.set_epoch(epoch, 0)
                     iterator = iter(loader)
-                batch = batch_to_device(next(iterator), device)
+                batch = prepare_text_batch(actor, batch_to_device(next(iterator), device))
                 examples.extend(
                     f"{m.get('dataset_id', '')}:{m.get('sample_id')}:{m.get('decision_frame')}"
                     for m in batch["meta"]
@@ -595,6 +642,7 @@ def run_persistent(config, output_dir):
                 }
             )
             do_validation = step % int(config.trainer.validate_every_steps) == 0 or step == maximum
+            improved_best = False
             if do_validation:
                 validation = (
                     monitor(actor, losses, loaders, config.validation, device, step)
@@ -604,13 +652,26 @@ def run_persistent(config, output_dir):
                 if rank == 0:
                     write_json(output / "validation" / session / f"s{step:06d}.json", validation)
                     validations.append(validation)
+                    if actor.text_conditioning:
+                        for modality, value in validation["modalities"].items():
+                            writer.add_scalar(f"val/{modality}/raw_reconstruction_loss", value, step)
+                        score = validation["selection_score"]
+                        if best_validation is None or score < best_validation["score"]:
+                            previous = best_validation
+                            best_validation = {"score": score, "global_step": step,
+                                "modalities": validation["modalities"],
+                                "selection_rule": validation["selection_rule"],
+                                "selection_metric": validation["selection_metric"],
+                                "per_modality_change": ({key: value - previous["modalities"][key]
+                                    for key, value in validation["modalities"].items()} if previous else {})}
+                            improved_best = True
                     for name, samples in validation["sources"].items():
                         writer.add_scalar(
                             f"val/{name}/loss", sum(r["loss"] for r in samples) / len(samples), step
                         )
                 if world > 1:
                     dist.barrier()
-            if step % int(config.trainer.save_every_steps) == 0 or step == maximum:
+            if step % int(config.trainer.save_every_steps) == 0 or step == maximum or (actor.text_conditioning and do_validation):
                 if step == maximum:
                     digests = all_objects(model_digest(actor), world)
                     if len(set(digests)) != 1:
@@ -634,13 +695,16 @@ def run_persistent(config, output_dir):
                         optimizer=optimizer,
                         scheduler=scheduler,
                         scaler=scaler,
-                        runtime_state={**contract, "rank_states": states, "completed_steps": step},
+                        runtime_state={**contract, "rank_states": states, "completed_steps": step,
+                            **({"best_validation": best_validation} if actor.text_conditioning else {})},
                         warm_start_report=weight_report,
                     )
                     write_json(
                         output / "latest.json",
                         {"global_step": step, "checkpoint": str(last_checkpoint)},
                     )
+                    if improved_best:
+                        write_json(output / "best.json", {**best_validation, "checkpoint": str(last_checkpoint)})
                     writer.flush()
                 if world > 1:
                     dist.barrier()

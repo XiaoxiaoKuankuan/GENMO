@@ -16,10 +16,36 @@ from .evaluation import beat_report
 from .vector_control import select_state
 from .vector_audit import contact_tensors
 from .rewards import sm_mdp_contract
+from .tasks import condition_kind, modality_metrics
 
 
 def tensor_digest(value):
     return hashlib.sha256(value.detach().contiguous().cpu().numpy().tobytes()).hexdigest()
+
+
+def merge_fixed_reports(reports):
+    """评价任务多于物理环境时合并完整episode，按实际样本聚合而非平均批次均值。"""
+    result = dict(reports[0])
+    rows = [row for report in reports for row in report['episodes']]
+    result.update(episodes=rows, by_modality=modality_metrics(rows), measured_evaluation_envs=len(rows),
+        completion_rate=sum(r['full_task_complete'] for r in rows)/len(rows),
+        mean_tracking=sum(r['sm_terms'].get('track', 0.) for r in rows)/len(rows))
+    for field, source in (
+            ('mean_full_horizon_tracking', 'full_horizon_tracking'),
+            ('mean_root_position_rmse_m', 'root_position_rmse_m'), ('mean_root_xy_rmse_m', 'root_xy_rmse_m'),
+            ('mean_jerk_rms', 'jerk_rms'), ('mean_joint_q_rmse_rad', 'joint_q_rmse_rad'),
+            ('mean_joint_qd_rmse_rad_s', 'joint_qd_rmse_rad_s'),
+            ('mean_body_orientation_rmse_rad', 'body_orientation_rmse_rad'),
+            ('mean_contact_foot_slip_mps', 'contact_foot_slip_mps')):
+        values = [row[source] for row in rows if row.get(source) is not None]
+        result[field] = sum(values)/len(values) if values else None
+    beats = [row['music'].get('f1') for row in rows if row.get('condition_kind', 'music') == 'music']
+    beats = [v for v in beats if v is not None]
+    result['mean_beat_f1'] = sum(beats)/len(beats) if beats else None
+    for key in ('constraint_failure_count', 'wall_seconds', 'measured_transitions', 'physics_transitions'):
+        result[key] = sum(report[key] for report in reports)
+    result['constraint_failures'] = [r for report in reports for r in report['constraint_failures']]
+    return result
 
 
 def _feasible_evaluation_proposal(control, full_state, ids, *, zero):
@@ -56,8 +82,22 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
     control, bank = collector.control, collector.bank
     selected = bank.by_split[split]
     count = len(selected)
-    if not count or count > collector.num_envs:
-        raise ValueError('评价歌曲数必须非零且不超过真实环境数')
+    if not count:
+        raise ValueError('评价任务数必须非零')
+    if count > collector.num_envs:
+        reports = []
+        try:
+            for offset in range(0, count, collector.num_envs):
+                bank.by_split[split] = selected[offset:offset+collector.num_envs]
+                destination = None
+                if trajectory_dir is not None:
+                    from pathlib import Path
+                    destination = Path(trajectory_dir)/f'batch_{offset:04d}'
+                reports.append(evaluate_fixed(collector, zero=zero, split=split, max_steps=max_steps,
+                                              trajectory_dir=destination))
+        finally:
+            bank.by_split[split] = selected
+        return merge_fixed_reports(reports)
     songs = selected[torch.arange(collector.num_envs, device=bank.device)%count]
     collector.reset(songs=songs, frames=torch.zeros_like(songs), perturb=False)
     initial = collector.state['state'][:count].clone()
@@ -124,7 +164,9 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
                 collector.state[key][ids] = end[key]
             for local in done.nonzero().flatten().tolist():
                 env_id = int(ids[local])
-                reasons[env_id] = 'physical_failure' if bool(failed[local]) else 'music_end'
+                task = bank.tasks[int(songs[env_id])]
+                reasons[env_id] = ('physical_failure' if bool(failed[local]) else
+                                   'task_end' if condition_kind(task) == 'text' else 'music_end')
             active[ids[done]] = False
             collector.vector_steps += 1
             collector.real_transitions += collector.num_envs
@@ -163,9 +205,13 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
         failure_conditions = dict(root_height_error_m=height_error, gravity_projection_z_difference=gravity_z_error,
             root_height_exceeded=height_error > control.runtime.mdp.cfg.term_height,
             gravity_projection_z_exceeded=gravity_z_error > control.runtime.mdp.cfg.term_tilt)
+        kind = condition_kind(bank.tasks[song])
         episodes.append(dict(task=bank.tasks[song]['id'], song=bank.tasks[song]['song_id'], split=split,
+            condition_kind=kind, source_group_id=bank.tasks[song].get('source_group_id', bank.tasks[song]['song_id']),
+            generation_contract=bank.task_contracts[song],
             steps=n, planned_steps=planned, evaluation_budget_steps=budget, reason=reasons[i],
             fraction_of_song_executed=n/planned, full_music_complete=reasons[i]=='music_end',
+            full_task_complete=reasons[i] in ('music_end', 'task_end'), fraction_of_task_executed=n/planned,
             physical_failure=reasons[i]=='physical_failure', constraint_failure=reasons[i]=='constraint_failure',
             failure_conditions_at_last_executed_state=failure_conditions,
             failure_time_s=n*.02 if reasons[i] in ('physical_failure', 'constraint_failure') else None,
@@ -189,13 +235,17 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
     def average(key):
         values=[r[key] for r in episodes if r[key] is not None]
         return sum(values)/len(values) if values else None
-    return dict(episodes=episodes, completion_rate=sum(r['full_music_complete'] for r in episodes)/count,
+    groups = modality_metrics(episodes)
+    music_scores = [r['music'].get('f1') for r in episodes if r['condition_kind'] == 'music']
+    music_scores = [score for score in music_scores if score is not None]
+    return dict(episodes=episodes, by_modality=groups,
+        completion_rate=sum(r['full_task_complete'] for r in episodes)/count,
         mean_full_horizon_tracking=average('full_horizon_tracking'), mean_root_position_rmse_m=average('root_position_rmse_m'),
         mean_root_xy_rmse_m=average('root_xy_rmse_m'),
         mean_jerk_rms=average('jerk_rms'), mean_tracking=sum(r['sm_terms'].get('track',0.) for r in episodes)/count,
         mean_joint_q_rmse_rad=average('joint_q_rmse_rad'), mean_joint_qd_rmse_rad_s=average('joint_qd_rmse_rad_s'),
         mean_body_orientation_rmse_rad=average('body_orientation_rmse_rad'), mean_contact_foot_slip_mps=average('contact_foot_slip_mps'),
-        mean_beat_f1=sum(r['music'].get('f1') or 0. for r in episodes)/count,
+        mean_beat_f1=sum(music_scores)/len(music_scores) if music_scores else None,
         constraint_failure_count=len(constraint_failures), constraint_failures=constraint_failures,
         zero_adapter=zero, max_steps=max_steps, seed=42, observation_noise=False, exploration_noise=0.,
         num_envs=collector.num_envs, measured_evaluation_envs=count, wall_seconds=elapsed,
@@ -204,7 +254,7 @@ def evaluate_fixed(collector, *, zero=False, split='evaluation', max_steps=None,
         reference_execution=('bounded_direct_no_derivative_constraints'
             if control.projection is None and control.constraint_beta == 1. else 'historical_reference_constraint_audit'),
         sm_mdp_contract=sm_mdp_contract(control.runtime), soft_joint_limit_cost=control.soft_joint_limit_cost,
-        full_song_evaluation=max_steps is None)
+        full_song_evaluation=max_steps is None, full_task_evaluation=max_steps is None)
 
 
 def paired_comparison(zero, current):
@@ -216,15 +266,25 @@ def paired_comparison(zero, current):
              'body_orientation_rmse_rad','jerk_rms','contact_foot_slip_mps')
     for row in current['episodes']:
         old=baseline[row['task']]
+        if row.get('condition_kind', 'music') != old.get('condition_kind', 'music'):
+            raise ValueError('物理评价配对条件不一致: 条件模态不同')
+        if row.get('generation_contract') != old.get('generation_contract'):
+            raise ValueError('物理评价配对条件不一致: Stage1缓存或条件身份不同')
         for key in ('initial_state_sha256','physical_xi_sha256','evaluation_budget_steps'):
             if row[key]!=old[key]:
                 raise ValueError(f'物理评价配对条件不一致: {row["task"]} {key}')
-        rows.append(dict(task=row['task'],zero_reason=old['reason'],current_reason=row['reason'],
+        rows.append(dict(task=row['task'], condition_kind=row.get('condition_kind', 'music'),
+            zero_reason=old['reason'],current_reason=row['reason'],
             zero_steps=old['steps'],current_steps=row['steps'],
             differences={k:row[k]-old[k] if row[k] is not None and old[k] is not None else None for k in metrics},
             tracking_six_differences={k:row['sm_terms'][k]-old['sm_terms'][k]
                 if k in row['sm_terms'] and k in old['sm_terms'] else None
                 for k in ('body_pos','body_ori','body_linvel','body_angvel','root_pos','root_ori')}))
-    return dict(cases=rows,completion_delta=current['completion_rate']-zero['completion_rate'],
+    groups = {}
+    for kind in set(zero.get('by_modality', {})) & set(current.get('by_modality', {})):
+        a, b = zero['by_modality'][kind], current['by_modality'][kind]
+        groups[kind] = {key: b[key]-a[key] if b.get(key) is not None and a.get(key) is not None else None
+                       for key in ('completion_rate', 'mean_root_position_rmse_m', 'mean_full_horizon_tracking', 'mean_beat_f1')}
+    return dict(cases=rows, by_modality=groups, completion_delta=current['completion_rate']-zero['completion_rate'],
         tracking_delta=current['mean_full_horizon_tracking']-zero['mean_full_horizon_tracking'],
         interpretation='negative errors/slip/jerk are better; positive tracking is better; failed prefixes are not full songs')

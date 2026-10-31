@@ -212,7 +212,7 @@ def save_stage1_checkpoint(
     payload = {
         "checkpoint_version": STAGE1_CHECKPOINT_VERSION,
         "condition_interface_version": STAGE1_ACTOR_INTERFACE_VERSION,
-        "stage1_contract_version": STAGE1_CONTRACT_VERSION,
+        "stage1_contract_version": actor.interface_config.get("condition_contract_version", STAGE1_CONTRACT_VERSION),
         "bumi_representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
         "actor_interface_config": dict(actor.interface_config),
         "config": dict(config),
@@ -256,7 +256,7 @@ def _validate_actor_checkpoint(actor: nn.Module, checkpoint: Mapping[str, Any]) 
         raise RuntimeError("Stage 1 checkpoint checkpoint_version mismatch")
     expected = {
         "condition_interface_version": STAGE1_ACTOR_INTERFACE_VERSION,
-        "stage1_contract_version": STAGE1_CONTRACT_VERSION,
+        "stage1_contract_version": actor.interface_config.get("condition_contract_version", STAGE1_CONTRACT_VERSION),
         "bumi_representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
         "actor_interface_config": dict(actor.interface_config),
     }
@@ -497,7 +497,7 @@ def save_training_checkpoint(
     payload = {
         "checkpoint_version": STAGE1_TRAINING_CHECKPOINT_VERSION,
         "condition_interface_version": STAGE1_ACTOR_INTERFACE_VERSION,
-        "stage1_contract_version": STAGE1_CONTRACT_VERSION,
+        "stage1_contract_version": actor.interface_config.get("condition_contract_version", STAGE1_CONTRACT_VERSION),
         "bumi_representation_contract_version": BUMI_REPRESENTATION_CONTRACT_VERSION,
         "actor_interface_config": _plain_config(actor.interface_config),
         "config": _plain_config(config),

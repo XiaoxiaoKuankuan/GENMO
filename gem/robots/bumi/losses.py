@@ -15,6 +15,7 @@ FP32 中计算，并同时记录原始量、按物理尺度归一化量和加权
 from __future__ import annotations
 
 import math
+from contextvars import ContextVar
 from collections.abc import Mapping
 from typing import Any
 
@@ -122,6 +123,10 @@ BUMI_PHYSICAL_SCALES = {
 }
 
 
+# 联合Stage1显式选择逐样本均值；上下文局部生效，不改变既有音乐调用。
+_PER_SAMPLE_REDUCTION = ContextVar("bumi_stage1_per_sample_reduction", default=False)
+
+
 def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     if not isinstance(value, torch.Tensor) or not isinstance(mask, torch.Tensor):
         raise TypeError("_masked_mean expects tensor value and mask")
@@ -135,6 +140,11 @@ def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
             f"mask shape {tuple(mask.shape)} cannot supervise value shape {tuple(value.shape)}"
         ) from exc
     weights = expanded.to(dtype=value.dtype)
+    if _PER_SAMPLE_REDUCTION.get():
+        counts = weights.flatten(1).sum(1)
+        per_sample = torch.where(expanded, value, 0.0).flatten(1).sum(1) / counts.clamp_min(1)
+        available = counts > 0
+        return torch.where(available, per_sample, 0.0).sum() / available.sum().clamp_min(1)
     return (value * weights).sum() / weights.sum().clamp_min(1.0)
 
 

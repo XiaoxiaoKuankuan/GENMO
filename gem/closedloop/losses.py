@@ -40,6 +40,7 @@ from gem.robots.bumi.losses import (
     BUMI_ROBUST_JOINT_LIMIT_LOSS_NAMES,
     BumiRobotLosses,
     _masked_mean,
+    _PER_SAMPLE_REDUCTION,
     _masked_tail_pairs,
     derivative_excess_loss_values,
     derivative_excess_tail_loss_values,
@@ -78,6 +79,7 @@ class Stage1BumiLosses(BumiRobotLosses):
         weights: Mapping[str, float],
         *,
         ground_semantics: str = "mixed_floor_zero_fk_contact_v2",
+        loss_reduction: str = "legacy",
         **kwargs: Any,
     ) -> None:
         if ground_semantics == "legacy_body_origin_min_zero":
@@ -86,6 +88,9 @@ class Stage1BumiLosses(BumiRobotLosses):
             )
         super().__init__(endecoder, weights, ground_semantics=ground_semantics, **kwargs)
         self.stage1_contract_version = STAGE1_LOSS_CONTRACT_VERSION
+        if loss_reduction not in {"legacy", "valid_per_sample"}:
+            raise ValueError("unknown Stage1 loss reduction")
+        self.loss_reduction = loss_reduction
 
     def _ground_height_world(self, batch: Mapping[str, Any], pred: torch.Tensor) -> torch.Tensor:
         """验证已有 meta 中的损失监督来源；旧无 meta batch 维持明确的 floor-zero 语义。"""
@@ -164,9 +169,11 @@ class Stage1BumiLosses(BumiRobotLosses):
             raise ValueError("contact_logits must match target_contact [B,T,2] (T=60/120)")
         # 原物理公式也在 FP32 中运行，避免低精度 SO(3)/差分/FK 放大误差。
         with torch.autocast(device_type=pred_x_start.device.type, enabled=False):
-            return self._forward_float(
-                batch, pred_x_start.float(), contact_logits.float(), global_step
-            )
+            token = _PER_SAMPLE_REDUCTION.set(self.loss_reduction == "valid_per_sample")
+            try:
+                return self._forward_float(batch, pred_x_start.float(), contact_logits.float(), global_step)
+            finally:
+                _PER_SAMPLE_REDUCTION.reset(token)
 
     def _forward_float(
         self, batch: Mapping[str, Any], pred: torch.Tensor, logits: torch.Tensor, step: int

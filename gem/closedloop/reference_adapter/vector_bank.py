@@ -15,8 +15,13 @@ from .application import task_assets
 
 class VectorBank:
     def __init__(self, tasks, engine, device):
-        entries = [(task, *task_assets(task, engine, device)[:3]) for task in tasks]
+        entries, contracts = [], []
+        for task in tasks:
+            initial, nominal, audio, contract = task_assets(task, engine, device)
+            entries.append((task, initial, nominal, audio))
+            contracts.append(contract)
         self._initialize(entries, engine.step.runtime.kin, engine.step.rewards.music)
+        self.task_contracts = contracts
 
     @classmethod
     def from_entries(cls, entries, kin, music):
@@ -27,10 +32,14 @@ class VectorBank:
     @torch.no_grad()
     def _initialize(self, entries, kin, music):
         self.tasks = [entry[0] for entry in entries]
+        self.task_contracts = [task.get('generation_contract') for task in self.tasks]
         self.audio = [entry[3] for entry in entries]
         self.nominal = [entry[2] for entry in entries]
         self.initial = torch.cat([entry[1] for entry in entries])
         self.device = self.initial.device
+        from .tasks import condition_kind
+        self.task_modalities = torch.tensor([int(condition_kind(t) == 'text') for t in self.tasks],
+                                           device=self.device, dtype=torch.long)
         self.by_split = {split: torch.tensor([i for i, t in enumerate(self.tasks) if t['split'] == split],
                           device=self.device, dtype=torch.long)
                          for split in ('train', 'validation', 'audit', 'evaluation')}
@@ -45,9 +54,9 @@ class VectorBank:
             grid = torch.arange(0, nominal.upper+1, 12, device=self.device)
             reference = build_reference(nominal.pose_at, grid, nominal.lower, nominal.upper, kin)
             n = len(grid)
-            if int(grid[-1]) < (audio.end_tick//12)*12+132:
+            if int(grid[-1]) < (audio.control_end_tick//12)*12+132:
                 raise ValueError('名义尾部缺少真实第11点，禁止外推')
-            offsets.append(cursor); lengths.append(n); ends.append(audio.end_tick//12)
+            offsets.append(cursor); lengths.append(n); ends.append(audio.control_end_tick//12)
             starts.append(audio.start_tick//12); cursor += n
             for name, value in zip(reference._fields, reference):
                 arrays[name].append(value[0].detach())
@@ -57,7 +66,8 @@ class VectorBank:
             valid = audio.valid[0, clipped] & inside
             extra['preview'].append(audio.features[0, clipped]*valid[..., None])
             extra['preview_mask'].append(valid)
-            extra['preview_times'].append((audio.start_tick+idx*20-grid[:, None]).float()/600)
+            times = (audio.start_tick+idx*20-grid[:, None]).float()/600
+            extra['preview_times'].append(times if audio.condition_kind == 'music' else torch.zeros_like(times))
             target, target_valid = audio.target(grid)
             extra['target'].append(target[0]); extra['audio_valid'].append(target_valid[0])
             beats = audio.beat_ticks[0]
@@ -87,6 +97,25 @@ class VectorBank:
         self.offset11 = torch.arange(11, device=self.device)
         self.offset13 = torch.arange(-1, 12, device=self.device)
         self.event_offsets = torch.arange(-17, -1, device=self.device)
+
+    def sample_tasks(self, count, split, *, generator=None):
+        """联合任务按模态等额采样，再在该模态内部均匀抽任务；旧单模态路径保持原状。"""
+        ids = self.by_split[split]
+        groups = [ids[self.task_modalities[ids] == kind] for kind in (0, 1)]
+        groups = [group for group in groups if len(group)]
+        if not groups:
+            raise ValueError(f'{split}没有可采样任务')
+        if len(groups) == 1:
+            group = groups[0]
+            return group[torch.randint(len(group), (count,), device=self.device, generator=generator)]
+        if count % 2 and bool(torch.randint(2, (), device=self.device, generator=generator)):
+            groups.reverse()
+        chunks = []
+        for index, group in enumerate(groups):
+            n = count//len(groups)+(index < count%len(groups))
+            chunks.append(group[torch.randint(len(group), (n,), device=self.device, generator=generator)])
+        chosen = torch.cat(chunks)
+        return chosen[torch.randperm(count, device=self.device, generator=generator)]
 
     def indices(self, songs, frames):
         # 尾部mask由控制器负责；这里只裁剪无效音乐历史，不制造有效参考支持。

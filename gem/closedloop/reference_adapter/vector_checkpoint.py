@@ -31,6 +31,7 @@ def save_vector(path, engine, critic, optimizers, replay, tangent, collector, st
         rng=dict(python=random.getstate(), numpy=np.random.get_state(), torch=torch.get_rng_state(),
                  cuda=torch.cuda.get_rng_state_all()),
         extra_state=extra_state,
+        task_contracts=collector.bank.task_contracts if config.get('task_sampling') else None,
         physics_resume='new_episode_required_solver_hidden_state_not_saved')
     atomic_save(shared_cpu_state(payload), Path(path))
 
@@ -44,6 +45,8 @@ def load_vector(path, engine, critic, optimizers, replay, tangent, collector, co
             raise ValueError('恢复的奖励或时钟合同不同')
     if ck['config'].get('sm_mdp', {}) != config.get('sm_mdp', {}):
         raise ValueError('恢复的SM误差尺度或真实终止条件不同，不能沿用旧奖励Replay')
+    if config.get('task_sampling') and ck.get('task_contracts') != collector.bank.task_contracts:
+        raise ValueError('恢复的联合条件/Stage1名义缓存不同，旧Replay索引不再代表相同任务')
     for k, v in engine.step.bundle.state_dict().items():
         if not torch.equal(v.cpu(), ck['frozen_bundle'][k]):
             raise ValueError('冻结资产发生变化')

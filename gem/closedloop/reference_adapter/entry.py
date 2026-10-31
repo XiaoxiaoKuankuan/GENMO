@@ -131,7 +131,9 @@ def main(kind):
                 target = expected.get(task["id"])
                 if target is None or any(task[k] != target[k] for k in ("split", "seed", "song_id")):
                     raise ValueError("基线任务与本次划分/种子不一致")
-                if any(file_digest(task[k]) != file_digest(target[k]) for k in ("nominal_reference", "music_features", "initial_state")):
+                from .tasks import condition_contract
+                if (condition_contract(task) != condition_contract(target) or
+                        any(file_digest(task[k]) != file_digest(target[k]) for k in ("nominal_reference", "initial_state"))):
                     raise ValueError("基线与正式任务的名义/音乐/初态不一致")
                 imported.add(task["id"])
             for episode in baseline["replay"]["episodes"].values():
@@ -214,7 +216,8 @@ def main(kind):
                     break
             trainer.real_steps += len(rows) if add_replay else 0
             report = summarize(rows, contacts=contacts, runtime=engine.step.runtime)
-            report.update(task=task["id"], song=task["song_id"], split=task["split"], seed=task["seed"])
+            report.update(task=task["id"], song=task["song_id"], split=task["split"], seed=task["seed"],
+                          condition_kind=task.get("condition_kind", "music"))
             if max_steps is not None and not collector.terminal:
                 report["reason"] = "administrative_truncation"
                 report["supported_reference_complete"] = report["full_music_complete"] = False

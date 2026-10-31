@@ -9,6 +9,10 @@ Actor 自身不依赖训练器，未来 Stage 2 可直接复用。
 入口默认只运行有步数上限的小规模验证/训练；这里不构造 GMT、Critic、DPPO，也不修改
 30→50 Hz 速度派生链。proprio 使用配置明确指定的物理尺度，而非数据估计统计或 GMT 的
 69 维 normalizer。新建 AdamW 始终从第 0 步开始，旧 checkpoint 仅作权重初始化。
+
+联合配置显式启用文本cross-attention及两级模态数据工厂。冻结T5在线编码在训练rank
+进入Actor之前完成，预计算文本与音乐不加载T5；T5不注册到优化器或Actor权重中。
+联合模型从头初始化，仅联合checkpoint可继续训练；损失采用逐样本有效元素平均。
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from torch import nn
 from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 
 from gem.closedloop.checkpoint import load_stage1_checkpoint, warm_start_weights
-from gem.closedloop.contracts import STAGE1_CONDITION_KEYS
+from gem.closedloop.contracts import STAGE1_CONDITION_KEYS, TEXT_CONDITION_KEYS
 from gem.closedloop.stage1_dataset import (
     BumiClosedLoopStage1Dataset,
     collate_stage1_training_samples,
@@ -72,6 +76,10 @@ def build_stage1_actor(config: Mapping[str, Any], data_config: DictConfig) -> nn
     from gem.network.gem_denoiser import NetworkEncoderRoPE
 
     options = dict(config["model"])
+    if options.get("text_conditioning", False) and (
+        int(options.get("text_max_tokens", 150)) != 150 or int(options.get("text_feature_dim", 1024)) != 1024
+    ):
+        raise ValueError("joint Stage1 requires frozen T5 features with 150 tokens and 1024 dimensions")
     latent_dim = int(options["latent_dim"])
     dropout = float(options.get("dropout", 0.1))
     endecoder_options = OmegaConf.to_container(OmegaConf.create(config["endecoder"]), resolve=True)
@@ -79,6 +87,9 @@ def build_stage1_actor(config: Mapping[str, Any], data_config: DictConfig) -> nn
         endecoder_options["stats_path"] = str(data_config.qpos30_stats.path)
     if not endecoder_options.get("kinematics_path"):
         endecoder_options["kinematics_path"] = str(data_config.dataset_defaults.kinematics_path)
+    if options.get("text_conditioning", False) and data_config.datasets and not endecoder_options.get("allow_placeholder_stats", False):
+        from gem.closedloop.stage1_multimodal_dataset import validate_multimodal_stats_identity
+        validate_multimodal_stats_identity(data_config, endecoder_options["stats_path"])
     endecoder = BumiEndecoder(**endecoder_options)
     for split, entries in data_config.datasets.items():
         for name, entry in entries.items():
@@ -95,8 +106,11 @@ def build_stage1_actor(config: Mapping[str, Any], data_config: DictConfig) -> nn
         pred_cam_dim=0,
         static_conf_dim=2,
         avgbeta=False,
-        encode_text=False,
-        use_text_pos_enc=False,
+        encode_text=bool(options.get("text_conditioning", False)),
+        encoded_text_dim=1024,
+        text_mask_prob=0.0,
+        text_encoder_cfg={"mode": "all", "cross_attn_type": "mha"},
+        use_text_pos_enc=bool(options.get("text_conditioning", False)),
         input_remove_global=False,
         input_remove_condition=False,
         latent_dim=latent_dim,
@@ -114,7 +128,7 @@ def build_stage1_actor(config: Mapping[str, Any], data_config: DictConfig) -> nn
         )
         nn.init.zeros_(exists[-1].weight)
         nn.init.zeros_(exists[-1].bias)
-    return Stage1Actor(
+    actor = Stage1Actor(
         endecoder=endecoder,
         denoiser=denoiser,
         music_embedder=music_embedder,
@@ -125,7 +139,14 @@ def build_stage1_actor(config: Mapping[str, Any], data_config: DictConfig) -> nn
         music_mask_prob=float(options.get("music_mask_prob", 0.1)),
         noise_schedule=str(options.get("noise_schedule", "cosine")),
         diffusion_steps=int(options.get("diffusion_steps", 1000)),
+        semantic_mask_prob=float(options.get("semantic_mask_prob", 0.1)),
     )
+    actor.text_encoder_path = str(repository_path(options.get("text_encoder_path", "inputs/t5-3b")))
+    actor.text_encoder_options = {
+        "micro_batch_size": int(options.get("text_encoder_micro_batch_size", 32)),
+        "cache_entries": int(options.get("text_encoder_cache_entries", 100000)),
+    }
+    return actor
 
 
 def build_stage1_losses(actor: nn.Module, config: Mapping[str, Any]) -> nn.Module:
@@ -137,7 +158,12 @@ def build_stage1_losses(actor: nn.Module, config: Mapping[str, Any]) -> nn.Modul
     legacy = OmegaConf.load(repository_path(loss_config["weights_from"]))
     weights = dict(legacy.args.weights)
     weights.update(dict(loss_config.get("weights", {})))
-    return Stage1BumiLosses(actor.endecoder, weights, **dict(loss_config.get("options", {})))
+    options = dict(loss_config.get("options", {}))
+    if actor.text_conditioning:
+        options.setdefault("loss_reduction", "valid_per_sample")
+        if options["loss_reduction"] != "valid_per_sample":
+            raise ValueError("joint Stage1 must use valid_per_sample loss reduction")
+    return Stage1BumiLosses(actor.endecoder, weights, **options)
 
 
 def build_stage1_loader(
@@ -154,6 +180,12 @@ def build_stage1_loader(
     pin_memory: bool = False,
 ) -> DataLoader:
     """直接实例化第 3 步 Dataset，训练保留四来源相对采样权重。"""
+
+    if data_config.get("modality_probabilities") is not None:
+        from gem.closedloop.stage1_multimodal_dataset import build_multimodal_stage1_loader
+        return build_multimodal_stage1_loader(data_config, split=split, batch_size=batch_size,
+            num_workers=num_workers, seed=seed, samples_per_epoch=samples_per_epoch,
+            rank=rank, world_size=world_size, resumable=resumable, pin_memory=pin_memory)
 
     if split not in data_config.datasets:
         raise ValueError(f"Stage 1 dataset config has no split {split!r}")
@@ -242,6 +274,43 @@ def batch_to_device(batch: Mapping[str, Any], device: torch.device | str) -> dic
     }
 
 
+def stage1_conditions(batch: Mapping[str, Any]) -> dict[str, Any]:
+    """仅抽取推理条件，联合文本字段可选；不把监督target或caption来源传入采样器。"""
+    return {key: batch[key] for key in (*STAGE1_CONDITION_KEYS, *TEXT_CONDITION_KEYS) if key in batch}
+
+
+def prepare_text_batch(actor: nn.Module, batch: dict[str, Any]) -> dict[str, Any]:
+    """在线T5只处理尚未编码的真实文本，冻结模型不注册到Actor/DDP或checkpoint。
+
+    Dataset可返回待编码占位；此处在Actor契约校验之前补齐150-token特征和mask。
+    混合批次中的音乐行及已缓存文本不调用T5，训练与固定验证共用这一条预处理路径。
+    """
+    pending = batch.get("text_needs_encoding")
+    if pending is None or not bool(pending.any()):
+        return batch
+    if not actor.text_conditioning or bool((pending & ~batch["has_text"]).any()):
+        raise ValueError("only real text samples may request frozen T5 encoding")
+    encoder = actor.__dict__.get("_frozen_text_encoder")
+    if encoder is None:
+        from gem.runtime.frozen_text_encoder import FrozenTextEncoder
+        encoder = FrozenTextEncoder(actor.text_encoder_path, **getattr(actor, "text_encoder_options", {}))
+        # 放入普通容器，禁止nn.Module自动注册冻结T5并混入DDP参数、优化器或权重。
+        actor.__dict__["_frozen_text_encoder"] = encoder
+    indices = pending.nonzero(as_tuple=False).flatten().tolist()
+    captions = [batch["captions"][i] for i in indices]
+    encoding_device = batch["text_features"].device
+    # 首次from_pretrained构造模块可能消耗torch RNG；缓存命中/断点后重载不能改变扩散噪声流。
+    cuda_devices = [encoding_device.index] if encoding_device.type == "cuda" else []
+    with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
+        features, mask = encoder.encode(captions, batch["text_features"].device)
+    batch["text_features"] = batch["text_features"].clone()
+    batch["text_attention_mask"] = batch["text_attention_mask"].clone()
+    batch["text_features"][pending] = features.to(batch["text_features"])
+    batch["text_attention_mask"][pending] = mask.to(batch["text_attention_mask"])
+    batch["text_needs_encoding"] = torch.zeros_like(pending)
+    return batch
+
+
 def _loss_values(loss: torch.Tensor, values: Mapping[str, Any]) -> dict[str, float]:
     result = {"loss": float(loss.detach())}
     for name, value in values.items():
@@ -262,6 +331,8 @@ def initialize_stage1_weights(actor: nn.Module, config: Mapping[str, Any]) -> di
     if legacy and stage1:
         raise ValueError("choose either warm_start_checkpoint or stage1_checkpoint")
     if legacy:
+        if actor.text_conditioning:
+            raise ValueError("joint music/text Stage1 is trained from scratch; legacy warm start is unsupported")
         assets = config.get("warm_start_source_assets")
         return warm_start_weights(
             actor,
@@ -311,7 +382,7 @@ def train_stage1_steps(
                 batch = next(iterator)
             except StopIteration as exc:
                 raise ValueError("Stage 1 training loader is empty") from exc
-        batch = batch_to_device(batch, device)
+        batch = prepare_text_batch(actor, batch_to_device(batch, device))
         optimizer.zero_grad(set_to_none=True)
         prediction = actor.training_forward(batch)
         loss, values = losses(
@@ -351,8 +422,8 @@ def validate_stage1_batches(
     for index, source in enumerate(loader):
         if index >= int(max_batches):
             break
-        batch = batch_to_device(source, device)
-        conditions = {key: batch[key] for key in STAGE1_CONDITION_KEYS}
+        batch = prepare_text_batch(actor, batch_to_device(source, device))
+        conditions = stage1_conditions(batch)
         generated = actor.sample(
             conditions, steps=int(sample_steps), guidance_scale=float(guidance_scale)
         )

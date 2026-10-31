@@ -1,0 +1,20 @@
+# 音乐或英文文本的固定参考MuJoCo演示；使用联合Stage1和共享Adapter。
+# 不继承旧音乐checkpoint，全部新模型/统计/基线由显式环境变量或本配置指定。
+adapter_checkpoint: ${oc.env:BUMI_MULTIMODAL_ADAPTER,${assets_root}/adapter_best.pt}
+supermimic:
+  checkpoint: ${oc.env:SM_BRIDGE_CHECKPOINT,/data0/user/liwei/GENMO_assets/adapter_20261026/ckpt_024000.pt}
+  repo: ${oc.env:SUPERMIMIC_REPO,/home/user/liwei/bumi-closedloop-worktrees/adapter/SuperMimic}
+  robot_asset_dir: ${oc.env:SM_ROBOT_ASSET_DIR,/data0/user/liwei/GENMO_assets/adapter_20261026/sm/data/bumi3_4340/robot}
+genmo:
+  bootstrap_latency_ticks: 180
+  checkpoint: ${oc.env:BUMI_MULTIMODAL_STAGE1,${assets_root}/stage1_best.pt}
+  kinematics: ${oc.env:BUMI_KINEMATICS_PATH,configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json}
+  latency_margin_ticks: 60
+  stats: ${assets_root}/qpos30_train_stats.json
+  text_encoder_path: ${oc.env:BUMI_T5_MODEL_PATH,/data0/user/liwei/models/t5-3b_bed96aab}
+  sample_steps: 20
+  guidance_scale: 2.5
+music_baseline: ${oc.env:BUMI_MULTIMODAL_BASELINE,${assets_root}/stage2_baseline/music_baseline.pt}
+cache_root: ${assets_root}/demo_cache
+output_root: ${assets_root}/demo_runs
+assets_root: ${oc.env:BUMI_MULTIMODAL_ASSETS,/data0/user/liwei/GENMO_assets/bumi_music_text_v1}

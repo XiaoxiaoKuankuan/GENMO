@@ -1,0 +1,145 @@
+# 共享音乐/文本Adapter，继承当前H64直接参考参数，不继承旧Adapter权重或音乐缓存。
+# 所有资产路径显式绑定新联合Stage1；基线/标尺需由新混合训练参考重新生成。
+# 仅配置，不自动启动训练；冻结Actor，独立WM H8，Critic关闭，模态各50%。
+algorithm: genmo_supermimic_reference_adapter10
+alternating:
+  action_noise: 0.0
+  calibration: null  # 由 calibrate_stage2_multimodal 输出的 runtime.yaml 填入
+  critic_enabled: false
+  critic_epochs: 3
+  critic_minibatches: 4
+  early_evaluation_steps: 256
+  evaluation_updates:
+  - 0
+  - 10
+  - 20
+  - 50
+  - 100
+  - 200
+  - 500
+  - 1000
+  - 2000
+  - 3000
+  - 4000
+  - 5000
+  - 6000
+  - 7000
+  - 8000
+  - 9000
+  - 10000
+  experiment_label: music_text_shared_H64_from_zero
+  exploration_fraction: 0.0
+  exploration_std: 0.1
+  full_song_from_update: 20
+  log_every: 10
+  method: supermimic_alternating_WM_BPTT
+  objective_version: sm_music_absolute_xy_goal_continuity_v9
+  precision:
+    weight: 0.446714796317961
+    root_xy_scale: 0.2
+    root_xy_weight: 1.4910286903381347
+    soft_reference_weights:
+      joint_velocity: 0.29404352115994975
+      joint_acceleration: 0.011694921335157074
+      root_velocity: 0.14561098940283132
+      root_acceleration: 0.004290134029947146
+      joint_overlap: 0.10153110612572498
+      root_overlap: 0.035929382644296654
+    soft_reference_scales:
+      joint_velocity: 1.322802186012268
+      joint_acceleration: 16.807783126831055
+      root_velocity: 0.6095460653305054
+      root_acceleration: 7.213070869445801
+      joint_overlap: 0.026776254177093506
+      root_overlap: 0.012190921232104301
+  root_orientation: true
+  root_xy: false
+  soft_joint_limit: false
+  stage_budget: 10000_Adam_updates_metrics_never_stop_training
+  utd: 0.4
+  warmup_vector_steps: 64
+  wm_only_iterations: 100
+  compile_components: false
+  evaluation_num_envs: 4
+  quality_stop:
+    root_rmse_relative_increase: 0.25
+    jerk_relative_increase: 0.2
+    tracking_relative_drop: 0.02
+    completion_absolute_drop: 0.25
+    consecutive_full_evaluations: 2
+  critic_real_td_weight: 1.0
+  objective_gradient_every: 100
+  objective_gradient_samples: 32
+bptt_steps: 64
+control_hz: 50
+genmo:
+  bootstrap_latency_ticks: 180
+  checkpoint: ${oc.env:BUMI_MULTIMODAL_STAGE1,${assets_root}/stage1_best.pt}
+  kinematics: ${oc.env:BUMI_KINEMATICS_PATH,configs/bumi/bumi_kinematics_robot_retargeter_fe934_v1.json}
+  latency_margin_ticks: 60
+  stats: ${assets_root}/qpos30_train_stats.json
+  text_encoder_path: ${oc.env:BUMI_T5_MODEL_PATH,/data0/user/liwei/models/t5-3b_bed96aab}
+  sample_steps: 20
+  guidance_scale: 2.5
+hidden_dims:
+- 512
+- 512
+- 256
+music:
+  activity_floor: 0.05
+  activity_fraction: 0.7
+  event_activity_floor: 0.1
+  extra_event_weight: 1.0
+  lag_steps: 2
+  margin: 0.01
+  match_tolerance_s: 0.06
+  sigma_s: 0.04
+  tau: 0.05
+music_baseline: null  # 由新联合 train 的真实零策略轨迹标定
+observation_noise: false
+output_dim: 270
+physics_backend: isaaclab3_newton_mujoco_warp
+reference_steps: 10
+rewards:
+  music: 0.0001
+  activity: 0.05
+supermimic:
+  checkpoint: ${oc.env:SM_BRIDGE_CHECKPOINT,/data0/user/liwei/GENMO_assets/adapter_20261026/ckpt_024000.pt}
+  repo: ${oc.env:SUPERMIMIC_REPO,/home/user/liwei/bumi-closedloop-worktrees/adapter/SuperMimic}
+  robot_asset_dir: ${oc.env:SM_ROBOT_ASSET_DIR,/data0/user/liwei/GENMO_assets/adapter_20261026/sm/data/bumi3_4340/robot}
+tasks: ${oc.env:BUMI_MULTIMODAL_TASKS,${assets_root}/stage2_cache/tasks.json}
+training:
+  actor_batch: 1024
+  adapter_lr: 1.0e-05
+  backward_microbatch: 256
+  batch_size: 1024
+  critic_lr: 0.0001
+  gamma_per_control: 0.99
+  grad_clip_norm: 1.0
+  lambda_return_per_control: 0.95
+  replay_capacity: 1000000
+  seed: 42
+  wm_batch: 2048
+  wm_fit_window: 8
+  wm_lr: 3.0e-05
+  wm_updates_per_iteration: 10
+  critic_batch: 2048
+vector:
+  checkpoint_every: 200
+  num_envs: 2048
+  sampling_seed: 42
+  target_accepted_updates: 10000
+sm_mdp:
+  root_pos_std: 0.2
+  root_ori_std: 0.3
+  body_pos_std: 0.1
+  body_ori_std: 0.15
+  term_height: 0.2
+  term_tilt: 0.6
+  root_pos_weight: 1.2
+  root_ori_weight: 1.0
+reference_execution: bounded_direct_no_derivative_constraints
+assets_root: ${oc.env:BUMI_MULTIMODAL_ASSETS,/data0/user/liwei/GENMO_assets/bumi_music_text_v1}
+task_sampling:
+  music: 0.5
+  text: 0.5
