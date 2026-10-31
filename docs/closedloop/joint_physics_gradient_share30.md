@@ -38,3 +38,36 @@ bash scripts/train_joint_physics.sh \
 双进程Gloo回归覆盖校准/普通DDP交替、某rank零物理样本、全局零样本、全局未用参数以及实际AdamW更新与单进程全局均值一致。恢复测试比较下一批数据、噪声和更新后的全部参数逐位一致；额外检查旧完整状态显式切换保留数据及优化器演进。真实八卡启动与检查点结果追加至`记录文本.md`。
 
 本改动提高物理梯度参与程度。是否降低真实执行误差、改善纯噪声生成与整曲跟踪，仍需后续独立评价，不能依据目标比例或短时Loss宣布成立。
+
+
+## Server-2正式续训实例（2026-10-31）
+
+原任务通过协作暂停在90,600步保存完整八卡断点；新任务从该状态接入课程，目标仍为总计200,000步。实际运行代码为`c2497084a2c810c1745ece647e51226d8dc32606`。原训练目录及所有断点保留。
+
+- 正式目录：`/data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_gradshare30_20261031`
+- 训练tmux：`joint-gradshare30-200k-20261031`；torchrun PID `158806`（启动时记录，未来需实时核验）。
+- 训练日志：正式目录下`train.log`，详细指标`run/metrics.jsonl`，TensorBoard事件`run/tensorboard`。
+- 起始完整断点：`run/joint_00090600.pt`；之后每5000步保存。`launch.json`记录实际命令/完整配置，`validation.json`记录三步八卡检查和正式第一步完全相同的指标。
+- 首批物理参数梯度占比0.964%，目标在110,600步达到30%；32个物理样本均完整H32。实测初值与此前85k CPU审计的批次和设备不同，不要求数值相同。
+
+宿主机查看：
+
+```bash
+# Server-2，训练环境与TensorBoard环境分开：后者复用已安装TensorBoard的GENMO环境。
+tail -f /data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_gradshare30_20261031/train.log
+/home/user/liwei/GENMO/.venv/bin/python -m tensorboard.main \
+  --logdir /data0/user/liwei/GENMO_outputs/joint_physics_formal_200k_gradshare30_20261031/run/tensorboard \
+  --host 127.0.0.1 --port 6014
+```
+
+后续恢复使用`--resume`新课程断点，不再使用`--continue-from`。恢复命令仅在当前任务已退出时执行，并写不存在的新目录：
+
+```bash
+cd /home/user/liwei/bumi-closedloop-worktrees/joint-physics/GENMO
+JOINT_PYTHON=/data0/user/liwei/envs/genmo_sm_runtime/bin/python \
+JOINT_GPUS=8 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+bash scripts/train_joint_physics.sh \
+  configs/closedloop/joint_physics_formal_200k_gradshare30_8gpu_server2.yaml \
+  --max-steps 200000 --resume <最新的新课程完整joint断点> \
+  --output <不存在的新恢复目录>
+```
