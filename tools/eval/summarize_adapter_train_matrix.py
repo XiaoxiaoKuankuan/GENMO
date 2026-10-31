@@ -1,6 +1,9 @@
-"""汇总同一64首训练缓存的候选模型物理结果，并生成五首展示清单。
+"""汇总同一批完整歌曲的候选模型物理结果，并保留逐歌及来源分组证据。
 
 输入是evaluate_adapter_train_matrix的只读候选清单、两次零基线和候选完整整歌报告。
+默认保留原64首train合同；清单可显式声明128首及混合split，仍检查每首配对身份，
+并分别汇总原划分、来源、本轮Adapter训练已见/未见。失败歌曲不删除，混合结果
+不称为纯未见泛化；每个误差项报告有效数量和P90，避免把缺测静默当零。
 按歌曲先平均重复，再对64首等权汇总；保留完成率、失败原因、六项Tracking、根及
 关节误差、jerk、求解器接触脚滑和音乐。完成率优先，其次根RMSE、完整预算Tracking、
 jerk，选出的模型只称为这16个候选中的训练集最好，不代表测试集最优或泛化证明。
@@ -23,7 +26,24 @@ METRICS = ('full_horizon_tracking', 'root_position_rmse_m', 'root_orientation_rm
 TERMS = ('body_pos', 'body_ori', 'body_linvel', 'body_angvel', 'root_pos', 'root_ori')
 
 
-def compare_reports(baselines, candidates):
+def aggregate_rows(rows):
+    overall = dict(songs=len(rows), baseline_completion=statistics.mean(r['baseline_completion'] for r in rows),
+                   adapter_completion=statistics.mean(r['adapter_completion'] for r in rows), metrics={})
+    for key in sorted({key for row in rows for key in row['metrics']}):
+        values = [r['metrics'][key] for r in rows if key in r['metrics']]
+        a, b = (statistics.mean(v[k] for v in values) for k in ('baseline', 'adapter'))
+        after = sorted(v['adapter'] for v in values)
+        overall['metrics'][key] = dict(baseline=a, adapter=b, delta=b-a, change_percent=100*(b/a-1) if a else None,
+            valid_songs=len(values), adapter_median=statistics.median(after),
+            adapter_p90=after[min(len(after)-1, int(.9*len(after)))],
+            baseline_mean_repeat_range=statistics.mean(v['baseline_repeat_range'] for v in values),
+            candidate_mean_repeat_range=statistics.mean(v['candidate_repeat_range'] for v in values),
+            improved_songs=sum(v['delta'] > 0 if key.startswith(('tracking_', 'full_horizon')) or key=='beat_f1'
+                               else v['delta'] < 0 for v in values))
+    return overall
+
+
+def compare_reports(baselines, candidates, expected_songs=64, allowed_splits=('train',)):
     reports = [*baselines, *candidates]
     if any(not r['full_song_evaluation'] for r in reports):
         raise ValueError('仅完整音乐预算可进入训练集比较')
@@ -31,15 +51,18 @@ def compare_reports(baselines, candidates):
         raise ValueError('奖励和物理终止标准不一致')
     indexes = [{e['task']: e for e in r['episodes']} for r in reports]
     ids = set(indexes[0])
-    if len(ids) != 64 or any(set(i) != ids for i in indexes):
-        raise ValueError('每份报告必须覆盖相同64首train歌曲')
+    if len(ids) != expected_songs or any(set(i) != ids for i in indexes):
+        raise ValueError(f'每份报告必须覆盖相同{expected_songs}首歌曲')
+    if any(len(r['episodes']) != expected_songs or len({e['song'] for e in r['episodes']}) != expected_songs
+           for r in reports):
+        raise ValueError('不能以重复歌曲充当独立样本')
     rows = []
     for task in sorted(ids):
         episodes = [i[task] for i in indexes]
         for e in episodes:
-            if e['split'] != 'train':
-                raise ValueError('不得将validation/evaluation混作train')
-            for k in ('initial_state_sha256', 'physical_xi_sha256', 'evaluation_budget_steps', 'planned_steps'):
+            if e['split'] not in allowed_splits:
+                raise ValueError('实际歌曲划分不在声明的评价范围内')
+            for k in ('song', 'split', 'initial_state_sha256', 'physical_xi_sha256', 'evaluation_budget_steps', 'planned_steps'):
                 if e[k] != episodes[0][k]:
                     raise ValueError(f'{task}的配对身份不同：{k}')
         metrics = {}
@@ -57,24 +80,20 @@ def compare_reports(baselines, candidates):
             metrics[key] = dict(baseline=a, adapter=b, delta=b-a,
                 change_percent=100*(b/a-1) if a else None,
                 baseline_repeat_range=max(before)-min(before), candidate_repeat_range=max(after)-min(after))
-        rows.append(dict(task=task, song=episodes[0]['song'], planned_seconds=episodes[0]['planned_steps']*.02,
+        rows.append(dict(task=task, song=episodes[0]['song'], split=episodes[0]['split'],
+            source=episodes[0].get('source', 'unknown'),
+            adapter_training_seen=episodes[0].get('adapter_training_seen', episodes[0]['split']=='train'),
+            planned_seconds=episodes[0]['planned_steps']*.02,
             baseline_completion=statistics.mean(float(e['full_music_complete']) for e in episodes[:len(baselines)]),
             adapter_completion=statistics.mean(float(e['full_music_complete']) for e in episodes[len(baselines):]),
             baseline_reasons=[e['reason'] for e in episodes[:len(baselines)]],
             adapter_reasons=[e['reason'] for e in episodes[len(baselines):]],
             executed_seconds=[[e['steps']*.02 for e in episodes[:len(baselines)]],
                               [e['steps']*.02 for e in episodes[len(baselines):]]], metrics=metrics))
-    overall = dict(songs=len(rows), baseline_completion=statistics.mean(r['baseline_completion'] for r in rows),
-                   adapter_completion=statistics.mean(r['adapter_completion'] for r in rows), metrics={})
-    for key in rows[0]['metrics']:
-        values = [r['metrics'][key] for r in rows if key in r['metrics']]
-        a, b = (statistics.mean(v[k] for v in values) for k in ('baseline', 'adapter'))
-        overall['metrics'][key] = dict(baseline=a, adapter=b, delta=b-a, change_percent=100*(b/a-1) if a else None,
-            baseline_mean_repeat_range=statistics.mean(v['baseline_repeat_range'] for v in values),
-            candidate_mean_repeat_range=statistics.mean(v['candidate_repeat_range'] for v in values),
-            improved_songs=sum(v['delta'] > 0 if key.startswith(('tracking_', 'full_horizon')) or key=='beat_f1'
-                               else v['delta'] < 0 for v in values))
-    return dict(overall=overall, songs=rows)
+    groups = {key: {str(value): aggregate_rows([row for row in rows if row[key]==value])
+                   for value in sorted({row[key] for row in rows}, key=str)}
+              for key in ('split', 'source', 'adapter_training_seen')}
+    return dict(overall=aggregate_rows(rows), groups=groups, songs=rows)
 
 
 def main():
@@ -84,6 +103,8 @@ def main():
     p.add_argument('--confirmation', type=Path)
     args = p.parse_args()
     manifest = json.loads((args.root/'candidates.json').read_text())
+    options = dict(expected_songs=manifest.get('expected_song_count', 64),
+                   allowed_splits=manifest.get('evaluation_splits', ['train']))
     comparisons = []
     for candidate in manifest['candidates']:
         paths = list(args.root.glob('worker*/'+candidate['label']+'.json'))
@@ -92,7 +113,7 @@ def main():
         directory = paths[0].parent
         baseline = [json.loads((directory/(n+'.json')).read_text()) for n in ('zero', 'zero_repeat')]
         reports = [json.loads(paths[0].read_text())]
-        result = compare_reports(baseline, reports)
+        result = compare_reports(baseline, reports, **options)
         result.update(candidate=candidate, report=str(paths[0]))
         comparisons.append(result)
     def ranking(result):
@@ -108,7 +129,7 @@ def main():
         label = best['candidate']['label']
         baseline = [json.loads((directory/(n+'.json')).read_text()) for n in ('zero', 'zero_repeat')]
         reports = [json.loads((directory/(n+'.json')).read_text()) for n in (label, label+'_repeat1')]
-        confirmed = compare_reports(baseline, reports)
+        confirmed = compare_reports(baseline, reports, **options)
         confirmed['candidate'] = best['candidate']
         eligible = [r for r in confirmed['songs'] if r['baseline_completion']==1 and r['adapter_completion']==1
                     and r['metrics']['full_horizon_tracking']['delta']>0
@@ -131,7 +152,8 @@ def main():
             if len(selected)==5:
                 break
     args.output.mkdir(parents=True, exist_ok=False)
-    summary = dict(scope='training_set_in_sample_model_selection_not_unseen_test',
+    summary = dict(scope=manifest.get('scope', 'training_set_in_sample_model_selection_not_unseen_test'),
+        expected_song_count=options['expected_songs'], evaluation_splits=options['allowed_splits'],
         selection_rule=manifest['selection_rule'], candidate_count=len(comparisons),
         best_candidate=best['candidate'], comparisons=comparisons, confirmation=confirmed,
         selected_examples=selected, selection_boundary='five_positive_examples_not_64_song_average')

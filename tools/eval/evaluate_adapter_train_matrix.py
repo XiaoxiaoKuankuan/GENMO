@@ -1,10 +1,11 @@
-"""用完整训练歌曲比较一组只读Adapter快照，不产生任何训练更新。
+"""用完整歌曲比较一组只读Adapter快照，不产生任何训练更新。
 
 输入清单包含候选名称、冻结配置、checkpoint与预先声明的选择规则；每个进程复用
 一个独立Newton仿真和冻结SuperMimic Actor，逐个加载Adapter权重。先执行两次零
 Adapter，再从相同歌曲初态、物理参数及50Hz时钟执行候选，沿用正式配对评价的
 六项Tracking、关节/姿态/根误差、完成率、真实接触脚滑、jerk与音乐指标。
-只取split=train，不重新命名或混入validation/evaluation，不更改任何训练进程。
+默认只取train；显式--splits可评价随机混合歌曲，并保留每首原始划分、来源和
+本轮训练是否见过的身份，不将混合统计描述成纯未见测试，不更改任何训练进程。
 每个候选保留原配置的软成本，但排序依据原始名义参考的共同物理指标；归一化、
 Actor与优化器均不更新。可选择保存真实轨迹并重复候选，用于最终视频和噪声复核。
 输出必须是新目录；已有结果、模型、日志和正在使用的Replay全部保持只读。
@@ -28,6 +29,8 @@ def main():
     parser.add_argument('--num-workers', type=int, default=1)
     parser.add_argument('--repeat-candidate', type=int, default=1)
     parser.add_argument('--save-trajectories', action='store_true')
+    parser.add_argument('--splits', nargs='+', default=['train'],
+                        choices=['train', 'validation', 'audit', 'evaluation'])
     pre, _ = parser.parse_known_args()
     import yaml
     manifest = json.loads(pre.manifest.read_text())
@@ -58,8 +61,13 @@ def main():
     cfg = direct_reference_config(cfg)
     cfg['observation_noise'] = False
     engine = build_engine(cfg, 'cuda:0')
-    tasks = [t for t in read_tasks(cfg['tasks']) if t['split'] == 'train']
+    tasks = [t for t in read_tasks(cfg['tasks']) if t['split'] in args.splits]
+    expected = manifest.get('expected_song_count', len(tasks))
+    if len(tasks) != expected or len({t['song_id'] for t in tasks}) != expected:
+        raise ValueError('实际任务必须覆盖声明数量的不同歌曲，不能用重复回放凑数量')
     bank = VectorBank(tasks, engine, 'cuda:0')
+    # selected仅为一次批量物理运行的索引；原任务及报告中的split保持不变。
+    bank.by_split['selected'] = torch.arange(len(tasks), device=bank.device)
     control = VectorControl(engine, bank)
     control.adapter.disable_root_xy = True
     control.soft_joint_limit_cost = False
@@ -68,7 +76,7 @@ def main():
     actor_before = control.bundle.frozen_snapshot()
     run = dict(input_manifest=manifest, candidates=candidates, command=sys.argv,
                started_unix=time.time(), optimizer_steps=0, task_ids=[t['id'] for t in tasks],
-               actual_physics_envs=len(tasks), split='train', seed=42,
+               actual_physics_envs=len(tasks), splits=args.splits, seed=42,
                source_files={name: tensor_digest(torch.tensor(list((ROOT/name).read_bytes()), dtype=torch.uint8))
                              for name in ['gem/closedloop/reference_adapter/vector_control.py',
                                           'gem/closedloop/reference_adapter/precision.py']})
@@ -82,8 +90,14 @@ def main():
         def evaluate(name, zero):
             seed_all(42)
             collector.generator.manual_seed(42)
-            report = evaluate_fixed(collector, zero=zero, split='train',
+            report = evaluate_fixed(collector, zero=zero, split='selected',
                 trajectory_dir=output/(name+'_trajectories') if args.save_trajectories else None)
+            by_id = {task['id']: task for task in tasks}
+            for episode in report['episodes']:
+                task = by_id[episode['task']]
+                episode.update(split=task['split'], source=task.get('source'),
+                    dataset_split=task.get('dataset_split'),
+                    adapter_training_seen=task.get('adapter_training_seen', task['split']=='train'))
             report.update(model_label=name, training_updated=False)
             (output/(name+'.json')).write_text(json.dumps(report, ensure_ascii=False, indent=2))
             print(json.dumps(dict(event='completed_evaluation', name=name,
