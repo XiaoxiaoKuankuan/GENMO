@@ -16,6 +16,7 @@ jerk，选出的模型只称为这16个候选中的训练集最好，不代表�
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 import statistics
 
@@ -35,7 +36,7 @@ def aggregate_rows(rows):
         after = sorted(v['adapter'] for v in values)
         overall['metrics'][key] = dict(baseline=a, adapter=b, delta=b-a, change_percent=100*(b/a-1) if a else None,
             valid_songs=len(values), adapter_median=statistics.median(after),
-            adapter_p90=after[min(len(after)-1, int(.9*len(after)))],
+            adapter_p90=after[math.ceil(.9*len(after))-1],
             baseline_mean_repeat_range=statistics.mean(v['baseline_repeat_range'] for v in values),
             candidate_mean_repeat_range=statistics.mean(v['candidate_repeat_range'] for v in values),
             improved_songs=sum(v['delta'] > 0 if key.startswith(('tracking_', 'full_horizon')) or key=='beat_f1'
@@ -154,6 +155,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     summary = dict(scope=manifest.get('scope', 'training_set_in_sample_model_selection_not_unseen_test'),
         expected_song_count=options['expected_songs'], evaluation_splits=options['allowed_splits'],
+        requested_song_count=manifest.get('requested_song_count', options['expected_songs']),
+        reference_generation_failures=manifest.get('reference_generation_failures', []),
         selection_rule=manifest['selection_rule'], candidate_count=len(comparisons),
         best_candidate=best['candidate'], comparisons=comparisons, confirmation=confirmed,
         selected_examples=selected, selection_boundary='five_positive_examples_not_64_song_average')

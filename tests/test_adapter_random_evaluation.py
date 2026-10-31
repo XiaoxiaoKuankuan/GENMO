@@ -69,3 +69,11 @@ def test_repeated_songs_rejected():
     zero['episodes'][1]['song'] = zero['episodes'][0]['song']
     with pytest.raises(ValueError, match='重复歌曲'):
         compare([zero], [zero], expected_songs=128, allowed_splits=['train','evaluation'])
+
+
+def test_p90_nearest_rank():
+    aggregate = module('summarize_adapter_train_matrix').aggregate_rows
+    rows = [dict(baseline_completion=1., adapter_completion=1., metrics={'jerk_rms': dict(
+        baseline=1., adapter=float(i), delta=float(i-1), baseline_repeat_range=0., candidate_repeat_range=0.)})
+        for i in range(1,11)]
+    assert aggregate(rows)['metrics']['jerk_rms']['adapter_p90'] == 9.
