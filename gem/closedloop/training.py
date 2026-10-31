@@ -279,6 +279,30 @@ def stage1_conditions(batch: Mapping[str, Any]) -> dict[str, Any]:
     return {key: batch[key] for key in (*STAGE1_CONDITION_KEYS, *TEXT_CONDITION_KEYS) if key in batch}
 
 
+def stage1_text_encoder_assets(config: Mapping[str, Any], actor: nn.Module | None = None) -> dict[str, Any]:
+    """按内容绑定冻结T5，供完整恢复和独立验证共用，并缓存编码器避免重复哈希。
+
+    路径只用于寻找当前资产，不参与身份比较，因此同内容迁移无需修改checkpoint。
+    仅显式合成测试且资产不存在时允许placeholder；正式模型必须读取实际文件SHA。
+    """
+    from gem.runtime.frozen_text_encoder import FrozenTextEncoder
+
+    options = config["model"]
+    path = repository_path(options.get("text_encoder_path", "inputs/t5-3b")).resolve()
+    if config["endecoder"].get("allow_placeholder_stats", False) and not path.exists():
+        return {"test_only_placeholder": True}
+    encoder = actor.__dict__.get("_frozen_text_encoder") if actor is not None else None
+    if encoder is None or encoder.root != path:
+        encoder = FrozenTextEncoder(
+            path,
+            micro_batch_size=int(options.get("text_encoder_micro_batch_size", 32)),
+            cache_entries=int(options.get("text_encoder_cache_entries", 100000)),
+        )
+        if actor is not None:
+            actor.__dict__["_frozen_text_encoder"] = encoder
+    return {name: {"sha256": entry["sha256"]} for name, entry in encoder.assets.items()}
+
+
 def prepare_text_batch(actor: nn.Module, batch: dict[str, Any]) -> dict[str, Any]:
     """在线T5只处理尚未编码的真实文本，冻结模型不注册到Actor/DDP或checkpoint。
 
@@ -341,6 +365,16 @@ def initialize_stage1_weights(actor: nn.Module, config: Mapping[str, Any]) -> di
             source_model_config=config.get("warm_start_source_model_config"),
         )
     if stage1:
+        if actor.text_conditioning:
+            checkpoint = torch.load(repository_path(stage1), map_location="cpu", weights_only=False)
+            expected = checkpoint.get("runtime_state", {}).get("training_contract", {}).get("text_encoder_assets")
+            actual = stage1_text_encoder_assets(config, actor)
+            if expected is None and actual != {"test_only_placeholder": True}:
+                raise RuntimeError("joint Stage1 checkpoint is missing frozen T5 text_encoder_assets")
+            if expected is not None and expected != actual:
+                raise RuntimeError("joint Stage1 checkpoint frozen T5 text_encoder_assets mismatch")
+            actor.__dict__["_text_encoder_assets"] = expected
+            return load_stage1_checkpoint(actor, checkpoint)
         return load_stage1_checkpoint(actor, repository_path(stage1))
     return {
         "mode": "random_initialization",

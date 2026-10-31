@@ -51,6 +51,7 @@ from gem.closedloop.training import (
     repository_path,
     prepare_text_batch,
     stage1_conditions,
+    stage1_text_encoder_assets,
 )
 from gem.robots.bumi.kinematics import sha256_file
 
@@ -177,19 +178,7 @@ def runtime_contract(config, data, world, actor=None):
         },
     }
     if config.model.get("text_conditioning", False):
-        from gem.runtime.frozen_text_encoder import FrozenTextEncoder
-        path = repository_path(config.model.get("text_encoder_path", "inputs/t5-3b"))
-        if config.endecoder.get("allow_placeholder_stats", False) and not path.exists():
-            # 仅合成单测显式启用placeholder时允许没有真实编码器资产。
-            assets = {"test_only_placeholder": True}
-        else:
-            encoder = FrozenTextEncoder(path,
-                micro_batch_size=int(config.model.get("text_encoder_micro_batch_size", 32)),
-                cache_entries=int(config.model.get("text_encoder_cache_entries", 100000)))
-            assets = {name: {"sha256": entry["sha256"]} for name, entry in encoder.assets.items()}
-            if actor is not None:
-                actor.__dict__["_frozen_text_encoder"] = encoder
-        result["training_contract"]["text_encoder_assets"] = assets
+        result["training_contract"]["text_encoder_assets"] = stage1_text_encoder_assets(config, actor)
     return result
 
 

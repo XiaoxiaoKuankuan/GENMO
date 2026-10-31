@@ -8,20 +8,22 @@
 
 import copy
 import json
+import shutil
 
 import torch
 import pytest
 from omegaconf import OmegaConf
 
 from gem.closedloop import runner
-from gem.closedloop.training import load_stage1_config, build_stage1_actor
+from gem.closedloop.training import load_stage1_config, build_stage1_actor, stage1_text_encoder_assets
 from gem.closedloop.checkpoint import load_training_checkpoint
 from tests.closedloop.test_stage1_actor import actor_factory
 from tests.closedloop.test_stage1_multimodal_dataset import _make_data
 from tests.closedloop.test_stage1_runner import _assert_tree_equal
 
 
-def test_joint_real_loader_runner_resume_and_best(tmp_path, actor_factory):
+@pytest.mark.parametrize("real_encoder_assets", [False, True])
+def test_joint_real_loader_runner_resume_and_best(tmp_path, actor_factory, monkeypatch, real_encoder_assets):
     reference, _ = actor_factory()
     data = _make_data(tmp_path / "releases", text_mode="precomputed")
     data_path = tmp_path / "joint_data.yaml"
@@ -40,6 +42,12 @@ def test_joint_real_loader_runner_resume_and_best(tmp_path, actor_factory):
     config.dataset_config = str(data_path)
     config.endecoder.kinematics_path = str(reference.endecoder.kinematics.kinematics_path)
     config.endecoder.stats_path = reference.endecoder.stats_path
+    if real_encoder_assets:
+        encoder_root = tmp_path / "encoder"
+        encoder_root.mkdir()
+        for name in ("model.safetensors", "config.json", "spiece.model"):
+            (encoder_root / name).write_bytes(b"fixture-encoder-asset")
+        config.model.text_encoder_path = str(encoder_root)
     full = runner.run_persistent(config, tmp_path / "full")
     partial = copy.deepcopy(config)
     partial.train.max_steps = 2
@@ -68,6 +76,48 @@ def test_joint_real_loader_runner_resume_and_best(tmp_path, actor_factory):
         load_training_checkpoint(fresh, left, optimizer=optimizer, scheduler=scheduler,
                                  expected_runtime={"training_contract": changed})
 
+    # 独立validate在完整恢复契约建立前返回，显式权重加载必须自行核对T5身份。
+    validation = copy.deepcopy(config)
+    validation.mode = "validate"
+    validation.stage1_checkpoint = full["last_checkpoint"]
+    constructions = []
+    from gem.runtime import frozen_text_encoder
+    original_encoder = frozen_text_encoder.FrozenTextEncoder
+    original_monitor = runner.monitor
+
+    def tracked_encoder(*args, **kwargs):
+        encoder = original_encoder(*args, **kwargs)
+        constructions.append(encoder)
+        return encoder
+
+    def inspect_monitor(actor, *args, **kwargs):
+        assert stage1_text_encoder_assets(validation, actor) == left["runtime_state"]["training_contract"]["text_encoder_assets"]
+        if real_encoder_assets:
+            assert actor.__dict__["_frozen_text_encoder"] is constructions[-1]
+            assert len(constructions) == 1  # 验证预处理复用已核验实例，不重复哈希。
+        return original_monitor(actor, *args, **kwargs)
+
+    monkeypatch.setattr(frozen_text_encoder, "FrozenTextEncoder", tracked_encoder)
+    monkeypatch.setattr(runner, "monitor", inspect_monitor)
+    if real_encoder_assets:
+        relocated = tmp_path / "encoder_relocated"
+        shutil.copytree(encoder_root, relocated)
+        validation.model.text_encoder_path = str(relocated)
+    report = runner.run_persistent(validation, tmp_path / "validation")
+    assert set(report["modalities"]) == {"music", "text"}
+    if real_encoder_assets:
+        missing_identity = copy.deepcopy(left)
+        del missing_identity["runtime_state"]["training_contract"]["text_encoder_assets"]
+        missing_path = tmp_path / "missing_t5_identity.pt"
+        torch.save(missing_identity, missing_path)
+        validation.stage1_checkpoint = str(missing_path)
+        with pytest.raises(RuntimeError, match="missing frozen T5 text_encoder_assets"):
+            runner.run_persistent(validation, tmp_path / "missing_identity_validation")
+        validation.stage1_checkpoint = full["last_checkpoint"]
+        (relocated / "model.safetensors").write_bytes(b"changed-weights")
+        with pytest.raises(RuntimeError, match="frozen T5 text_encoder_assets mismatch"):
+            runner.run_persistent(validation, tmp_path / "changed_encoder_validation")
+
 
 def test_encoder_asset_identity_tracks_bytes_and_allows_relocation(tmp_path):
     from gem.closedloop.runner import runtime_contract
@@ -83,7 +133,6 @@ def test_encoder_asset_identity_tracks_bytes_and_allows_relocation(tmp_path):
     config.model.text_encoder_path = str(source)
     data = OmegaConf.create(_make_data(tmp_path / "data", text_mode="precomputed"))
     first = runtime_contract(config, data, 1)["training_contract"]["text_encoder_assets"]
-    import shutil
     relocated = tmp_path / "encoder_relocated"
     shutil.copytree(source, relocated)
     config.model.text_encoder_path = str(relocated)
