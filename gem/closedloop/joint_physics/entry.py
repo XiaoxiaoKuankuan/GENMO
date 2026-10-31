@@ -20,7 +20,9 @@ def main(kind):
     parser.add_argument("--torch-device")
     parser.add_argument("--checkpoint")
     parser.add_argument("--validation-report",help="需要补充实际WM动作输入验证的本方法方向报告")
-    parser.add_argument("--resume")
+    restore = parser.add_mutually_exclusive_group()
+    restore.add_argument("--resume")
+    restore.add_argument('--continue-from', help='显式从完整固定权重断点切换到梯度占比课程；保留AdamW/RNG/步数，写新目录')
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--split", choices=("train", "val", "test"), default="train" if kind == "prepare" else "val")
     parser.add_argument("--max-sources", type=int)
@@ -73,7 +75,8 @@ def main(kind):
         if stop < 1 or (args.mode == "smoke" and stop > cfg["training"]["smoke_max_steps"]):
             raise ValueError("smoke必须在显式有界预算内")
         trainer = JointTrainer(cfg, device, rank=rank, world_size=world_size,
-                               resume=args.resume or cfg["initialization"].get("resume_checkpoint"))
+                               resume=args.resume or cfg["initialization"].get("resume_checkpoint"),
+                               continue_from=args.continue_from)
         if stop <= trainer.step:
             raise ValueError("max-steps是新run绝对global_step上限，必须大于恢复步数")
         try:

@@ -53,6 +53,12 @@ def read_config(path, overrides=()):
         raise ValueError("有效前缀仅用于显式正式训练，至少8步且不超过目标H")
     if cfg["training"]["precision"] not in ("fp32", "bf16_mixed"):
         raise ValueError("仅支持fp32或网络BF16/物理FP32的bf16_mixed")
+    balance = physics.get('gradient_balance', {})
+    if balance.get('enabled'):
+        from .gradient_balance import GradientBalance
+        GradientBalance(balance, physics['lambda_exec'])
+        if physics.get('readiness_hard_gate', True) or balance['every_steps'] % physics.get('every_steps', 4):
+            raise ValueError('梯度占比课程要求关闭readiness硬门禁，校准周期须为物理周期整数倍')
     return cfg
 
 

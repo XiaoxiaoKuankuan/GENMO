@@ -10,6 +10,7 @@ bf16_mixed只由Actor包围神经网络；参数、AdamW、原Stage1 FK/损失�
 """
 
 from collections import Counter
+from contextlib import nullcontext
 import json
 import math
 from pathlib import Path
@@ -26,6 +27,7 @@ from .curriculum import Readiness, physics_noise_levels
 from .data import JointDataStream, SidecarStore
 from .checkpoint import read_checkpoint, restore_trainer, save_trainer
 from .pause import PauseControl
+from .gradient_balance import GradientBalance, global_gradient_measurement, average_parameter_gradients
 
 GRADIENT_GROUPS = ('future_encoder','stage1.denoiser','stage1.history_encoder',
                    'stage1.music_embedder','stage1.cond_exists_embedder','stage1.prefix_encoder')
@@ -50,9 +52,16 @@ def distributed_execution_scale(local_count, device, world_size):
 
 
 class JointTrainer:
-    def __init__(self, cfg, device, *, rank=0, world_size=1, resume=None):
+    def __init__(self, cfg, device, *, rank=0, world_size=1, resume=None, continue_from=None):
         self.cfg, self.device, self.rank, self.world_size = cfg, torch.device(device), rank, world_size
-        resume_value = read_checkpoint(resume) if resume else None
+        if resume and continue_from:
+            raise ValueError('严格恢复与显式目标课程续训不能同时使用')
+        checkpoint = resume or continue_from
+        resume_value = read_checkpoint(checkpoint) if checkpoint else None
+        balance_config = cfg['physics'].get('gradient_balance', {})
+        self.gradient_balance = (GradientBalance(balance_config, cfg['physics']['lambda_exec'])
+                                 if balance_config.get('enabled') else None)
+        self.continuation = None
         seed_all(cfg["training"]["seed"])
         self.actor, self.data_loss = build_actor(cfg, device)
         if cfg['training']['precision'] == 'bf16_mixed' and self.device.type == 'cuda' and not torch.cuda.is_bf16_supported():
@@ -140,13 +149,23 @@ class JointTrainer:
             "future_supervision": cfg.get("future_supervision"),
             "data_sample_contract": cfg["data"]["sample_contract"],
             "validation_sha256": digest(report) if report else None}
-        if resume:
-            restore_trainer(self, resume, resume_value)
+        if checkpoint:
+            restore_trainer(self, checkpoint, resume_value, continue_objective=bool(continue_from))
         self.start_step = self.step
         self.network = DistributedDataParallel(self.actor, device_ids=[self.device.index] if self.device.type == "cuda" else None,
                                               find_unused_parameters=True, gradient_as_bucket_view=True) if world_size > 1 else self.actor
 
     def update(self):
+        pcfg = self.cfg['physics']
+        physical_step = (pcfg['enabled'] and self.step >= pcfg['start_step']
+                         and (self.step-pcfg['start_step']) % pcfg.get('every_steps',4) == 0)
+        calibrate = bool(self.gradient_balance and physical_step and self.gradient_balance.due(self.step))
+        # 必须同时包围forward和backward，避免autograd.grad与DDP reducer重复触发。
+        context = self.network.no_sync() if calibrate and self.world_size > 1 else nullcontext()
+        with context:
+            return self._update(calibrate)
+
+    def _update(self, calibrate=False):
         from .reference import attach_sidecars, attach_supervised_sidecars, unpack_supervised_conditions
         from gem.closedloop.training import batch_to_device
         from .execution import execute_window
@@ -276,7 +295,15 @@ class JointTrainer:
         # 两次前向使用同一Actor，全部参数仍通过完整BC图参加DDP。拒绝的物理输出不乘零：
         # NaN*0仍是NaN，不能因物理子批失败阻断本来有限的数据监督。
         local_exec = sum((r['loss'] for r in accepted),zero)
-        total = bc+fcfg.get('weight',0.)*future_loss+scale*weight*local_exec
+        supervised = bc+fcfg.get('weight',0.)*future_loss
+        execution = scale*local_exec
+        if self.gradient_balance and weight > 0:
+            if calibrate:
+                measured = self.performance.call('gradient_balance', global_gradient_measurement,
+                    supervised, execution, self.actor, self.world_size, GRADIENT_GROUPS)
+                self.gradient_balance.observe(self.step, measured, count)
+            weight = self.gradient_balance.weight
+        total = supervised+weight*execution
         pause = getattr(self, 'pause_control', None)
         finite = torch.stack((torch.isfinite(total).all().to(torch.float32),
             total.new_tensor(-pause.local_flag(self.step+1) if pause is not None else 0.)))
@@ -298,6 +325,8 @@ class JointTrainer:
                 for key,value in diagnostics['execution_gradient_norm'].items()}
             before = {name:p.detach().clone() for name,p in self.actor.named_parameters() if p.requires_grad}
         self.performance.call('backward_ddp', total.backward)
+        if calibrate:
+            self.performance.call('backward_ddp', average_parameter_gradients, self.actor, self.world_size)
         norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(),self.cfg['training']['grad_clip'])
         if not torch.isfinite(norm):
             raise FloatingPointError('GENMO梯度非有限，未执行优化')
@@ -369,6 +398,7 @@ class JointTrainer:
         performance = self.performance.collect(self.rank,self.world_size,self.store.cache_metrics() if self.store else {})
         return {'step':self.step, 'lr':self.optimizer.param_groups[0]['lr'], 'precision':self.cfg['training']['precision'],
             'future_supervised_loss':reduced[2],
+            'gradient_balance':self.gradient_balance.metrics if self.gradient_balance else {},
             'physics_gradient_norm':physics_norm,
             'physics_gradient_tensor':'student_pred_x_start',
             'effective_horizon_distribution':dict(horizons),**self.counters,'data_loss':reduced[0],
@@ -462,9 +492,11 @@ class JointTrainer:
             (output/"config.json").write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2))
         if self.world_size > 1:
             dist.barrier()
-        if self.step == 0:
-            save_trainer(self, output/"joint_00000000.pt")
+        if self.step == 0 or self.gradient_balance is not None:
+            save_trainer(self, output/f"joint_{self.step:08d}.pt")
             saved_step = self.step
+        if self.rank == 0 and self.continuation:
+            (output/'continuation.json').write_text(json.dumps(self.continuation,ensure_ascii=False,indent=2))
         if self.rank == 0 and self.physics_stream is not None:
             (output/"physics_inventory.json").write_text(json.dumps(self.physics_stream.inventory, ensure_ascii=False, indent=2))
         recent_physics_norm = 0.
@@ -486,7 +518,7 @@ class JointTrainer:
                         keys = ('step','lr','data_loss','data_terms','future_supervised_loss','execution_loss','lambda_exec',
                                 'physics_attempts','physics_valid_samples','physics_effective_updates','physics_update_fraction',
                                 'effective_horizon_counts','physics_rejections_total','wall_seconds','peak_memory_bytes',
-                                'precision','physics_source_count','future_source_count','data_preparation_seconds')
+                                'precision','physics_source_count','future_source_count','data_preparation_seconds','gradient_balance')
                         brief = {k:result[k] for k in keys}
                         brief['max_rank_step_seconds'] = result['performance']['max_step_seconds']
                         brief['slowest_rank'] = result['performance']['slowest_rank']

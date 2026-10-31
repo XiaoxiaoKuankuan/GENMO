@@ -4,6 +4,7 @@
 # CUDA_VISIBLE_DEVICES由操作者显式指定。脚本不选择空闲GPU、不停止已有进程、不后台启动。
 # --resume只接受完整joint checkpoint；--output必须指向新的独立目录。精度由配置决定，课程和
 # AdamW从零或完整恢复推进；运行本脚本就是显式启动正式训练，不属于自动验收步骤。
+# --continue-from仅用于固定物理权重断点显式接入梯度占比课程，保留原全局步数和完整状态。
 set -euo pipefail
 joint_cfg="${1:?需要本方法配置路径}"
 shift

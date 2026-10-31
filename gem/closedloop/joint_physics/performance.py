@@ -13,7 +13,7 @@ from torch import distributed as dist
 
 STAGES = ('data_wait','sidecar_read','condition_prepare','host_to_device','network_forward',
           'stage1_loss','future_forward_loss','physical_forward_backward','backward_ddp',
-          'optimizer_step','logging','sidecar_refresh','checkpoint_save','total_step')
+          'optimizer_step','logging','sidecar_refresh','checkpoint_save','gradient_balance','total_step')
 
 
 class Performance:

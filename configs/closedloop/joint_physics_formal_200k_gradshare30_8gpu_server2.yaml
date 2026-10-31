@@ -1,0 +1,16 @@
+# 固定权重正式断点的显式续训：保留完整AdamW/八卡采样与RNG、20万步总预算。
+# 占比仅指有物理更新的步：lambda*||全局执行梯度||/(||数据+0.1Future梯度||+lambda*||执行梯度||)。
+# 从切换时实测占比渐进20000步达到30%；每100步校准一次，其余物理步复用权重。
+# H32仍每4步一次，非物理步继续原监督。标量Loss、AdamW位移与真实动力学收益不等于此比例。
+base_config: joint_physics_formal_200k_optimized_8gpu_server2.yaml
+physics:
+  gradient_balance:
+    enabled: true
+    target_share: 0.30
+    ramp_steps: 20000
+    every_steps: 100
+    ema_beta: 0.9
+    max_change_factor: 1.2
+    min_weight: 0.0001
+    max_weight: 5.0
+    maximum_measured_share: 0.40

@@ -5,6 +5,7 @@
 提交仅记录。EMA首版不启用，既无生成教师也无第二个优化器。
 """
 
+import copy
 import os
 from pathlib import Path
 import random
@@ -83,6 +84,8 @@ def save_trainer(trainer, path):
                                                         "readiness": trainer.readiness.state_dict()},
             "rank_states": states, "contract": trainer.contract, "counters": trainer.counters,
             "config": trainer.cfg, "sidecar_snapshot": trainer.store.snapshot() if trainer.store else None,
+            "gradient_balance": trainer.gradient_balance.state_dict() if trainer.gradient_balance else None,
+            "continuation": trainer.continuation,
             "precision_contract": {"network_autocast": trainer.cfg['training']['precision'],
                                    "parameters": "float32", "optimizer_states": "float32", "physics": "float32"},
             "initialization": trainer.actor.initialization}, path)
@@ -90,12 +93,26 @@ def save_trainer(trainer, path):
         dist.barrier()
 
 
-def restore_trainer(trainer, path, value=None):
+def check_restore_contract(previous, current, *, continue_objective=False):
+    """显式续训只允许增加梯度权重课程，其他资产/数学/采样合同仍必须完全一致。"""
+    previous, current = copy.deepcopy(previous), copy.deepcopy(current)
+    if continue_objective:
+        if 'gradient_balance' in previous['physics'] or not current['physics'].get('gradient_balance', {}).get('enabled'):
+            raise ValueError('目标切换仅支持固定权重训练接入新的梯度课程；已有课程请严格resume')
+        current['physics'].pop('gradient_balance')
+    if previous != current:
+        raise ValueError('恢复的架构/数据/资产/物理/采样预算不一致')
+
+
+def restore_trainer(trainer, path, value=None, *, continue_objective=False):
     value = read_checkpoint(path) if value is None else value
     if value["schema"] != CHECKPOINT_SCHEMA:
         raise ValueError("独立物理抽样只恢复本算法完整状态；旧共用噪声checkpoint仅可评价")
-    if value["contract"] != trainer.contract or len(value["rank_states"]) != trainer.world_size:
-        raise ValueError("恢复的架构/数据/资产/物理/采样预算或DDP布局不一致")
+    check_restore_contract(value['contract'], trainer.contract, continue_objective=continue_objective)
+    if len(value["rank_states"]) != trainer.world_size:
+        raise ValueError('恢复的DDP布局不一致')
+    if trainer.gradient_balance and not continue_objective and not value.get('gradient_balance'):
+        raise ValueError('严格恢复缺少完整梯度权重控制器状态')
     trainer.actor.load_state_dict(value["actor"], strict=True)
     trainer.optimizer.load_state_dict(value["optimizer"])
     trainer.scheduler.load_state_dict(value["scheduler"])
@@ -111,4 +128,14 @@ def restore_trainer(trainer, path, value=None):
     if trainer.future_stream is not None:
         trainer.future_stream.load_state_dict(state["future_data"])
     trainer.readiness.load_state_dict(value["curriculum"]["readiness"])
+    if continue_objective:
+        trainer.gradient_balance.start_step = trainer.step
+        trainer.continuation = {'parent_checkpoint': str(Path(path).resolve()), 'parent_global_step': trainer.step,
+            'change': 'fixed_lambda_to_global_parameter_gradient_share',
+            'preserved': 'actor_adamw_scheduler_all_rank_rng_and_samplers',
+            'equivalent_objective_resume': False}
+    else:
+        trainer.continuation = value.get('continuation')
+        if trainer.gradient_balance:
+            trainer.gradient_balance.load_state_dict(value['gradient_balance'])
     restore_rng(state["rng"])
