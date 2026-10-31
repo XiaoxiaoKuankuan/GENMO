@@ -35,3 +35,14 @@ def test_capture_restores_on_failure():
             assert module.candidate_reference()=='new'
             raise RuntimeError('test')
     assert module.execution_terms is original and module.candidate_reference is candidate
+
+
+def test_global_gradient_accumulation_with_unused_parameters():
+    from tools.audit_joint_physics_global_gradients import accumulate
+    total=[None,None]
+    first=torch.tensor([2.,4.])
+    accumulate(total,[first,None],.5)
+    accumulate(total,[torch.tensor([4.,2.]),torch.tensor([6.])],.5)
+    assert torch.equal(total[0],torch.tensor([3.,3.]))
+    assert torch.equal(total[1],torch.tensor([3.]))
+    assert torch.equal(first,torch.tensor([2.,4.]))
