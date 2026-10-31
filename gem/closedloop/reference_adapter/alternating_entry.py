@@ -47,21 +47,28 @@ def validation_ranking(report):
     return values[0], -values[1], values[2], -values[3]
 
 
-def select_validation_best(previous, zero, candidate, zero_checkpoint, *, adapter_updates, scope):
+def select_validation_best(previous, zero, candidate, zero_checkpoint, *, adapter_updates, scope,
+                           selection_population='validation_only'):
     """先将真实零模型纳入同预算候选；相同分数保留零模型或此前best，不误标当前权重。"""
     best = previous
     zero_rank = validation_ranking(zero)
     if zero_rank is not None and (best is None or zero_rank >= tuple(best['ranking'])):
-        best = dict(adapter_updates=0, ranking=zero_rank, selection_split='validation_only',
+        best = dict(adapter_updates=0, ranking=zero_rank, selection_split=selection_population,
                     evaluation_scope=scope, model_identity='initial_zero_Adapter',
                     checkpoint_available=zero_checkpoint is not None,
                     path=zero_checkpoint['path'] if zero_checkpoint else None)
     ranking = validation_ranking(candidate)
     if adapter_updates > 0 and ranking is not None and (best is None or ranking > tuple(best['ranking'])):
         best = dict(adapter_updates=adapter_updates, ranking=ranking,
-                    selection_split='validation_only', evaluation_scope=scope,
+                    selection_split=selection_population, evaluation_scope=scope,
                     model_identity='trained_Adapter', checkpoint_available=False)
     return best
+
+
+def adapter_learning_rate(training, completed_updates):
+    """按已完成的实际Adam次数确定下一次步长；预热不计数，恢复不丢失调度位置。"""
+    decays = sum(completed_updates >= step for step in training.get('adapter_lr_milestones', []))
+    return training['adapter_lr'] * training.get('adapter_lr_gamma', 1.) ** decays
 
 
 def checkpoint_keep_paths(extra):
@@ -89,7 +96,7 @@ def validation_degradation(previous, zero, current, rules):
     consecutive = (previous or {}).get('consecutive', 0)+1 if reasons else 0
     return dict(consecutive=consecutive, reasons=reasons, stop=False, action='report_only',
                 sustained_degradation=consecutive >= rules['consecutive_full_evaluations'],
-                selection_split='validation_only', rules=rules)
+                selection_split=current.get('selection_population', 'validation_only'), rules=rules)
 
 
 def main():
@@ -269,7 +276,7 @@ def main():
         return totals
 
     def evaluate():
-        # Newton/Isaac上下文是进程级singleton；专用4环境在独立评价子进程创建。
+        # Newton/Isaac上下文是进程级singleton；专用评价环境在独立子进程创建。
         # 父训练环境完全不推进、不reset，物理episode和训练RNG均保持因果连续。
         from .checkpoint import shared_cpu_state
         begin = time.perf_counter()
@@ -301,7 +308,8 @@ def main():
         zero = json.loads((output/f'validation_{scope}_zero_dedicated{actual_envs}.json').read_text())
         key = 'best' if full else 'best_short'
         extra[key] = select_validation_best(extra[key], zero, reports['validation'], extra['zero_checkpoint'],
-            adapter_updates=state['accepted_updates'], scope=scope)
+            adapter_updates=state['accepted_updates'], scope=scope,
+            selection_population=reports['validation'].get('selection_population', 'validation_only'))
         if full and state['accepted_updates'] > 0:
             extra['validation_quality'] = validation_degradation(extra.get('validation_quality'),
                 zero, reports['validation'], settings.get('quality_stop'))
@@ -428,6 +436,9 @@ def main():
                     row.update(v)
                 if not warmup:
                     publish('Adapter_BPTT')
+                    row['adapter_lr'] = adapter_learning_rate(train, state['accepted_updates'])
+                    for group in optimizers['adapter'].param_groups:
+                        group['lr'] = row['adapter_lr']
                     starts = replay.starts(train['actor_batch'], horizon=cfg['bptt_steps'], ends=bank.ends)
                     diagnostic_every = settings.get('objective_gradient_every', 0)
                     if diagnostic_every and (state['accepted_updates'] == 0 or

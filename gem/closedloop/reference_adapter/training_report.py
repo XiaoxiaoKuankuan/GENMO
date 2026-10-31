@@ -53,7 +53,12 @@ def update_report(root):
                        if zero.get(key) and report.get(key) is not None else None for key in keys}
             info = dict(path=str(path), adapter_updates=report['adapter_updates'], scope=scope,
                 metrics={key: report.get(key) for key in keys}, change_percent_vs_own_zero=changes,
-                actual_physics_envs=count, constraint_failures=report['constraint_failure_count'])
+                actual_physics_envs=count, constraint_failures=report['constraint_failure_count'],
+                requested_song_count=report.get('requested_song_count', report['measured_evaluation_envs']),
+                paired_evaluable_songs=report.get('paired_evaluable_songs', report['measured_evaluation_envs']),
+                reference_generation_failures=report.get('reference_generation_failures', []),
+                report_population=report.get('report_population', 'dataset_evaluation'),
+                selection_population=report.get('selection_population', 'validation_only'))
             row['latest_full_song' if report['full_song_evaluation'] else 'latest_prefix'] = info
         result['runs'].append(row)
     temp = root/f'comparison_latest.{os.getpid()}.tmp'
