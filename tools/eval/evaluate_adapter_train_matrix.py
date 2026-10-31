@@ -65,6 +65,8 @@ def main():
     expected = manifest.get('expected_song_count', len(tasks))
     if len(tasks) != expected or len({t['song_id'] for t in tasks}) != expected:
         raise ValueError('实际任务必须覆盖声明数量的不同歌曲，不能用重复回放凑数量')
+    if len({t.get('global_music_group_id', t['song_id']) for t in tasks}) != expected:
+        raise ValueError('同一全局音乐组的不同裁剪不能计成独立歌曲')
     bank = VectorBank(tasks, engine, 'cuda:0')
     # selected仅为一次批量物理运行的索引；原任务及报告中的split保持不变。
     bank.by_split['selected'] = torch.arange(len(tasks), device=bank.device)
@@ -97,6 +99,8 @@ def main():
                 task = by_id[episode['task']]
                 episode.update(split=task['split'], source=task.get('source'),
                     dataset_split=task.get('dataset_split'),
+                    global_music_group_id=task.get('global_music_group_id', task['song_id']),
+                    adapter_training_exact_task_seen=task.get('adapter_training_exact_task_seen'),
                     adapter_training_seen=task.get('adapter_training_seen', task['split']=='train'))
             report.update(model_label=name, training_updated=False)
             (output/(name+'.json')).write_text(json.dumps(report, ensure_ascii=False, indent=2))

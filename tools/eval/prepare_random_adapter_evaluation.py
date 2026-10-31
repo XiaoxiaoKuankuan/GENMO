@@ -1,7 +1,9 @@
 """准备随机128首Adapter动力学评价的独立歌曲清单，不执行训练或伪造参考。
 
 默认从当前Adapter训练歌曲随机抽32首，再从其余授权数据集歌曲随机抽96首。
-按音乐组和实际音频SHA双重去重，保留原数据划分及本轮训练见过/未见过标记。
+按跨库resplit_provenance.group_id和实际音频SHA双重去重，不能把同歌裁剪计成
+独立音乐。保留原数据划分及本轮训练见过/未见过标记；修正旧清单时只去重并
+随机补足，不依据参考生成或模型成功与否更换非重复歌曲。
 已有完整GENMO缓存只读复用；新歌仅从原动作首帧构造零速度物理初态，未来参考
 必须由现有prepare_stage2a_cache冻结GENMO流程实际生成。输出随机种子、候选池
 规模、全部抽样清单和互斥缓存分片；生成失败不得换歌，也不得减少正式统计分母。
@@ -27,10 +29,13 @@ def digest(path):
 
 def sample_unique(pool, count, rng, occupied_groups, occupied_audio):
     """先按歌组等概率打乱，再组内抽样；真实音频去重，不按动作条数加权。"""
+    if count == 0:
+        return []
     groups = collections.defaultdict(list)
     for task in pool:
-        if task['song_id'] not in occupied_groups:
-            groups[task['song_id']].append(task)
+        group = task.get('global_music_group_id', task['song_id'])
+        if group not in occupied_groups:
+            groups[group].append(task)
     order = sorted(groups)
     rng.shuffle(order)
     chosen = []
@@ -50,6 +55,21 @@ def sample_unique(pool, count, rng, occupied_groups, occupied_audio):
     raise ValueError(f'独立歌曲不足：需要{count}，实际只有{len(chosen)}')
 
 
+def retain_global_unique(tasks):
+    """沿原随机清单顺序保留第一条，不读取生成结果，返回重复剔除审计。"""
+    kept, removed, groups, audio = [], [], set(), set()
+    for task in tasks:
+        group = task['global_music_group_id']
+        if group in groups or task['audio_sha256'] in audio:
+            removed.append(dict(task=task['id'], global_music_group_id=group,
+                                reason='duplicate_global_music_or_audio_not_outcome_filter'))
+        else:
+            kept.append(task)
+            groups.add(group)
+            audio.add(task['audio_sha256'])
+    return kept, removed
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', type=Path, required=True)
@@ -59,6 +79,8 @@ def main():
     p.add_argument('--seen-songs', type=int, default=32)
     p.add_argument('--seed', type=int, default=20261031)
     p.add_argument('--shards', type=int, default=8)
+    p.add_argument('--repair-selection', type=Path)
+    p.add_argument('--cache-root', type=Path)
     args = p.parse_args()
     if not 0 < args.seen_songs < args.songs or args.shards < 1:
         p.error('需要非空的训练已见与未见歌曲，以及正数缓存分片')
@@ -70,11 +92,22 @@ def main():
     from supermimic.bridge.bundle import load_bundle
     old = json.loads(Path(cfg['tasks']).read_text())
     seen = [task for task in old if task['split']=='train']
-    seen_groups = {task['song_id'] for task in seen}
+    metadata = {}
+    for source in ('AIST++', 'AIOZ-GDANCE', 'FineDance', 'Mine'):
+        for original_split in ('train', 'val', 'test'):
+            manifest = args.dataset/source/'manifests'/f'{original_split}.jsonl'
+            if manifest.exists():
+                for line in manifest.read_text().splitlines():
+                    row = json.loads(line)
+                    metadata[source+'_'+row['sample_id']] = dict(
+                        global_music_group_id=row['resplit_provenance']['group_id'], dataset_split=original_split)
+    seen = [task | metadata[task['id']] for task in seen]
+    seen_groups = {task['global_music_group_id'] for task in seen}
+    seen_ids = {task['id'] for task in seen}
     seen_audio = {task['audio_sha256'] for task in seen}
     rng = random.Random(args.seed)
     chosen = sample_unique(seen, args.seen_songs, rng, set(), set())
-    chosen = [task | dict(adapter_training_seen=True, dataset_split='train') for task in chosen]
+    chosen = [task | dict(adapter_training_seen=True, adapter_training_exact_task_seen=True) for task in chosen]
     pool = []
     for source in ('AIST++', 'AIOZ-GDANCE', 'FineDance', 'Mine'):
         for original_split, split in [('train','train'), ('val','validation'), ('test','evaluation')]:
@@ -84,7 +117,8 @@ def main():
             for line in manifest.read_text().splitlines():
                 row = json.loads(line)
                 group = source+':'+str(row.get('music_group_id', row['audio_key']))
-                if group in seen_groups or not row.get('quality_accepted') or row['num_frames'] < 240:
+                global_group = row['resplit_provenance']['group_id']
+                if global_group in seen_groups or not row.get('quality_accepted') or row['num_frames'] < 240:
                     continue
                 paths = {key: str((args.dataset/source/row[value]).resolve()) for key, value in
                          [('audio_path','audio_path'), ('music_features','music_feature_path'),
@@ -94,8 +128,26 @@ def main():
                 pool.append(dict(id=source+'_'+row['sample_id'], song_id=group, split=split,
                     dataset_split=original_split, source=source, source_manifest=str(manifest),
                     original_frames=row['num_frames'], seed=42, music_start_tick=0,
-                    adapter_training_seen=False, **paths))
-    new = sample_unique(pool, args.songs-args.seen_songs, rng, set(seen_groups), set(seen_audio))
+                    adapter_training_seen=False, adapter_training_exact_task_seen=False,
+                    global_music_group_id=global_group, **paths))
+    removed = []
+    if args.repair_selection:
+        original = json.loads(args.repair_selection.read_text())
+        original = [task | metadata[task['id']] for task in original]
+        for task in original:
+            task.update(adapter_training_seen=task['global_music_group_id'] in seen_groups,
+                        adapter_training_exact_task_seen=task['id'] in seen_ids)
+        chosen, removed = retain_global_unique(original)
+    occupied_groups = seen_groups | {task['global_music_group_id'] for task in chosen}
+    occupied_audio = seen_audio | {task['audio_sha256'] for task in chosen}
+    new = sample_unique(pool, args.songs-len(chosen), rng, occupied_groups, occupied_audio)
+    cached = {}
+    if args.cache_root:
+        for path in sorted(args.cache_root.glob('cache*/tasks*.json')):
+            for task in json.loads(path.read_text()):
+                cached[task['id']] = task
+        chosen = [task | {key: cached[task['id']][key] for key in ('nominal_reference','generation_contract')}
+                  if task['id'] in cached else task for task in chosen]
     bundle = load_bundle(cfg['supermimic']['checkpoint'], 'cpu',
                          robot_asset_dir=cfg['supermimic']['robot_asset_dir'])
     output = args.output.resolve()
@@ -120,24 +172,33 @@ def main():
             nominal_requirement='must_generate_with_frozen_GENMO_no_future_dataset_motion')
     all_tasks = chosen+new
     rng.shuffle(all_tasks)
+    ready = [task for task in all_tasks if task.get('nominal_reference')]
+    pending = [task for task in all_tasks if not task.get('nominal_reference')]
     def write(name, value):
         (output/name).write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
     write('selected_tasks.json', all_tasks)
-    write('existing_tasks.json', chosen)
-    write('new_tasks.json', new)
+    write('existing_tasks.json', ready)
+    write('new_tasks.json', pending)
+    write('supplement_tasks.json', new)
+    write('deduplication_audit.json', dict(original_selection=str(args.repair_selection), removed=removed,
+        retained_before_supplement=len(chosen), supplemented=len(new), outcome_filtering=False))
     for index in range(args.shards):
-        write(f'shard_{index:02d}_tasks.json', new[index::args.shards])
+        write(f'shard_{index:02d}_tasks.json', pending[index::args.shards])
     write('selection.json', dict(seed=args.seed, requested=args.songs,
         unique_songs=len({task['song_id'] for task in all_tasks}),
+        unique_global_music_groups=len({task['global_music_group_id'] for task in all_tasks}),
         unique_audio=len({task['audio_sha256'] for task in all_tasks}),
-        adapter_seen=len(chosen), adapter_unseen=len(new),
-        eligible_seen_groups=len(seen_groups), eligible_unseen_groups=len({t['song_id'] for t in pool}),
+        adapter_seen=sum(task['adapter_training_seen'] for task in all_tasks),
+        adapter_unseen=sum(not task['adapter_training_seen'] for task in all_tasks),
+        adapter_exact_task_seen=sum(task['adapter_training_exact_task_seen'] for task in all_tasks),
+        eligible_seen_groups=len(seen_groups), eligible_unseen_groups=len({t['global_music_group_id'] for t in pool}),
         source_counts=dict(collections.Counter(task['source'] for task in all_tasks)),
         split_counts=dict(collections.Counter(task['split'] for task in all_tasks)),
-        protocol=f'stratified_random_song_groups_{len(chosen)}_adapter_seen_{len(new)}_adapter_unseen',
+        protocol='global_resplit_group_deduplication_and_seeded_supplement' if args.repair_selection
+                 else 'stratified_random_global_music_groups',
         source_config=str(args.config), generation_completed=False,
         failure_policy='keep_selected_128_no_replacement_no_silent_exclusion'))
-    print(json.dumps(dict(output=str(output), selected=len(all_tasks), need_generation=len(new)), ensure_ascii=False))
+    print(json.dumps(dict(output=str(output), selected=len(all_tasks), need_generation=len(pending)), ensure_ascii=False))
 
 
 if __name__ == '__main__':

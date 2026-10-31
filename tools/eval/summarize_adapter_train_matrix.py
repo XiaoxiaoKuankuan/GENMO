@@ -57,6 +57,8 @@ def compare_reports(baselines, candidates, expected_songs=64, allowed_splits=('t
     if any(len(r['episodes']) != expected_songs or len({e['song'] for e in r['episodes']}) != expected_songs
            for r in reports):
         raise ValueError('不能以重复歌曲充当独立样本')
+    if any(len({e.get('global_music_group_id', e['song']) for e in r['episodes']}) != expected_songs for r in reports):
+        raise ValueError('不能以同一全局音乐组的不同裁剪充当独立歌曲')
     rows = []
     for task in sorted(ids):
         episodes = [i[task] for i in indexes]
@@ -82,6 +84,7 @@ def compare_reports(baselines, candidates, expected_songs=64, allowed_splits=('t
                 change_percent=100*(b/a-1) if a else None,
                 baseline_repeat_range=max(before)-min(before), candidate_repeat_range=max(after)-min(after))
         rows.append(dict(task=task, song=episodes[0]['song'], split=episodes[0]['split'],
+            global_music_group_id=episodes[0].get('global_music_group_id', episodes[0]['song']),
             source=episodes[0].get('source', 'unknown'),
             adapter_training_seen=episodes[0].get('adapter_training_seen', episodes[0]['split']=='train'),
             planned_seconds=episodes[0]['planned_steps']*.02,

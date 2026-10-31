@@ -77,3 +77,27 @@ def test_p90_nearest_rank():
         baseline=1., adapter=float(i), delta=float(i-1), baseline_repeat_range=0., candidate_repeat_range=0.)})
         for i in range(1,11)]
     assert aggregate(rows)['metrics']['jerk_rms']['adapter_p90'] == 9.
+
+
+def test_global_music_dedup_keeps_failure_not_outcome(tmp_path):
+    m = module('prepare_random_adapter_evaluation')
+    tasks = [dict(id=str(i), song_id=str(i), global_music_group_id=group, audio_sha256=str(i),
+                  generation_failed=i==0) for i,group in enumerate(['same','same','different'])]
+    kept, removed = m.retain_global_unique(tasks)
+    assert [t['id'] for t in kept] == ['0','2']
+    assert kept[0]['generation_failed']
+    assert removed[0]['task'] == '1'
+    for task in tasks:
+        p = tmp_path/(task['id']+'.wav');p.write_bytes(task['id'].encode());task['audio_path']=str(p)
+    assert len(m.sample_unique(tasks, 2, random.Random(42), set(), set()))==2
+    with pytest.raises(ValueError):
+        m.sample_unique(tasks, 3, random.Random(42), set(), set())
+
+
+def test_summary_rejects_different_crops_same_global_music():
+    compare = module('summarize_adapter_train_matrix').compare_reports
+    zero = report()
+    for e in zero['episodes']:
+        e['global_music_group_id'] = 'same'
+    with pytest.raises(ValueError, match='全局音乐组'):
+        compare([zero], [zero], expected_songs=128, allowed_splits=['train','evaluation'])
