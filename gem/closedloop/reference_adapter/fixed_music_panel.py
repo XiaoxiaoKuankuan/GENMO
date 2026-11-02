@@ -5,13 +5,50 @@
 逐歌曲报告保留原始数据划分、全局音乐身份和Adapter已见标签。混合总体用于主要
 质量报告，Adapter未见音乐子集用于本轮开发集选模；它不是未使用过的独立测试集。
 两次零Adapter回放先分别保存原始报告，再等权平均汇总标量，不合成虚假的轨迹或
-episode。该文件只依赖标准库，方便用合成数据回归，不能替代真实动力学验证。
+episode。历史Adapter基线仅在独立评价进程临时换权重，异常时同样恢复候选参数；
+只读检查点SHA和完整物理身份参与缓存校验，不接触训练优化器、WM或Replay。
 """
 
 import hashlib
 import json
 from pathlib import Path
 import statistics
+from contextlib import contextmanager
+
+
+def adapter_baseline_identity(settings):
+    """绑定明确的历史检查点内容，防止同名路径换模型后静默复用结果。"""
+    path = Path(settings['checkpoint'])
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(8*1024*1024), b''):
+            digest.update(block)
+    actual = digest.hexdigest()
+    if actual != settings['checkpoint_sha256']:
+        raise ValueError('历史Adapter基线检查点SHA不匹配')
+    return dict(label=settings['label'], checkpoint=str(path), checkpoint_sha256=actual,
+                source_adapter_updates=settings['source_adapter_updates'])
+
+
+def validate_adapter_baseline_cache(report, identity, metadata, *, num_envs, max_steps, mdp_contract):
+    if (report.get('adapter_baseline_identity') != identity
+            or report.get('num_envs') != num_envs or report.get('max_steps') != max_steps
+            or report.get('sm_mdp_contract') != mdp_contract
+            or any(report.get(key) != value for key, value in metadata.items())):
+        raise ValueError('历史Adapter基线的模型、音乐、预算或物理条件不同，请使用新运行目录')
+
+
+@contextmanager
+def temporary_adapter_checkpoint(adapter, checkpoint):
+    """连同buffer原位恢复，保留Parameter身份；加载/评价失败也不污染候选模型。"""
+    import torch
+    original = {key: value.detach().clone() for key, value in adapter.state_dict().items()}
+    try:
+        snapshot = torch.load(checkpoint, map_location='cpu', weights_only=False, mmap=True)
+        adapter.load_state_dict(snapshot['adapter'], strict=True)
+        yield
+    finally:
+        adapter.load_state_dict(original, strict=True)
 
 
 def panel_metadata(settings, tasks):

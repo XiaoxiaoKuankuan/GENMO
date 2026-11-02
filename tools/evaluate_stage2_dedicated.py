@@ -17,11 +17,12 @@ import sys
 import time
 
 
-def run_fixed_panel(collector, tasks, metadata, args, out):
+def run_fixed_panel(collector, tasks, metadata, args, out, adapter_baseline=None):
     """复用真实评价核，不更新任何权重；所有分组取自同一次完整混合批量回放。"""
     from gem.closedloop.reference_adapter.application import seed_all
     from gem.closedloop.reference_adapter.fixed_music_panel import (
-        annotate_panel_report, panel_subset, mean_baseline_reports)
+        annotate_panel_report, panel_subset, mean_baseline_reports, adapter_baseline_identity,
+        validate_adapter_baseline_cache, temporary_adapter_checkpoint)
     from gem.closedloop.reference_adapter.paired_evaluation import evaluate_fixed, paired_comparison
     from gem.closedloop.reference_adapter.rewards import sm_mdp_contract
     sys.path.insert(0, str(Path(__file__).resolve().parent/'eval'))
@@ -55,6 +56,20 @@ def run_fixed_panel(collector, tasks, metadata, args, out):
             save(path, zero)
         baselines.append(zero)
     before = collector.control.bundle.frozen_snapshot()
+    historical = None
+    if adapter_baseline:
+        identity = adapter_baseline_identity(adapter_baseline)
+        path = out/f'panel_{scope}_adapter_baseline_dedicated{args.num_envs}.json'
+        if path.exists():
+            historical = json.loads(path.read_text())
+            validate_adapter_baseline_cache(historical, identity, metadata, num_envs=args.num_envs,
+                max_steps=args.max_steps, mdp_contract=sm_mdp_contract(collector.control.runtime))
+        else:
+            with temporary_adapter_checkpoint(collector.control.adapter, identity['checkpoint']):
+                historical = evaluate(False)
+            historical.update(adapter_updates=identity['source_adapter_updates'],
+                              adapter_baseline_identity=identity)
+            save(path, historical)
     for repeat in range(args.repeat_candidate):
         report = evaluate(False)
         report['repeat_index'] = repeat
@@ -71,6 +86,14 @@ def run_fixed_panel(collector, tasks, metadata, args, out):
                 key: current[key]-baseline[key] if current[key] is not None and baseline[key] is not None else None
                 for key in ('completion_rate', 'mean_tracking', 'mean_full_horizon_tracking',
                             'mean_root_position_rmse_m', 'mean_jerk_rms', 'mean_beat_f1')}
+            if historical is not None:
+                old = panel_subset(historical, seen)
+                current['adapter_baseline_identity'] = identity
+                current['adapter_baseline_metrics'] = {
+                    key: value for key, value in old.items()
+                    if key.startswith('mean_') or key == 'completion_rate'}
+                current['paired_adapter_baseline'] = paired_comparison(old, current)
+                current['paired_adapter_baseline']['baseline_label'] = identity['label']
             save(out/f'{split}_{args.adapter_updates:06d}{suffix}.json', current)
         if args.max_steps is None:
             comparison = compare_reports(baselines, [report], expected_songs=len(tasks),
@@ -146,7 +169,7 @@ def main():
         env = StreamingPhysicalEnv(sim_cfg, args.num_envs, control.bundle)
         collector = VectorCollector(env, control, seed=42)
         if panel:
-            run_fixed_panel(collector, tasks, metadata, args, out)
+            run_fixed_panel(collector, tasks, metadata, args, out, panel.get('adapter_baseline'))
             (out/f'dedicated_timing_{args.adapter_updates:06d}.json').write_text(json.dumps(dict(
                 seconds=time.perf_counter()-begin, actual_physics_envs=args.num_envs,
                 training_physics_advanced=False, physical_transitions=collector.real_transitions,

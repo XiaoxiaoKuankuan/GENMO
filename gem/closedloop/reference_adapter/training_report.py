@@ -1,7 +1,7 @@
 """八个独立训练任务的只读自动效果汇总，不参与任何模型更新或选择。
 
 各进程只读取同一正式根目录下已经完成的状态、配置和物理评价JSON，分别保留
-短片段与完整歌曲结果。只用各自专用零Adapter基线计算变化，附带评价点、真实
+短片段与完整歌曲结果。分别对专用零Adapter及显式历史Adapter基线计算变化，附带评价点、真实
 环境数和进程身份；未完成整歌时明确为空。共享的只是报告，不共享策略、WM、
 Replay、优化器或随机流，也不以报告好坏阻止训练。并发写入用独立临时名原子替换。
 """
@@ -59,6 +59,12 @@ def update_report(root):
                 reference_generation_failures=report.get('reference_generation_failures', []),
                 report_population=report.get('report_population', 'dataset_evaluation'),
                 selection_population=report.get('selection_population', 'validation_only'))
+            if 'adapter_baseline_metrics' in report:
+                historical = report['adapter_baseline_metrics']
+                info.update(adapter_baseline_identity=report['adapter_baseline_identity'],
+                    adapter_baseline_metrics=historical,
+                    change_percent_vs_adapter_baseline={key: 100*(report[key]/historical[key]-1)
+                        if historical.get(key) and report.get(key) is not None else None for key in keys})
             row['latest_full_song' if report['full_song_evaluation'] else 'latest_prefix'] = info
         result['runs'].append(row)
     temp = root/f'comparison_latest.{os.getpid()}.tmp'
