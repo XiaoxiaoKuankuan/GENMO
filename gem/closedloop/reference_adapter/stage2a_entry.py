@@ -93,7 +93,8 @@ def main():
     control.soft_joint_limit_cost = settings.get('soft_joint_limit_cost', False)
     control.soft_imagination_continuation = False
     control.relative_critic_features = True
-    critic = GroupNormalizedCritic(2835, control.spec).cuda()
+    from .features import critic_dimension
+    critic = GroupNormalizedCritic(critic_dimension(control.adapter), control.spec).cuda()
     critic.requires_grad_(False)
     optimizers = dict(adapter=torch.optim.Adam(control.adapter.parameters(), lr=train['adapter_lr']),
         wm=torch.optim.Adam(engine.dynamics.model.net.parameters(), lr=train['wm_lr']),

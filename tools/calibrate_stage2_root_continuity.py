@@ -49,7 +49,8 @@ def main():
     control.adapter.disable_root_xy = True
     control.soft_joint_limit_cost = False
     control.sm_soft_termination_only = True
-    critic = Critic(2835).cuda().requires_grad_(False)
+    from gem.closedloop.reference_adapter.features import critic_dimension
+    critic = Critic(critic_dimension(control.adapter)).cuda().requires_grad_(False)
     calibration = json.loads(Path(cfg['alternating']['calibration']).read_text())
     precision_weight = cfg['alternating']['precision']['weight']
     frozen = control.bundle.frozen_snapshot()

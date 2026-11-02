@@ -22,7 +22,7 @@ torch.set_num_threads(1)
 def assets():
     from supermimic.bridge.bundle import load_bundle
     from supermimic.bridge.runtime import SuperMimicRuntime
-    checkpoint = os.getenv("SM_BRIDGE_CHECKPOINT", "/home/weili/supermimic_vibed/logs/bumi3_seven_filtered_v1/ckpt_024000.pt")
+    checkpoint = os.getenv("SM_BRIDGE_CHECKPOINT", "/home/weili/supermimic_vibed/logs/bumi3_4340_restart_h32/ckpt_024000.pt")
     asset_dir = os.getenv("SM_ROBOT_ASSET_DIR", "/home/weili/supermimic_vibed/data/bumi3_4340/robot")
     if not Path(checkpoint).is_file() or not (Path(asset_dir)/"bumi3_4340.xml").is_file():
         pytest.skip("需要真实SM编号checkpoint和MJCF资产")
@@ -63,8 +63,8 @@ def system(assets):
     step = ControlStep(adapter, bundle, runtime, reward)
     current, _, _ = nominal_window(nominal, 0, runtime.kin)
     state = flatten_state((current.root_p, current.root_R, current.root_v, current.root_w, current.q, current.qd))
-    xi = torch.zeros(1, 25)
-    xi[:, 0] = .75
+    from supermimic.physics_context import nominal_context
+    xi = nominal_context(bundle.spec)
     z = initial_state(dict(state=state, xi=xi, previous_action=torch.zeros(1, 21)), nominal, audio, step,
                       episode_id="tensor_fixture", song_id="fixture_song")
     dynamics = DynamicsModel(bundle)

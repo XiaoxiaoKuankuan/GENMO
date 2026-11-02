@@ -147,7 +147,8 @@ def main():
                     raise ValueError('独立闭环H8/H16/H32审计需要明确候选checkpoint')
                 from gem.closedloop.reference_adapter.parameter_audit import parameter_update_audit
                 from gem.closedloop.reference_adapter.vector_learning import GroupNormalizedCritic
-                critic = GroupNormalizedCritic(2835, control.spec).cuda()
+                from gem.closedloop.reference_adapter.features import critic_dimension
+                critic = GroupNormalizedCritic(critic_dimension(control.adapter), control.spec).cuda()
                 criteria = json.loads(Path(cfg['physical_criteria']).read_text()) | cfg['training']['wm_quality']
                 result = parameter_update_audit(collector, control, engine.dynamics, critic, before,
                     horizons=tuple(args.horizons), criteria=criteria)

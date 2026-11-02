@@ -96,7 +96,7 @@ def test_mixture_exploration_keeps_task_rng_and_executed_action_identity(system)
 
 def test_rejected_imagination_microbatch_does_not_discard_valid_update(system, monkeypatch):
     engine, control, z = setup(system)
-    critic = Critic(2835)
+    critic = Critic(2929)
     optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5)
     original = control.propose
     calls = []
@@ -115,7 +115,7 @@ def test_rejected_imagination_microbatch_does_not_discard_valid_update(system, m
 
 def test_all_projection_rejections_preserve_parameters_and_optimizer(system, monkeypatch):
     engine, control, z = setup(system)
-    critic = Critic(2835)
+    critic = Critic(2929)
     optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5)
     previous = [p.detach().clone() for p in control.adapter.parameters()]
     def propose(state, **kwargs):
@@ -143,7 +143,7 @@ def test_large_microbatch_retries_good_environments_without_dropping_them(system
             raise numerical_failure(torch.tensor([True, False]))
         return original(state, **kwargs)
     monkeypatch.setattr(control, 'propose', propose)
-    report, _ = policy_update(control, engine.dynamics, Critic(2835), optimizer, z, 2,
+    report, _ = policy_update(control, engine.dynamics, Critic(2929), optimizer, z, 2,
                              terminal_value=False, microbatch=2)
     assert report['accepted_samples'] == 1 and report['rejected_samples'] == 1
     assert calls[0] == 2 and calls[1] == 1
@@ -161,7 +161,7 @@ def test_nonfinite_loss_with_finite_gradient_never_executes_Adam(system, monkeyp
                     survival=score*0, projection_statistics={}, gradient_probe=None)
     monkeypatch.setattr(learning, 'imagine', bad_trajectory)
     with pytest.raises(FloatingPointError, match='未执行Adam'):
-        policy_update(control, engine.dynamics, Critic(2835), optimizer, z, 2,
+        policy_update(control, engine.dynamics, Critic(2929), optimizer, z, 2,
                       terminal_value=False, microbatch=2)
     assert not optimizer.state
     for a, b in zip(before, control.adapter.parameters()):
@@ -171,7 +171,7 @@ def test_nonfinite_loss_with_finite_gradient_never_executes_Adam(system, monkeyp
 def test_update_diagnostics_report_projection_and_first_frame_gradients(system):
     engine, control, z = setup(system)
     optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5)
-    report, _ = policy_update(control, engine.dynamics, Critic(2835), optimizer, z, 2,
+    report, _ = policy_update(control, engine.dynamics, Critic(2929), optimizer, z, 2,
                              terminal_value=False, microbatch=1, diagnostics=True)
     gradient = report['projection_gradient']
     assert gradient['raw_residual_norm'] > 0 and gradient['residual_norm'] > 0
@@ -260,7 +260,7 @@ def test_complete_checkpoint_preserves_new_rng_replay_and_disabled_critic(system
     from gem.closedloop.reference_adapter.alternating_learning import enable_wm_normalization
     engine, control, z = setup(system)
     enable_wm_normalization(engine.dynamics)
-    critic = Critic(2835)
+    critic = Critic(2929)
     critic.requires_grad_(False)
     modules = dict(adapter=control.adapter, wm=engine.dynamics.model.net, critic=critic)
     optimizers = {key: torch.optim.Adam(module.parameters(), lr=3e-5) for key, module in modules.items()}

@@ -162,8 +162,8 @@ def main(kind):
         results = []
         for task in tasks:
             initial, nominal, audio, _ = task_assets(task, engine, args.torch_device)
-            xi = initial.new_zeros(1, 25)
-            xi[:, 0] = .75
+            from supermimic.physics_context import nominal_context
+            xi = nominal_context(engine.step.bundle.spec, device=initial.device)
             z = initial_state(dict(state=initial, xi=xi, previous_action=initial.new_zeros(1, 21)), nominal, audio, engine.step,
                               episode_id="numerical", song_id=task["song_id"], split=task["split"])
             results.append(dict(task=task["id"], report=numerical_audit(engine, z)))

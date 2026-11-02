@@ -88,7 +88,7 @@ def test_compact_replay_reset_mc_and_restore():
     replay = VectorReplay(80, 2, 'cpu')
     for t in range(25):
         frame = torch.tensor([5+t, 50+t])
-        z = dict(state=torch.ones(2, 55)*t, xi=torch.ones(2, 25), frame=frame,
+        z = dict(state=torch.ones(2, 55)*t, xi=torch.ones(2, 119), frame=frame,
                  start_frame=torch.tensor([5, 50]), episode=torch.tensor([10, 11]), song=torch.tensor([0, 1]))
         done = torch.tensor([t == 24, t == 24])
         replay.add(z, torch.zeros(2, 21), z['state']+1, torch.ones(2), (~done).float(), done,
@@ -106,7 +106,7 @@ def test_compact_replay_reset_mc_and_restore():
     # 环形头被淘汰后不能把剩余尾巴变成完整MC。
     truncated = VectorReplay(40, 2, 'cpu')
     for t in range(25):
-        z = dict(state=torch.zeros(2, 55), xi=torch.zeros(2, 25), frame=torch.full((2,), t),
+        z = dict(state=torch.zeros(2, 55), xi=torch.zeros(2, 119), frame=torch.full((2,), t),
                  start_frame=torch.zeros(2, dtype=torch.long), episode=torch.zeros(2, dtype=torch.long), song=torch.zeros(2, dtype=torch.long))
         done = torch.full((2,), t == 24)
         truncated.add(z, torch.zeros(2, 21), z['state'], torch.ones(2), (~done).float(), done, done, 0)
@@ -116,8 +116,8 @@ def test_compact_replay_reset_mc_and_restore():
 
 def test_critic_training_only_group_normalization(system):
     engine, _ = system
-    critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec)
-    x, y = torch.randn(128, 2835), torch.randn(128)*2+6
+    critic = GroupNormalizedCritic(2929, engine.step.adapter.input_spec)
+    x, y = torch.randn(128, 2929), torch.randn(128)*2+6
     with pytest.raises(ValueError):
         critic.fit_normalization(x, y, split='validation')
     critic.fit_normalization(x, y, split='train')
@@ -137,7 +137,7 @@ def test_batched_imagination_and_dense_update(system):
     engine, old = system
     old = replace(old, audio=AudioTrack.from_features(old.audio.features[:, :-10]))
     engine, old, control, z = vector((engine, old), count=4)
-    critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec)
+    critic = GroupNormalizedCritic(2929, engine.step.adapter.input_spec)
     snapshot = engine.step.bundle.frozen_snapshot()
     with engine.dynamics.adapter_phase(), frozen_parameters(critic):
         batch = rollout(control, engine.dynamics, critic, z, 8, terminal_value=False)
@@ -161,7 +161,7 @@ def test_vector_complete_checkpoint_restores_optimizers(system, tmp_path):
     engine, old = system
     old = replace(old, audio=AudioTrack.from_features(old.audio.features[:, :-10]))
     engine, old, control, z = vector((engine, old), count=2)
-    critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec)
+    critic = GroupNormalizedCritic(2929, engine.step.adapter.input_spec)
     modules = dict(adapter=engine.step.adapter, critic=critic, wm=engine.dynamics.model.net)
     optimizers = {k:torch.optim.Adam(m.parameters(), lr=1e-4) for k,m in modules.items()}
     # 这里只验证三个优化器状态序列化，不称这些代数更新为真实训练/物理验收。

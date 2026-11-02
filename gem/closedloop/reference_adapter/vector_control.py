@@ -9,7 +9,7 @@
 from .timing import scope, phase
 import torch
 
-from supermimic.mdp import unflatten_state, normalize_xi
+from supermimic.mdp import unflatten_state, normalize_xi, clip_action
 from supermimic.motion import ReferenceBatch, select_reference, goal_from_reference
 from supermimic.rotations import yaw_mat, mat_to_6d, so3_exp, so3_log
 from .reference_constraints import constrain_plan, reference_kinematics
@@ -146,7 +146,7 @@ class VectorControl:
                 return self.bundle.act(history, target)
         action = act(z['history'], goal)
         if action_offset is not None:
-            action = action+action_offset
+            action = clip_action(action+action_offset)
         result = dict(residual=residual, raw_residual=raw_residual, current=current, future=future, goal=goal, halo=halo, action=action,
                       nominal_rotation=nominal_pose[1], nominal_q=nominal_pose[2])
         return result

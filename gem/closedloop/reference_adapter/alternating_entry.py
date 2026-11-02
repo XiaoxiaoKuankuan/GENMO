@@ -347,7 +347,8 @@ def main():
         control.sm_soft_termination_only = True
         control.relative_critic_features = True
         value_bound = .02*sum(sm_mdp_contract(control.runtime)['weights'].values())/(1-train['gamma_per_control'])
-        critic = (AlternatingCritic(2835, value_bound) if settings['critic_enabled'] else Critic(2835)).cuda()
+        from .features import critic_dimension
+        critic = (AlternatingCritic(critic_dimension(control.adapter), value_bound) if settings['critic_enabled'] else Critic(critic_dimension(control.adapter))).cuda()
         state['critic_value_upper_bound'] = value_bound if settings['critic_enabled'] else None
         critic.requires_grad_(settings['critic_enabled'])
         optimizers = dict(adapter=torch.optim.Adam(control.adapter.parameters(), lr=train['adapter_lr'], betas=(.9, .95)),
@@ -368,9 +369,10 @@ def main():
         if settings.get('compile_components', False):
             from .compute import compile_components
             compile_components(control, engine.dynamics)
-        sim_cfg = make_sim('cuda:0', args)
+        physical_training = settings.get('physics_domain_randomization', False)
+        sim_cfg = make_sim('cuda:0', args, eval_mode=not physical_training, spec=engine.step.bundle.spec)
         with launch_simulation(sim_cfg, args):
-            env = StreamingPhysicalEnv(sim_cfg, vector['num_envs'], engine.step.bundle)
+            env = StreamingPhysicalEnv(sim_cfg, vector['num_envs'], engine.step.bundle, eval_mode=not physical_training)
             collector = VectorCollector(env, control, seed=vector['sampling_seed'])
             collector.uniform_start = True
             collector.projection_recovery_attempts = 0

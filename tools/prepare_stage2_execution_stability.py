@@ -143,7 +143,8 @@ def main():
     control.adapter.load_state_dict(original_adapter)
     metadata['foot_proxy_usable'] = all(x['precision'] >= .85 and x['recall'] >= .02
                                        for x in metadata['physical_checks'].values())
-    critic = Critic(2835).cuda().requires_grad_(False)
+    from gem.closedloop.reference_adapter.features import critic_dimension
+    critic = Critic(critic_dimension(control.adapter)).cuda().requires_grad_(False)
     parameters = tuple(control.adapter.parameters())
     names = ('sm_tracking','execution_jerk','stance_foot_velocity')
     gradients = {name:[torch.zeros_like(p) for p in parameters] for name in names}

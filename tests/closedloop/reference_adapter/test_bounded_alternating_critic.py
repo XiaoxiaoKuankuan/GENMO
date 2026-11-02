@@ -56,7 +56,7 @@ def test_real_TD_anchor_uses_true_terminal_and_detached_labels():
 
 def test_H64_critic_BPTT_and_combined_update_freeze_other_networks(system):
     engine, control, z = setup(system, count=1)
-    critic = AlternatingCritic(2835, 12.4)
+    critic = AlternatingCritic(2929, 12.4)
     with torch.no_grad():
         critic.net[-1].weight.normal_(std=.001)
         critic.norm.update(control.critic_features(z))
@@ -65,7 +65,7 @@ def test_H64_critic_BPTT_and_combined_update_freeze_other_networks(system):
     report, trajectory = policy_update(control, engine.dynamics, critic, optimizer, z, 64,
                                        terminal_value=True, microbatch=1)
     assert report['optimizer_step_completed'] and report['parameter_delta'] > 0
-    assert trajectory['features'].shape == (65, 1, 2835)
+    assert trajectory['features'].shape == (65, 1, 2929)
     for key, value in critic.state_dict().items():
         torch.testing.assert_close(value, before[key], atol=0, rtol=0)
     assert all(p.grad is None for p in critic.parameters())

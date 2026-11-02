@@ -238,7 +238,8 @@ def calibrate_gradient_weights(control, dynamics, starts, *, microbatch=32, hori
     if not bool(torch.isin(starts['song'], control.bank.by_split['train']).all()):
         raise ValueError('精度梯度标定只能使用训练歌曲')
     parameters = tuple(control.adapter.parameters())
-    critic = GroupNormalizedCritic(2835, control.spec).to(starts['state'].device)
+    from .features import critic_dimension
+    critic = GroupNormalizedCritic(critic_dimension(control.adapter), control.spec).to(starts['state'].device)
     names = ('sm', 'precision')
     gradients = {k: [torch.zeros_like(p) for p in parameters] for k in names}
     values = dict.fromkeys(names, 0.)

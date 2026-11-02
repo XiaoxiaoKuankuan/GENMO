@@ -15,6 +15,7 @@ class ReferenceAdapter(nn.Module):
     def __init__(self, spec):
         super().__init__()
         self.input_spec = InputSpec(tuple(spec.joint_names))
+        self.physics_context_dim = spec.xi_dim  # 只供训练Critic布局；不加入Adapter输入或权重。
         self.net = nn.Sequential(nn.Linear(self.input_spec.dimension, 512), nn.SiLU(),
                                  nn.Linear(512, 512), nn.SiLU(), nn.Linear(512, 256), nn.SiLU(),
                                  nn.Linear(256, 270))

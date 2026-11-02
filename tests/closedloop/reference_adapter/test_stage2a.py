@@ -110,7 +110,7 @@ def test_removed_acceleration_cost_preserves_real_SM_execution_gradients(system)
     for key in off:
         torch.testing.assert_close(off[key], on[key], atol=0, rtol=0)
     control.projection = disabled
-    critic = Critic(2835)
+    critic = Critic(2929)
     with engine.dynamics.adapter_phase(), frozen_parameters(critic):
         trajectory = imagine(control, engine.dynamics, critic, z, 2, terminal_value=False)
         gradient, = torch.autograd.grad(trajectory['objective'].mean(), control.adapter.net[-1].bias)
@@ -222,7 +222,7 @@ def test_WM_BPTT_precision_preserves_frozen_parameters(system):
     control.constraint_beta = 1
     control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds)
     control.precision = PrecisionObjective()
-    critic = GroupNormalizedCritic(2835, control.spec)
+    critic = GroupNormalizedCritic(2929, control.spec)
     optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5)
     frozen = engine.step.bundle.frozen_snapshot()
     old_wm = {k: v.clone() for k, v in engine.dynamics.state_dict().items()}

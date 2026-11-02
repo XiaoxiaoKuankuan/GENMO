@@ -163,7 +163,7 @@ def main():
     calibration = json.loads(Path(cfg['alternating']['calibration']).read_text())
     control.precision = PrecisionObjective(calibration['scales'], **cfg['alternating']['precision'])
     compile_kinematics(engine, bank)
-    sim_cfg = make_sim('cuda:0', launcher)
+    sim_cfg = make_sim('cuda:0', launcher, eval_mode=True, spec=control.bundle.spec)
     begin = time.perf_counter()
     with launch_simulation(sim_cfg, launcher):
         env = StreamingPhysicalEnv(sim_cfg, args.num_envs, control.bundle)

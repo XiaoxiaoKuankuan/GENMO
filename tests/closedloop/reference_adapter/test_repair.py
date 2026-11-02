@@ -185,7 +185,7 @@ def test_critic_relative_position_and_discount_clock_do_not_leak_to_adapter(syst
     control.relative_critic_features = True
     original_adapter = control.packed(control.fields(z))
     features = control.critic_features(z)
-    assert features.shape == (4, 2835)
+    assert features.shape == (4, 2929)
     torch.testing.assert_close(features[:, 2654:2657], z['state'][:, :3]-control.bank.ref(z['song'], z['frame']).root_p)
     shifted = dict(z, state=z['state'].clone())
     shifted['state'][:, 0] += 1

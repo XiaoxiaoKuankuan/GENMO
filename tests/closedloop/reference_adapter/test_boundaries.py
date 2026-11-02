@@ -108,4 +108,4 @@ def test_critic_retains_absolute_nominal_root_for_original_reward(system):
                       current_pose=replace(z.current_pose, p=z.current_pose.p+shift))
     after = critic_features(shifted, engine.step.adapter, engine.step.bundle, engine.step.runtime.kin)
     assert (after[0, -57]-before[0, -57]).item() == pytest.approx(.3)
-    assert before.shape[-1] == 2835
+    assert before.shape[-1] == 2929

@@ -101,7 +101,7 @@ class AdapterState:
 
     def validate(self):
         b = len(self.executed_state)
-        for name, shape in (("executed_state", (b, 55)), ("xi", (b, 25)),
+        for name, shape in (("executed_state", (b, 55)), ("xi", (b, 119)),
                             ("previous_action", (b, 21)), ("control_history", (b, 10, 75))):
             x = getattr(self, name)
             if x.shape != shape or not torch.isfinite(x).all():

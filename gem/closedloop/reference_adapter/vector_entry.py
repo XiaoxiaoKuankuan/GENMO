@@ -56,7 +56,8 @@ def numerical_check(engine, bank, control):
     from .collector import initial_state
     from .reference import reconstruct
     task, initial, nominal, audio = bank.tasks[0], bank.initial[:1], bank.nominal[0], bank.audio[0]
-    xi = initial.new_zeros(1, 25); xi[:, 0] = 1
+    from supermimic.physics_context import nominal_context
+    xi = nominal_context(engine.step.bundle.spec, device=initial.device)
     observed = dict(state=initial, xi=xi, previous_action=initial.new_zeros(1, 21))
     old = initial_state(observed, nominal, audio, engine.step, episode_id='numerical', song_id=task['song_id'])
     z = control.initial(observed, torch.zeros(1, device=initial.device, dtype=torch.long),
@@ -163,7 +164,8 @@ def main():
     tasks = read_tasks(cfg['tasks'])
     bank = VectorBank(tasks, engine, 'cuda:0')
     control = VectorControl(engine, bank)
-    critic = GroupNormalizedCritic(2835, engine.step.adapter.input_spec).cuda()
+    from .features import critic_dimension
+    critic = GroupNormalizedCritic(critic_dimension(engine.step.adapter), engine.step.adapter.input_spec).cuda()
     numerical = numerical_check(engine, bank, control)
     json_write(output/'numerical.json', numerical)
     if args.mode == 'numerical':

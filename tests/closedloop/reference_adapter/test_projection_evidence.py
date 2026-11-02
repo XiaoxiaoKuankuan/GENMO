@@ -24,7 +24,7 @@ def test_partial_rejection_saved_in_regular_full_checkpoint_and_reproducible(sys
     from gem.closedloop.reference_adapter import so3_projection
     engine, control, z = setup(system)
     control.projection = ReferenceProjection(control.bundle.spec, control.adapter.bounds)
-    critic = Critic(2835)
+    critic = Critic(2929)
     optimizers = dict(adapter=torch.optim.Adam(control.adapter.parameters(), lr=3e-5),
         wm=torch.optim.Adam(engine.dynamics.model.net.parameters(), lr=3e-5),
         critic=torch.optim.Adam(critic.parameters(), lr=1e-4))
@@ -97,7 +97,7 @@ def test_certificate_rejection_retains_projection_grad_mode_outside_no_grad(syst
             result['feasible'] = torch.tensor([False])
         return result
     monkeypatch.setattr(control, 'constraint_certificate', certificate)
-    report, _ = policy_update(control, engine.dynamics, Critic(2835),
+    report, _ = policy_update(control, engine.dynamics, Critic(2929),
         torch.optim.Adam(control.adapter.parameters(), lr=3e-5), z, 1,
         terminal_value=False, microbatch=1)
     assert report['accepted_samples'] == report['rejected_samples'] == 1

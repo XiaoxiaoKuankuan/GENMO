@@ -63,7 +63,9 @@ class VectorCollector:
             qd = qd+scale*5*noise(21)
             R = R@so3_exp(scale*1.5*noise(3))
             p = p+torch.cat((scale*noise(2), .035*noise(1)), -1)
-            v = v+scale*3*noise(3)
+            dr = self.control.bundle.spec.domain_randomization
+            if dr is None or dr.reset_root_velocity_noise:
+                v = v+scale*3*noise(3)
             x = flatten_state((p, R, v, w, q, qd))
         return x
 

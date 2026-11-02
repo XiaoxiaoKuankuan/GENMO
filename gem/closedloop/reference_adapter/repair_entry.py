@@ -71,7 +71,8 @@ def main():
     tasks = read_tasks(cfg['tasks'])
     bank = VectorBank(tasks, engine, 'cuda:0')
     control = VectorControl(engine, bank)
-    critic = GroupNormalizedCritic(2835, control.spec).cuda()
+    from .features import critic_dimension
+    critic = GroupNormalizedCritic(critic_dimension(control.adapter), control.spec).cuda()
     # 新约束前先证明优化后的Goal/Actor/原SM梯度仍等价；不会修改网络。
     json_write(output/'numerical_legacy_contract.json', numerical_check(engine, bank, control))
     control.adapter.disable_root_xy = True

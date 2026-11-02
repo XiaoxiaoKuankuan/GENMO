@@ -25,7 +25,8 @@ def test_lambda_returns_terminal_vs_truncation():
     assert not terminal.requires_grad
 
 
-@pytest.mark.parametrize("horizon", [8, 16])
+# 新checkpoint在该合成初态的前8步没有非零音乐事件；覆盖完整事件窗口后检验导数。
+@pytest.mark.parametrize("horizon", [16, 32])
 def test_real_weights_bptt_isolated_input_gradients(system, horizon):
     engine, z = system
     engine.bptt_steps = horizon
@@ -52,7 +53,7 @@ def test_real_weights_bptt_isolated_input_gradients(system, horizon):
 @pytest.mark.parametrize("component", ["music", "execution"])
 def test_adapter_music_only_finite_difference_and_detach_negative(system, component):
     engine, z = system
-    engine.bptt_steps = 8
+    engine.bptt_steps = 16 if component == "music" else 8
     bias = engine.step.adapter.net[-1].bias
     with engine.dynamics.adapter_phase(), frozen_parameters(engine.critic):
         def objective():
@@ -173,7 +174,7 @@ def test_full_checkpoint_optimizers_rng_music_and_resume(system, tmp_path, monke
 
 def test_music_only_action_finite_difference(system):
     engine, z = system
-    engine.bptt_steps = 8
+    engine.bptt_steps = 16
     original_step = engine.dynamics.step
     offset = torch.zeros(1, 21, requires_grad=True)
     calls = 0

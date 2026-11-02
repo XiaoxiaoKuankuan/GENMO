@@ -82,4 +82,4 @@ def critic_features(z, adapter, bundle, kin):
 
 
 def critic_dimension(adapter):
-    return adapter.input_spec.dimension + 55 + 25 + 21 + 9 + 8 + 6 + 57
+    return adapter.input_spec.dimension + 55 + adapter.physics_context_dim + 21 + 9 + 8 + 6 + 57

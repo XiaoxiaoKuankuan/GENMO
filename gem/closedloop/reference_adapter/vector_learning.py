@@ -31,7 +31,8 @@ class GroupNormalizedCritic(nn.Module):
         import math
         cursor = 0
         fields = [(f.name, math.prod(f.shape)) for f in input_spec.fields]
-        fields += [('physical_state', 55), ('xi', 25), ('previous_action', 21), ('heading', 9),
+        xi_width = dimension-input_spec.dimension-55-21-9-8-6-57
+        fields += [('physical_state', 55), ('xi', xi_width), ('previous_action', 21), ('heading', 9),
                    ('clock', 8), ('fixed_scheduling', 6), ('nominal_current', 57)]
         for name, width in fields:
             self.groups.append((name, cursor, cursor+width)); cursor += width

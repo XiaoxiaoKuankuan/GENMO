@@ -198,7 +198,8 @@ def main():
     scales=json.loads(Path(cfg['stage2a']['calibration']).read_text())['scales']
     control.precision=PrecisionObjective(scales,**cfg['stage2a']['precision'])
     control.soft_joint_limit_cost=False;control.soft_imagination_continuation=False
-    critic=GroupNormalizedCritic(2835,control.spec).cuda();critic.requires_grad_(False)
+    from .features import critic_dimension
+    critic=GroupNormalizedCritic(critic_dimension(control.adapter),control.spec).cuda();critic.requires_grad_(False)
     data=torch.load(args.data,map_location='cuda:0',weights_only=False)
     replay=ReferenceResponseReplay();replay.load_state_dict(data['random_response'],'cuda:0')
     if args.group=='D':

@@ -11,7 +11,7 @@ from supermimic.networks import Critic as SuperMimicCritic
 
 
 class AlternatingCritic(SuperMimicCritic):
-    """原SM归一化MLP加可微回报上界；不改变2835维特权输入或Adapter观测。
+    """原SM归一化MLP加可微回报上界；特权输入宽度随RobotSpec物理条件维度确定，不改变Adapter观测。
 
     当前奖励除Tracking外均非正，因此每步最大Tracking/(1-gamma)是真实回报上界。
     使用upper-softplus(upper-raw)保持负值无界，避免硬clamp或错误直通梯度；原始

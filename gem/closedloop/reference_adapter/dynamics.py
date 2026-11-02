@@ -11,7 +11,7 @@ import copy
 import torch
 from torch import nn
 
-from supermimic.mdp import flatten_state, unflatten_state, normalize_xi
+from supermimic.mdp import flatten_state, unflatten_state, normalize_xi, clip_action
 
 
 @contextmanager
@@ -42,7 +42,7 @@ class DynamicsModel(nn.Module):
         self.register_buffer("error_floor", torch.tensor(floors, device=next(self.model.parameters()).device))
 
     def step(self, state, action, xi):
-        return flatten_state(self.model.step(unflatten_state(state), action, normalize_xi(xi)))
+        return flatten_state(self.model.step(unflatten_state(state), clip_action(action), normalize_xi(xi)))
 
     @contextmanager
     def adapter_phase(self):

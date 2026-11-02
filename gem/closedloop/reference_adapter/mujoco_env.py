@@ -14,6 +14,8 @@ import xml.etree.ElementTree as ET
 import mujoco
 import numpy as np
 import torch
+from supermimic.mdp import clip_action
+from supermimic.physics_context import nominal_context
 
 
 class MujocoPhysicalEnv:
@@ -34,16 +36,16 @@ class MujocoPhysicalEnv:
         option.set("gravity", "0 0 -9.81")
         world = root.find("worldbody")
         for geom in world.findall(".//body//geom"):
-            # 原资产可视网格与足端碰撞均保留，只禁用机器人自碰撞。
+            # 沿用最新资产的大连杆碰撞与装配排除对，按RobotSpec启用自碰撞。
             if geom.get("contype", "1") != "0" or geom.get("conaffinity", "1") != "0":
                 geom.set("contype", "2")
-                geom.set("conaffinity", "1")
-                geom.set("friction", "1 0.005 0.0001")
+                geom.set("conaffinity", "3" if spec.self_collisions else "1")
+                geom.set("friction", "1 .05 .01")
         for geom in world.findall("geom"):
             if geom.get("type") == "plane":
                 world.remove(geom)
         ET.SubElement(world, "geom", name="sim2sim_ground", type="plane", size="0 0 .1",
-                      contype="1", conaffinity="2", friction="1 .005 .0001",
+                      contype="1", conaffinity="2", friction="1 .05 .01",
                       rgba=".65 .70 .76 1")
         ET.SubElement(world, "light", pos="0 0 5", dir="0 0 -1", directional="true")
         old = root.find("actuator")
@@ -62,11 +64,12 @@ class MujocoPhysicalEnv:
         self.qadr = self.model.jnt_qposadr[joints]
         self.vadr = self.model.jnt_dofadr[joints]
         self.model.dof_armature[self.vadr] = spec.armature
+        self.model.dof_damping[self.vadr] = spec.viscous_friction
+        self.model.dof_frictionloss[self.vadr] = spec.coulomb_friction
         self.root_id = self.model.body(spec.root_body).id
         self.default_q = np.asarray(spec.default_joint_pos)
         self.alpha = np.asarray(spec.action_scales)
-        self.xi = torch.zeros(1, spec.xi_dim, device=self.device)
-        self.xi[:, 0] = 1.  # 无随机化，与实测摩擦系数一致。
+        self.xi = nominal_context(spec, device=self.device)
         self.previous_action = torch.zeros(1, spec.num_joints, device=self.device)
         self.control_steps = 0
 
@@ -97,6 +100,7 @@ class MujocoPhysicalEnv:
                     xi=self.xi, previous_action=self.previous_action)
 
     def step_physics(self, action):
+        action = clip_action(action)
         executed = action.detach().cpu().numpy().reshape(self.spec.num_joints)
         if not np.isfinite(executed).all():
             raise FloatingPointError("拒绝非有限控制动作")

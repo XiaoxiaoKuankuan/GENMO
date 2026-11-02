@@ -102,7 +102,7 @@ def test_noisy_action_is_the_replay_and_history_action(system):
 @pytest.mark.parametrize('horizon,enabled', [(8, False), (8, True), (64, False)])
 def test_policy_freezes_WM_Actor_and_optional_critic(system, horizon, enabled):
     engine, control, z = setup(system)
-    critic = Critic(2835)
+    critic = Critic(2929)
     critic.requires_grad_(enabled)
     optimizer = torch.optim.Adam(control.adapter.parameters(), lr=3e-5, betas=(.9, .95))
     wm = {k: v.clone() for k, v in engine.dynamics.state_dict().items()}
@@ -121,7 +121,7 @@ def test_policy_freezes_WM_Actor_and_optional_critic(system, horizon, enabled):
         assert trajectory is None and report['terminal'] == 0
         assert critic_update(critic, None, None)['critic_optimizer_steps'] == 0
     else:
-        assert trajectory['features'].shape == (horizon+1, 2, 2835)
+        assert trajectory['features'].shape == (horizon+1, 2, 2929)
         assert not trajectory['features'].requires_grad
         original = copy.deepcopy(critic)
         original.norm.update(trajectory['features'])
@@ -165,7 +165,7 @@ def test_active_SO3_projection_outside_checkpoint_preserves_gradient(system, mon
         calls.append(1)
         return original(*args, **kwargs)
     monkeypatch.setattr(torch.func, 'jacrev', counted)
-    critic = Critic(2835)
+    critic = Critic(2929)
     gradients = []
     with engine.dynamics.adapter_phase(), frozen_parameters(critic):
         for checked in (False, True):
