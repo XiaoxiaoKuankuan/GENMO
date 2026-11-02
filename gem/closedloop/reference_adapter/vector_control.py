@@ -61,7 +61,7 @@ class VectorControl:
         memory = state.new_zeros(n, 20, 4)
         memory = self.bank.memory_push(memory, state[:, 34:], reference.qd, self.music)
         return dict(state=state, xi=xi, action=previous, history=obs[:, None].expand(-1, 10, -1).clone(),
-            song=songs, frame=frames, start_frame=frames.clone(), episode=episodes,
+            song=songs.clone(), frame=frames.clone(), start_frame=frames.clone(), episode=episodes.clone(),
             heading=yaw_mat(reference.root_R), plan=state.new_zeros(n, 10, 27),
             left=state.new_zeros(n, 27), anchor=state.new_zeros(n, 27),
             plan_valid=torch.zeros(n, device=state.device, dtype=torch.bool), music=memory,

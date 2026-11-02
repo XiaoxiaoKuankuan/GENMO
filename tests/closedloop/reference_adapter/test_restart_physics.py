@@ -47,3 +47,21 @@ def test_native_mujoco_keeps_latest_friction_and_self_contacts(assets):
             bodies={env.model.body(int(env.model.geom_bodyid[g])).name for g in contact.geom}
             if 'waist_yaw_link' in bodies and any('elbow_pitch_link' in n for n in bodies):observed=True
     assert observed
+
+
+def test_vector_initial_owns_reset_indices(system):
+    from dataclasses import replace
+    from gem.closedloop.reference_adapter.music_reward import AudioTrack
+    engine,z=system
+    probe=replace(z,audio=AudioTrack.from_features(z.audio.features[:,:-10]))
+    _,_,control,_=vector((engine,probe))
+    songs=torch.zeros(1,dtype=torch.long)
+    frames=torch.zeros_like(songs)
+    episodes=torch.ones_like(songs)
+    observed=dict(state=z.executed_state,xi=z.xi)
+    first=control.initial(observed,songs,frames,episodes)
+    second=control.initial(observed,songs,frames,episodes)
+    for key in ('song','frame','episode'):
+        first[key][torch.tensor([0])]=second[key]
+        first[key].add_(1)
+    assert songs.item()==0 and frames.item()==0 and episodes.item()==1
