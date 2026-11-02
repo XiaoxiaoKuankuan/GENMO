@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """离线渲染 BUMI qpos28 轨迹（仅运动学，不执行动力学仿真）。
 
---compare-motion扩展为原参考/生成参考/真实Newton记录的三栏同步回放；按30/50Hz原时间
+--compare-motion支持原参考/生成参考双栏，或加入真实Newton记录的三栏同步回放；按30/50Hz原时间
 读取，终止之后留空并标记，不复制最后姿态。原音频、中文标签、关节名称映射和成品元数据
 一并验证；仅在内存给渲染模型加地板/光照，不修改源机器人或真实物理参数。
 
@@ -73,7 +73,7 @@ def mujoco_joint_order(model: mujoco.MjModel) -> list[str]:
 
 
 def render_comparison(args):
-    """同音乐三栏：原参考、生成参考、真实物理记录；终止后留空，禁止重复末帧。"""
+    """同音乐双栏或三栏回放；实测终止后留空，模型步数从生成产物读取。"""
     import json
     import math
     import os
@@ -81,9 +81,10 @@ def render_comparison(args):
     from PIL import Image, ImageDraw, ImageFont
     paths = [args.motion, *args.compare_motion]
     loaded = [load_qpos(path, args.qpos_key) for path in paths]
-    if [item[1] for item in loaded] != [30,30,50]:
-        raise ValueError("三栏合同需要30Hz原参考、30Hz生成参考、50Hz实测轨迹")
-    if loaded[2][2].get('evidence') != 'measured_newton_state':
+    if len(loaded) not in (2,3) or [item[1] for item in loaded] != [30,30,50][:len(loaded)]:
+        raise ValueError("需要30Hz原参考、30Hz生成参考，以及可选的50Hz实测轨迹")
+    physical = len(loaded) == 3
+    if physical and loaded[2][2].get('evidence') != 'measured_newton_state':
         raise ValueError("动力学栏必须是Newton真实记录")
     source = args.mjcf.resolve()
     xml = ET.parse(source).getroot()
@@ -130,17 +131,19 @@ def render_comparison(args):
     if output.exists():raise FileExistsError(output)
     staged=output.with_name(output.stem+'.partial.mp4')
     if staged.exists():raise FileExistsError(staged)
-    size=(3*w,top+h+bottom)
+    size=(len(loaded)*w,top+h+bottom)
     command=['ffmpeg','-nostdin','-v','error','-f','rawvideo','-pixel_format','rgb24','-video_size',f'{size[0]}x{size[1]}',
         '-framerate','30','-i','pipe:0','-i',str(args.audio),'-map','0:v:0','-map','1:a:0','-af','apad',
         '-t',str(n/30),'-c:v','libx264','-preset','fast','-crf','20','-threads','2','-pix_fmt','yuv420p',
         '-c:a','aac','-b:a','160k','-movflags','+faststart',str(staged)]
     encoder=subprocess.Popen(command,stdin=subprocess.PIPE,stderr=subprocess.PIPE)
-    labels=['原始数据参考','GENMO生成参考 · 10000步','SM + Newton真实执行']
+    model_step = loaded[1][2].get('model_step', args.model_step)
+    step_label = f' · {model_step:,}步' if model_step is not None else ''
+    labels=['原始数据参考','GENMO生成参考'+step_label,'SM + Newton真实执行']
     colors=['#8dc6ff','#78e0b4','#ffbd83']
-    measured=loaded[2][2]
-    end=float(measured['physical_end_seconds'])
-    reason=measured['end_reason']
+    measured=loaded[2][2] if physical else {}
+    end=float(measured['physical_end_seconds']) if physical else None
+    reason=measured.get('end_reason')
     ended_text={'measured_hard_joint_limit':'实际关节超硬限位','sm_physical_termination':'SM原终止条件触发',
         'reference_support_exhausted':'参考支持耗尽','music_end':'音乐结束'}.get(reason,reason)
     try:
@@ -148,7 +151,8 @@ def render_comparison(args):
             t=i/30
             canvas=Image.new('RGB',size,'#101a2a');draw=ImageDraw.Draw(canvas)
             draw.text((16,7),f'{args.title}  |  音乐 {t:.2f} / {n/30:.2f}s  |  1倍速',font=font,fill='white')
-            draw.text((16,39),'左/中：运动学动画；右：真实Newton状态回放。纯噪声DDIM20，非去噪重建；不测试在线时延。',font=small,fill='#c4cfdf')
+            subtitle = ('左/中：运动学动画；右：真实Newton状态回放。' if physical else '双栏均为运动学动画，未运行真实动力学。')
+            draw.text((16,39),subtitle+'纯噪声DDIM20；不测试在线时延。',font=small,fill='#c4cfdf')
             for column,(qpos,loaded_item) in enumerate(zip(arrays,loaded)):
                 x=column*w
                 draw.text((x+14,67),labels[column],font=font,fill=colors[column])
@@ -188,7 +192,8 @@ def render_comparison(args):
         renderer.close()
     output.with_suffix('.render.json').write_text(json.dumps(dict(frames=n,fps=30,seconds=n/30,
         physical_seconds=end,end_reason=reason,inputs=[str(p.resolve()) for p in paths],
-        rendering='mujoco_kinematic_replay_of_separate_reference_and_real_newton_states',
+        model_step=model_step,panels=len(loaded),
+        rendering='mujoco_kinematic_replay_of_separate_reference_and_real_newton_states' if physical else 'mujoco_kinematic_reference_and_generation',
         camera='same_distance_angle_each_panel_follows_root_translation_no_pose_realignment'),ensure_ascii=False,indent=2))
     print(f'Rendered comparison {output}',flush=True)
 
@@ -202,7 +207,8 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--camera")
-    parser.add_argument("--compare-motion",type=Path,nargs=2,help="生成参考和真实Newton记录，与--motion原参考组成三栏")
+    parser.add_argument("--compare-motion",type=Path,nargs='+',help="生成参考，以及可选真实Newton记录，组成双栏或三栏")
+    parser.add_argument("--model-step",type=int,help="旧轨迹无model_step时的显式标签；不猜测步数")
     parser.add_argument("--audio",type=Path)
     parser.add_argument("--font",type=Path)
     parser.add_argument("--title",default="联合GENMO三栏对比")
@@ -213,7 +219,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.compare_motion:
         if args.audio is None or args.font is None:
-            parser.error("三栏模式需要原音乐--audio与中文--font")
+            parser.error("对比模式需要原音乐--audio与中文--font")
         render_comparison(args)
         return
     if args.follow_root and args.camera is not None:
