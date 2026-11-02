@@ -93,8 +93,9 @@ def prepare(args):
         original[:, 2] -= ground['ground_height_world_m']
         meta = dataset.get_window(row_index, 0)['meta']
         audio = Path(meta['motion_path']).parent.parent / row['audio_path']
-        for field, path in [('source_motion_sha256', meta['motion_path']),
-                            ('source_music_feature_sha256', meta['music_feature_path']),
+        # source_motion_sha256是重定向之前的原动作身份，原reader已核对PT内部元数据；
+        # 不能误当成当前机器人qpos文件SHA。当前文件的内容身份另存motion_file_sha256。
+        for field, path in [('source_music_feature_sha256', meta['music_feature_path']),
                             ('source_audio_sha256', audio)]:
             if digest(path) != row[field]:
                 raise ValueError(f'原数据内容身份改变: {row["sample_id"]}/{field}')
@@ -106,6 +107,9 @@ def prepare(args):
         result = dict(number=number, directory=directory.name, source=row['sample_id'],
                       dataset=dataset.dataset_name, split=split, frames=len(original), seconds=len(original)/30,
                       input_sha256=digest(directory/'input.pt'), audio_sha256=row['source_audio_sha256'],
+                      source_motion_sha256=row['source_motion_sha256'],
+                      motion_file_sha256=digest(meta['motion_path']),
+                      music_feature_sha256=digest(meta['music_feature_path']),
                       seed=args.seed+number*1000, ground_metadata=ground)
         manifest['sources'].append(result)
         print(json.dumps(result, ensure_ascii=False), flush=True)
