@@ -40,6 +40,17 @@ def digest(path):
     return result.hexdigest()
 
 
+def asset_contract(cfg, adapter):
+    """冻结资产合同的轻量公共入口，物理评价不必导入训练数据集或日志依赖。"""
+    from .config import ROOT
+    return {"sm_wm_sha256": adapter.bundle.metadata["sha256"],
+        "stats_sha256": digest(cfg["stage1"]["endecoder"]["stats_path"]),
+        "fk_sha256": digest(ROOT / cfg["stage1"]["endecoder"]["kinematics_path"]),
+        "robot": adapter.bundle.metadata["robot"], "time": {"clock": 600, "source": 30, "control": 50, "physics": 200},
+        "backend": cfg["physics"]["backend"], "determinism": cfg["physics"]["determinism"],
+        "observation_noise": False}
+
+
 def execution_contract(cfg):
     return {"prediction_mode": cfg["physics"]["prediction_mode"], "loss": cfg["execution_loss"],
             "target": "same_source_data_fixed_episode_world", "start": "real_before_first_candidate_influence",

@@ -23,17 +23,8 @@ import torch
 from supermimic.mdp import flatten_state
 from gem.closedloop.mb_control.reference_buffer import ReferenceBuffer
 from .config import ROOT
-from .contracts import SIDECAR_SCHEMA, digest, source_key
+from .contracts import SIDECAR_SCHEMA, digest, source_key, asset_contract
 from .data import SourceCatalog
-
-
-def asset_contract(cfg, adapter):
-    return {"sm_wm_sha256": adapter.bundle.metadata["sha256"],
-        "stats_sha256": digest(cfg["stage1"]["endecoder"]["stats_path"]),
-        "fk_sha256": digest(ROOT / cfg["stage1"]["endecoder"]["kinematics_path"]),
-        "robot": adapter.bundle.metadata["robot"], "time": {"clock": 600, "source": 30, "control": 50, "physics": 200},
-        "backend": cfg["physics"]["backend"], "determinism": cfg["physics"]["determinism"],
-        "observation_noise": False}
 
 
 def source_episode(dataset, row_index, cfg):
