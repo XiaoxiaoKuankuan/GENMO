@@ -54,3 +54,17 @@ Adapter根XY修正关闭，根姿态修正开启。增加BPTT时域不改变部�
 模型、Replay、日志，不使用DDP。旧八组仅投递各自 `stop_requested.json`，由迭代边界保存
 完整checkpoint并正常退出。核对完整包可读、PID和GPU退出后启动新八组；不向无关进程发信号。
 实际测试、停止及启动证据按时间追加到根目录 `记录文本.md`。
+
+## 已完成的实际切换与验证
+
+本地179项CPU回归通过；Server-1 H64/2048环境完成2次Adam并从完整包恢复到第3次，
+三点均完成127首256步u2600配对。旧八组最终15593至16534次，全部exit0，八份约5.715GB
+完整包实际加载及SHA核验通过，best和初始包保留。
+
+新八组于14:11启动，正式根目录为
+`/data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/formal_h64_rebaseline_20261102_141136`，
+冻结GENMO `1526ec5`、SuperMimic `44cc31b`。启动审计时均已完成4至5次实际Adapter更新，
+首步完整包读回、冻结资产、优化器、真实采样和PID/GPU核验通过。每组首次Adam前
+有647168条真实转移与1010次WM更新。证据为运行根的 `startup_verified.json`；旧组停止和
+有界预检摘要在同父目录 `h64_rebaseline_transition_20261102_1405`。所有预检临时模型和日志
+已按精确目录删除，正式模型和审计摘要保留。当前仅完成启动验证，未宣布超过u2600。
