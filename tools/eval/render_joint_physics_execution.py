@@ -27,8 +27,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def digest(path):
+    result = hashlib.sha256()
     with path.open('rb') as handle:
-        return hashlib.file_digest(handle, 'sha256').hexdigest()
+        for block in iter(lambda: handle.read(1024*1024), b''):
+            result.update(block)
+    return result.hexdigest()
 
 
 def write_json(path, value):
