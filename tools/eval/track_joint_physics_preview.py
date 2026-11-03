@@ -103,11 +103,19 @@ def main():
         if bool((env.alpha <= 0).any()) or not torch.isfinite(env.alpha).all():
             raise ValueError('实际执行器动作缩放必须有限且严格为正')
         model = env._solver.mj_model
+        compiled_names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(model.njnt)]
         limits = []
         for name in adapter.bundle.spec.joint_names:
             joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if joint < 0:
+                # USD完整路径在Newton编译时会把斜杠替换为下划线；只接受唯一完整后缀。
+                matches = [j for j,n in enumerate(compiled_names)
+                           if n and (n.endswith('/'+name) or n.endswith('_'+name))]
+                if len(matches) == 1:
+                    joint = matches[0]
             if joint < 0 or not model.jnt_limited[joint]:
-                raise ValueError(f'Newton关节{name}未启用真实机械限位')
+                raise ValueError(f'Newton关节{name}没有匹配的已启用机械限位；id={joint}，'
+                                 f'compiled={list(zip(compiled_names, model.jnt_limited.tolist(), model.jnt_range.tolist()))}')
             limits.append(model.jnt_range[joint].tolist())
         compiled_limits = torch.tensor(limits, device='cuda:0')
         torch.testing.assert_close(compiled_limits[:, 0], adapter.runtime.kin.q_lo, atol=1e-6, rtol=0)
