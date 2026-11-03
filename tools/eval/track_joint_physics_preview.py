@@ -51,6 +51,7 @@ def main():
     args = parser.parse_args()
     import numpy as np
     import torch
+    import mujoco
     from supermimic.env import make_sim
     from supermimic.motion import select_reference
     from gem.closedloop.joint_physics.batched_reference import ReferencePageCache
@@ -101,6 +102,17 @@ def main():
         env = BatchedStreamingPhysicalEnv(sim_cfg, count, adapter.bundle)
         if bool((env.alpha <= 0).any()) or not torch.isfinite(env.alpha).all():
             raise ValueError('实际执行器动作缩放必须有限且严格为正')
+        model = env._solver.mj_model
+        limits = []
+        for name in adapter.bundle.spec.joint_names:
+            joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if joint < 0 or not model.jnt_limited[joint]:
+                raise ValueError(f'Newton关节{name}未启用真实机械限位')
+            limits.append(model.jnt_range[joint].tolist())
+        compiled_limits = torch.tensor(limits, device='cuda:0')
+        torch.testing.assert_close(compiled_limits[:, 0], adapter.runtime.kin.q_lo, atol=1e-6, rtol=0)
+        torch.testing.assert_close(compiled_limits[:, 1], adapter.runtime.kin.q_hi, atol=1e-6, rtol=0)
+        audit['newton_joint_limits'] = dict(zip(adapter.bundle.spec.joint_names, limits))
         pages = ReferencePageCache(count, 128, adapter, 'cuda:0')
         episodes, source_hashes, joint_names = [], [], []
         for slot, source in enumerate(sources):
