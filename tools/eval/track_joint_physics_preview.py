@@ -8,6 +8,8 @@
 每首歌分配独立物理world，一次显式reset后连续50Hz控制、200Hz物理推进。参考通过已有
 ReferencePageCache按原插值/差分/FK读取，整个生成计划在执行前已知，无临时GT补帧。
 结束槽位不复位、不继续记成成功轨迹；NaN、实际硬限位、SM终止和求解器溢出分别保留。
+显式motor-clamp-continue预览模式对电机目标按机械上下限限幅，实测角度越界只记录不
+终止；不裁剪测量状态，不修改生成参考，跌倒/非有限/求解器故障仍按原合同结束。
 GPU批量接触按worldid归约，实际state55/action21/接触/时间按每首真正有效长度保存。
 终止后的计算占位不会进入输出轨迹。既有原始参考和生成文件只读，不修改训练、模型或SM源码。
 
@@ -38,6 +40,7 @@ def main():
     parser.add_argument('--inputs', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--numbers', type=int, nargs='+')
+    parser.add_argument('--joint-limit-mode', choices=('stop', 'motor-clamp-continue'), default='stop')
     parser.add_argument('--max-control-steps', type=int, help='仅用于明确标记的有界接口检查')
     preliminary, _ = parser.parse_known_args()
     from gem.closedloop.joint_physics.config import read_config, build_adapter, seed_all
@@ -54,6 +57,7 @@ def main():
     from gem.closedloop.joint_physics.batched_simulation import BatchedStreamingPhysicalEnv
     from gem.closedloop.joint_physics.checkpoint import atomic_save
     from gem.closedloop.joint_physics.contracts import digest, asset_contract
+    from gem.closedloop.joint_physics.preview_limits import clamp_motor_action
 
     torch.set_num_threads(4)
     seed_all(42)
@@ -84,6 +88,7 @@ def main():
                  checkpoint_sha256=manifest['checkpoint_sha256'], assets=assets, packages=versions,
                  reference_manifest_sha256=digest(inputs/'inputs/manifest.json'),
                  execution='real_newton_fixed_generated_reference_one_reset_per_source',
+                 joint_limit_mode=args.joint_limit_mode,
                  max_control_steps=args.max_control_steps, num_envs=len(sources), sources=[])
     write_json(output/'manifest.json', audit)
     sim_cfg = make_sim('cuda:0', args)
@@ -94,6 +99,8 @@ def main():
     with launch_simulation(sim_cfg, args), torch.no_grad():
         count = len(sources)
         env = BatchedStreamingPhysicalEnv(sim_cfg, count, adapter.bundle)
+        if bool((env.alpha <= 0).any()) or not torch.isfinite(env.alpha).all():
+            raise ValueError('实际执行器动作缩放必须有限且严格为正')
         pages = ReferencePageCache(count, 128, adapter, 'cuda:0')
         episodes, source_hashes, joint_names = [], [], []
         for slot, source in enumerate(sources):
@@ -129,6 +136,10 @@ def main():
             raise ValueError('Newton实际初态与固定参考初态不符，拒绝生成误导性执行视频')
         states = [initial['state'].clone()]
         actions, contacts, rewards, errors = [], [], [], []
+        policy_actions, requested_targets, applied_targets = [], [], []
+        saturation_counts = torch.zeros(count, 21, dtype=torch.long, device='cuda:0')
+        actual_limit_counts = torch.zeros_like(saturation_counts)
+        maximum_excess = torch.zeros(count, 21, device='cuda:0')
         ages = np.zeros(count, dtype=np.int64)
         active = np.ones(count, dtype=np.bool_)
         valid_steps = np.zeros(count, dtype=np.int64)
@@ -158,6 +169,14 @@ def main():
                 break
             mask = torch.as_tensor(active, device='cuda:0')
             action = torch.where(mask[:, None], action, torch.zeros_like(action))
+            raw_action = action
+            limited, requested, applied, saturated = clamp_motor_action(
+                raw_action, env, adapter.runtime.kin.q_lo, adapter.runtime.kin.q_hi)
+            if args.joint_limit_mode == 'motor-clamp-continue':
+                action = limited
+                saturation_counts += saturated.to(torch.long)*mask[:, None]
+            else:
+                applied = requested
             state = env.step_physics(action)
             contact = env.contact_events_tensor()
             finite_state = torch.isfinite(state).all(-1)
@@ -167,10 +186,15 @@ def main():
             error = (diagnostic_state[:, 13:34]-target.q).square().mean(-1)
             hard = ((state[:, 13:34] < adapter.runtime.kin.q_lo-1e-4) |
                     (state[:, 13:34] > adapter.runtime.kin.q_hi+1e-4)).any(-1)
+            excess = torch.relu(adapter.runtime.kin.q_lo-state[:, 13:34])+torch.relu(state[:, 13:34]-adapter.runtime.kin.q_hi)
+            finite_excess = torch.where(torch.isfinite(excess), excess, torch.zeros_like(excess))
+            actual_limit_counts += (finite_excess > 1e-4).to(torch.long)*mask[:, None]
+            maximum_excess = torch.maximum(maximum_excess, finite_excess*mask[:, None])
             terminated = adapter.runtime.termination(diagnostic_state, target)
             health = env.solver_health_tensor()
             flags = torch.stack((finite_state, hard, terminated, health[:, -1].bool()), -1).cpu().numpy()
             states.append(state.clone()); actions.append(action.clone()); contacts.append(contact)
+            policy_actions.append(raw_action.clone()); requested_targets.append(requested.clone()); applied_targets.append(applied.clone())
             rewards.append(reward.clone()); errors.append(error.clone())
             total_steps += 1
             for i in np.flatnonzero(active):
@@ -181,7 +205,7 @@ def main():
                     failed_states[int(i)] = state[i].cpu()
                 reason = ('nonfinite_measured_state' if not flags[i, 0] else
                           'solver_capacity_or_contact_failure' if flags[i, 3] else
-                          'measured_hard_joint_limit' if flags[i, 1] else
+                          'measured_hard_joint_limit' if flags[i, 1] and args.joint_limit_mode == 'stop' else
                           'sm_physical_termination' if flags[i, 2] else
                           'music_end' if ages[i] >= lengths[i] else
                           'explicit_control_budget' if args.max_control_steps is not None and ages[i] >= args.max_control_steps else None)
@@ -205,10 +229,23 @@ def main():
             atomic_save(dict(robot_name='bumi', quaternion_convention='wxyz', qpos_order='mujoco_native',
                 joint_names=list(joint_names[slot]), fps=50, qpos=qpos, state55=trajectory, ticks=torch.arange(n+1)*12,
                 actions=action, real_contacts=contact, contact_contract=env.contact_contract(), xi=initial['xi'][slot].cpu(),
+                policy_actions=torch.stack([x[slot] for x in policy_actions[:n]]).cpu() if n else torch.empty(0, 21),
+                requested_motor_targets=torch.stack([x[slot] for x in requested_targets[:n]]).cpu() if n else torch.empty(0, 21),
+                applied_motor_targets=torch.stack([x[slot] for x in applied_targets[:n]]).cpu() if n else torch.empty(0, 21),
+                joint_limit_mode=args.joint_limit_mode,
+                max_actual_joint_excess_deg=float(maximum_excess[slot].max())*180/math.pi,
+                saturated_joint_steps=int(saturation_counts[slot].sum()),
                 end_reason=reasons[slot], physical_end_seconds=n*.02, evidence='measured_newton_state',
                 failure_tick=failure_ticks[slot], failed_state=failed_states.get(slot), reset_count=1,
                 generated_reference_sha256=source_hashes[slot], world_model_forward_calls=wm_calls[0]), directory/'physics.pt')
             result = dict(source, generated_reference_sha256=source_hashes[slot], physical_seconds=n*.02,
+                joint_limit_mode=args.joint_limit_mode,
+                saturated_joint_steps=int(saturation_counts[slot].sum()),
+                actual_violating_joint_steps=int(actual_limit_counts[slot].sum()),
+                max_actual_joint_excess_deg=float(maximum_excess[slot].max())*180/math.pi,
+                actual_joint_limits={name: {'violating_steps':int(actual_limit_counts[slot,j]),
+                    'max_excess_deg':float(maximum_excess[slot,j])*180/math.pi}
+                    for j,name in enumerate(adapter.bundle.spec.joint_names)},
                 actual_control_steps=int(ages[slot]), recorded_finite_control_steps=n,
                 complete_song=reasons[slot]=='music_end', end_reason=reasons[slot], failure_tick=failure_ticks[slot],
                 tracking_reward_mean=float(torch.stack([x[slot] for x in rewards[:n]]).mean()) if n else None,

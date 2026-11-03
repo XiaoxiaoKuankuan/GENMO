@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -57,7 +58,10 @@ def main():
     parser.add_argument('--execution', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--mjcf', type=Path, required=True)
+    parser.add_argument('--render-workers', type=int, default=3, help='独立歌曲渲染并行数，不改变物理轨迹')
     args = parser.parse_args()
+    if not 1 <= args.render_workers <= 4:
+        raise ValueError('渲染并行数必须为1至4，避免无界占用GPU/CPU')
     manifest = json.loads((args.inputs/'inputs/manifest.json').read_text())
     execution = json.loads((args.execution/'manifest.json').read_text())
     assert execution['frozen_unchanged'] and execution['world_model_forward_calls'] == 0
@@ -75,7 +79,7 @@ def main():
               'sm_physical_termination': 'SM原终止条件触发', 'nonfinite_action': '动作非有限',
               'nonfinite_measured_state': '实际状态非有限',
               'solver_capacity_or_contact_failure': '求解器容量或接触异常'}
-    for source in manifest['sources']:
+    def render_one(source):
         number, directory = source['number'], source['directory']
         result = results[number]
         origin = args.inputs/'videos'/directory
@@ -96,21 +100,29 @@ def main():
             '--width', '640', '--height', '540', '--title', f"{number:02d} {source['split']} / {source['dataset']}"]
         subprocess.run(command, check=True, env=dict(os.environ, MUJOCO_GL='egl', PYTHONDONTWRITEBYTECODE='1'))
         check = dict(number=number, **verify_video(target/'comparison.mp4', source['frames']))
-        checks.append(check)
         reason = labels.get(result['end_reason'], result['end_reason'])
         text = f"真实执行 {result['physical_seconds']:.2f} / {source['frames']/30:.2f}秒；{reason}"
-        cards.append(f'<article><h2>{number:02d} · {html.escape(source["split"])} · {html.escape(source["dataset"])}</h2>'
+        if result.get('joint_limit_mode') == 'motor-clamp-continue':
+            text += (f"；电机目标限幅{result['saturated_joint_steps']}关节步；"
+                     f"实测最大越界{result['max_actual_joint_excess_deg']:.3f}°（不因角度终止）")
+        card = (f'<article><h2>{number:02d} · {html.escape(source["split"])} · {html.escape(source["dataset"])}</h2>'
             f'<p>{html.escape(source["source"])}</p><p>{html.escape(text)}</p>'
             f'<video controls preload="none" poster="videos/{directory}/comparison_frame_0000.jpg" '
             f'src="videos/{directory}/comparison.mp4"></video><p><a href="videos/{directory}/comparison.mp4" download>下载视频</a>'
             f' · <a href="videos/{directory}/physics.pt" download>真实物理轨迹</a></p></article>')
         print(json.dumps(dict(number=number, video_verified=True, physical_seconds=result['physical_seconds'],
                               end_reason=result['end_reason'], wall_seconds=time.perf_counter()-started)), flush=True)
-        write_json(output/'delivery_checks.json', checks)
+        return check, card
+    # 每个任务仅写自己的歌曲目录；主线程按固定清单顺序汇总，避免并发改写索引。
+    with ThreadPoolExecutor(max_workers=args.render_workers, thread_name_prefix='preview-render') as pool:
+        for check, card in pool.map(render_one, manifest['sources']):
+            checks.append(check); cards.append(card)
+            write_json(output/'delivery_checks.json', checks)
     summary = {split: dict(songs=sum(s['split']==split for s in execution['sources']),
         completed=sum(s['split']==split and s['complete_song'] for s in execution['sources']),
         physical_seconds=sum(s['physical_seconds'] for s in execution['sources'] if s['split']==split)) for split in ('train','test')}
     write_json(output/'summary.json', dict(step=manifest['step'], split=summary, sources=execution['sources'],
+        joint_limit_mode=execution.get('joint_limit_mode','stop'),
         frozen_unchanged=True, world_model_forward_calls=0, renderer_wall_seconds=time.perf_counter()-started))
     title = f"GENMO {manifest['step']:,}步：10首训练集＋5首测试集三栏对照"
     generated_manifest = args.inputs/'videos/manifest.json'
@@ -120,6 +132,10 @@ def main():
     explanation = ('左：原始参考；中：'+generation_label+'；右：冻结SM在真实Newton中的执行。'
         '采用已固定的15首与生成轨迹，每首仅初始化一次。真实执行终止后右栏留空，原参考和生成栏继续完整播放。'
         '这是离线固定参考的真实跟踪，不是异步在线生成时延测试，也不是硬件实测。')
+    if execution.get('joint_limit_mode') == 'motor-clamp-continue':
+        explanation += ('本次右栏对电机目标施加机械限幅，实测角度越界只记录不终止；'
+                        'Newton测得的状态不裁剪，跌倒和数值/求解器故障仍结束。'
+                        '此执行保护及连续启动前缀与旧版预览不同，完成率不能单独归因于模型训练改善。')
     body = f'<h1>{title}</h1><p>{explanation}</p><p>训练集完成{summary["train"]["completed"]}/10；测试集完成{summary["test"]["completed"]}/5。</p>'
     body += '<p><a href="15首三栏视频与真实轨迹.zip" download>下载全部视频和真实轨迹</a> · <a href="summary.json">执行汇总</a></p>'
     (output/'index.html').write_text('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'

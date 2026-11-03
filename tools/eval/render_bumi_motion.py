@@ -114,7 +114,7 @@ def render_comparison(args):
         arrays.append(np.concatenate((qpos[:,:7],qpos[:,[7+names.index(name) for name in order]]),axis=-1))
     if len(arrays[0])!=len(arrays[1]):
         raise ValueError("原参考与生成参考必须覆盖相同音乐时长")
-    n=len(arrays[0]); fps=30
+    n=len(arrays[0])
     w,h=args.width,args.height
     top,bottom=94,92
     model.vis.global_.offwidth=max(model.vis.global_.offwidth,w)
@@ -144,6 +144,8 @@ def render_comparison(args):
     measured=loaded[2][2] if physical else {}
     end=float(measured['physical_end_seconds']) if physical else None
     reason=measured.get('end_reason')
+    continuous_prefix = loaded[1][2].get('startup', {}).get('source') == 'original_continuous_first_12_frames'
+    motor_limits = measured.get('joint_limit_mode') == 'motor-clamp-continue'
     ended_text={'measured_hard_joint_limit':'实际关节超硬限位','sm_physical_termination':'SM原终止条件触发',
         'reference_support_exhausted':'参考支持耗尽','music_end':'音乐结束'}.get(reason,reason)
     try:
@@ -152,7 +154,7 @@ def render_comparison(args):
             canvas=Image.new('RGB',size,'#101a2a');draw=ImageDraw.Draw(canvas)
             draw.text((16,7),f'{args.title}  |  音乐 {t:.2f} / {n/30:.2f}s  |  1倍速',font=font,fill='white')
             subtitle = ('左/中：运动学动画；右：真实Newton状态回放。' if physical else '双栏均为运动学动画，未运行真实动力学。')
-            draw.text((16,39),subtitle+'纯噪声DDIM20；不测试在线时延。',font=small,fill='#c4cfdf')
+            draw.text((16,39),subtitle+'完整DDIM20；不测试在线时延。',font=small,fill='#c4cfdf')
             for column,(qpos,loaded_item) in enumerate(zip(arrays,loaded)):
                 x=column*w
                 draw.text((x+14,67),labels[column],font=font,fill=colors[column])
@@ -170,9 +172,12 @@ def render_comparison(args):
                 if column==0:
                     lines=['原音乐配对动作，完整序列','仅作内容对照，不是生成目标轨迹']
                 elif column==1:
-                    lines=['前0.4秒保持单个初态，随后自主生成','自身历史代理；无真实缓存，Future无效']
+                    lines=[('给定连续原始12帧，随后自主生成' if continuous_prefix else '启动条件见轨迹元数据，随后自主生成'),
+                           '自身历史代理；无真实缓存，Future无效']
                 else:
-                    lines=[f'实际执行 {end:.2f}s / 音乐 {n/30:.2f}s',f'结束原因：{ended_text}']
+                    lines=[f'实际执行 {end:.2f}s / 音乐 {n/30:.2f}s',
+                           ('电机目标限幅；角度超限不停' if motor_limits else '实际关节超硬限位终止'),
+                           f'结束原因：{ended_text}']
                 for j,line in enumerate(lines):
                     draw.text((x+14,top+h+10+j*29),line,font=small,fill='#c4cfdf')
                 draw.line((x,65,x,size[1]),fill='#40536b',width=2)
