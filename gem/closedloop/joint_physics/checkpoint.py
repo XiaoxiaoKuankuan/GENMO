@@ -94,21 +94,31 @@ def save_trainer(trainer, path):
 
 
 def check_restore_contract(previous, current, *, continue_objective=False):
-    """显式续训只允许增加梯度权重课程，其他资产/数学/采样合同仍必须完全一致。"""
+    """显式续训仅允许已实现的单项目标变更，其他资产/数学/采样合同必须一致。"""
     previous, current = copy.deepcopy(previous), copy.deepcopy(current)
+    change = None
     if continue_objective:
-        if 'gradient_balance' in previous['physics'] or not current['physics'].get('gradient_balance', {}).get('enabled'):
-            raise ValueError('目标切换仅支持固定权重训练接入新的梯度课程；已有课程请严格resume')
-        current['physics'].pop('gradient_balance')
+        if ('gradient_balance' not in previous['physics'] and
+                current['physics'].get('gradient_balance', {}).get('enabled')):
+            current['physics'].pop('gradient_balance')
+            change = 'fixed_lambda_to_global_parameter_gradient_share'
+        elif (not previous.get('execution_loss', {}).get('joint_limit_constraint', {}).get('enabled', False)
+              and current.get('execution_loss', {}).get('joint_limit_constraint', {}).get('enabled', False)):
+            current['execution_loss'].pop('joint_limit_constraint')
+            previous['execution_loss'].pop('joint_limit_constraint', None)
+            change = 'add_execution_joint_limit_constraint'
+        else:
+            raise ValueError('目标切换仅支持新增梯度课程或新增执行机械限位；同目标请严格resume')
     if previous != current:
         raise ValueError('恢复的架构/数据/资产/物理/采样预算不一致')
+    return change
 
 
 def restore_trainer(trainer, path, value=None, *, continue_objective=False):
     value = read_checkpoint(path) if value is None else value
     if value["schema"] != CHECKPOINT_SCHEMA:
         raise ValueError("独立物理抽样只恢复本算法完整状态；旧共用噪声checkpoint仅可评价")
-    check_restore_contract(value['contract'], trainer.contract, continue_objective=continue_objective)
+    change = check_restore_contract(value['contract'], trainer.contract, continue_objective=continue_objective)
     if len(value["rank_states"]) != trainer.world_size:
         raise ValueError('恢复的DDP布局不一致')
     if trainer.gradient_balance and not continue_objective and not value.get('gradient_balance'):
@@ -129,9 +139,18 @@ def restore_trainer(trainer, path, value=None, *, continue_objective=False):
         trainer.future_stream.load_state_dict(state["future_data"])
     trainer.readiness.load_state_dict(value["curriculum"]["readiness"])
     if continue_objective:
-        trainer.gradient_balance.start_step = trainer.step
+        if change == 'fixed_lambda_to_global_parameter_gradient_share':
+            trainer.gradient_balance.start_step = trainer.step
+        elif trainer.gradient_balance:
+            if not value.get('gradient_balance'):
+                raise ValueError('增加限位目标的续训缺少原梯度控制器完整状态')
+            trainer.gradient_balance.load_state_dict(value['gradient_balance'])
+            # 新执行梯度分布必须在首次物理步重新实测；保留原30%课程进度和权重。
+            trainer.gradient_balance.last_step = None
+            trainer.gradient_balance.ema_data = trainer.gradient_balance.ema_physics = None
+            trainer.gradient_balance.metrics = {}
         trainer.continuation = {'parent_checkpoint': str(Path(path).resolve()), 'parent_global_step': trainer.step,
-            'change': 'fixed_lambda_to_global_parameter_gradient_share',
+            'change': change,
             'preserved': 'actor_adamw_scheduler_all_rank_rng_and_samplers',
             'equivalent_objective_resume': False}
     else:

@@ -7,7 +7,7 @@ GENMO及FutureEncoder推理参数和合同，不将该精简产物冒充可恢�
 源文件SHA、原地面元数据和完整有效帧数一并保存；不运行Newton、不写训练缓存。
 
 generate在独立空闲GPU读取该包，复用原60帧codec和因果滚动生成器，执行完整DDIM20、
-CFG2.5、eta0。只取示范的单个初始姿态并保持0.4秒，此后条件只含音乐及自身生成历史，
+CFG2.5、eta0。明确给定原始连续12帧启动动作，此后条件只含音乐及自身生成历史，
 没有真实在线状态，因此FutureContext显式无效。原未知动作从不输入生成网络。
 输出原始/生成PT和NPZ、音频、数值与身份记录；可调用原MuJoCo渲染器生成同步双栏MP4。
 这些是完整数据样本长度的运动学预览，不是Newton执行、在线闭环或正式质量统计。
@@ -158,7 +158,9 @@ def generate(args):
             return dict(result, qpos=result['qpos28'])
 
     manifest['input_bundle'] = str(inputs)
-    manifest['generation'] = 'offline_autoregressive_pure_noise_60frames_prefix12'
+    manifest['generation'] = 'offline_autoregressive_ddim20_given_continuous_demo_prefix12'
+    manifest['startup'] = dict(source='original_continuous_first_12_frames', frames=12,
+                              duration_seconds=12/30, hold_seconds=0., first_generated_frame=12)
     results = []
     write_json(output/'manifest.json', manifest)
     for source in manifest['sources']:
@@ -172,11 +174,12 @@ def generate(args):
         n, started = source['frames'], time.perf_counter()
         generated, logits, contact_valid, windows = generate_sequence(
             actor.stage1, Runtime(), data['music'], n+9, source['seed'], directory,
-            window_frames=60, prefix_frames=12, initial_qpos=data['qpos'][0])
+            window_frames=60, prefix_frames=12, startup_qpos=data['qpos'][:12])
         common = dict(robot_name='bumi', quaternion_convention='wxyz', qpos_order='mujoco_native',
                       joint_names=names, fps=30)
         atomic_save(dict(common, qpos=data['qpos'], evidence='original_dataset_reference'), directory/'original.pt')
-        atomic_save(dict(common, qpos=generated[:n], evidence='pure_noise_joint_genmo_reference',
+        atomic_save(dict(common, qpos=generated[:n], evidence='ddim20_given_demo_prefix12_joint_genmo_reference',
+                         startup=manifest['startup'],
                          model_step=manifest['step'], generated_halo=generated[n:], windows=windows,
                          contact_logits=logits[:n], contact_valid=contact_valid[:n]), directory/'generated.pt')
         np.savez_compressed(directory/'generated.npz', qpos=generated[:n].numpy(), fps=30,
@@ -184,7 +187,8 @@ def generate(args):
                             model_step=manifest['step'], contact_logits=logits[:n].numpy(),
                             contact_valid=contact_valid[:n].numpy())
         result = dict(source, generation_seconds=time.perf_counter()-started, generated_windows=len(windows),
-                      startup_hold_seconds=.4, demonstration_frames_used=1)
+                      startup_hold_seconds=0., demonstration_frames_used=12,
+                      startup_prefix_seconds=12/30, first_generated_frame=12)
         if args.mjcf:
             subprocess.run([sys.executable, str(ROOT/'tools/eval/render_bumi_motion.py'),
                 '--motion', str(directory/'original.pt'), '--compare-motion', str(directory/'generated.pt'),

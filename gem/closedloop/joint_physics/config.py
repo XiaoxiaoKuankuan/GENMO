@@ -6,6 +6,7 @@
 """
 
 from pathlib import Path
+import math
 import random
 import sys
 
@@ -35,7 +36,13 @@ def read_config(path, overrides=()):
     if cfg["physics"]["prediction_mode"] != "denoised_x0" or cfg["physics"]["horizon"] not in (8, 16, 32, 64):
         raise ValueError("仅同一样本denoised_x0，H8/H16/H32/H64需分别真实验收")
     if cfg["execution_loss"].get("soft_joint_limit_enabled", False) or cfg["physics"]["lambda_safety"] != 0:
-        raise ValueError("新执行目标软关节限位已关闭，lambda_safety必须为0；原监督项保留")
+        raise ValueError("旧独立软限位项保持关闭且lambda_safety为0；新增机械限位使用joint_limit_constraint")
+    constraint = cfg['execution_loss'].get('joint_limit_constraint', {})
+    if constraint.get('enabled', False):
+        values = [constraint.get(k, float('nan')) for k in ('weight', 'scale_rad', 'margin_rad')]
+        if (not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values)
+                or values[0] <= 0 or values[1] <= 0 or values[2] < 0):
+            raise ValueError('机械限位约束要求有限正weight/scale_rad以及非负margin_rad')
     if cfg["physics"]["backend"] != "isaaclab3_newton_mujoco_warp" or cfg["physics"]["determinism"] not in ("run_to_run", "gpu_to_gpu"):
         raise ValueError("必须匹配Newton/MuJoCo-Warp及其实际确定性枚举")
     if cfg["stage1"]["model"]["diffusion_steps"] != 1000:

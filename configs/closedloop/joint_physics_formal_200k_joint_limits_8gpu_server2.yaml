@@ -1,0 +1,13 @@
+# 当前H32/八卡/BF16/梯度占比30%配置的显式新目标：增加WM执行关节机械限位约束。
+# 权威上下限来自冻结SM机器人资产；1度安全余量，按1度归一化，平方铰链的关节均值+
+# 最坏关节损失乘5后加入同一L_exec，沿原参考->SM->WM完整反传，不裁剪关节或更换GT。
+# 原Stage1全部损失、单AdamW、H32有效前缀、真实Newton硬终止和20万步预算均保留。
+# 此配置改变执行目标，不能对旧断点使用--resume；须显式--continue-from并写新输出目录。
+# 历史Newton报告仅复用同资产/同H的支持域诊断，不宣称已认证新增限位目标的物理方向。
+base_config: joint_physics_formal_200k_gradshare30_8gpu_server2.yaml
+execution_loss:
+  joint_limit_constraint:
+    enabled: true
+    margin_rad: 0.017453292519943295
+    scale_rad: 0.017453292519943295
+    weight: 5.0

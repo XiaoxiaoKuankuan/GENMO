@@ -66,3 +66,19 @@ def test_checkpoint_reproduces_next_batch_and_update(tmp_path, monkeypatch, bala
         assert actual['sample_ids'] == expected['sample_ids']
         for key, tensor in migrated.actor.state_dict().items():
             torch.testing.assert_close(tensor, expected_weights[key], rtol=0, atol=0)
+    else:
+        from tests.closedloop.joint_physics.test_preview_and_limits import constraint_options
+        changed = copy.deepcopy(cfg)
+        changed['execution_loss'].update(constraint_options())
+        with pytest.raises(ValueError, match='恢复的架构'):
+            JointTrainer(changed, 'cpu', resume=path)
+        migrated = JointTrainer(changed, 'cpu', continue_from=path)
+        assert migrated.continuation['change'] == 'add_execution_joint_limit_constraint'
+        assert migrated.gradient_balance.weight == first.gradient_balance.weight
+        assert migrated.gradient_balance.start_step == first.gradient_balance.start_step
+        assert migrated.gradient_balance.last_step is None
+        actual = migrated.update()
+        assert actual['sample_ids'] == expected['sample_ids'] and actual['timesteps'] == expected['timesteps']
+        # 此处关闭物理，仅验证目标迁移不会重置AdamW/数据或噪声，第二步权重必须逐位一致。
+        for key, tensor in migrated.actor.state_dict().items():
+            torch.testing.assert_close(tensor, expected_weights[key], rtol=0, atol=0)

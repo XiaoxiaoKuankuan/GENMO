@@ -85,9 +85,27 @@ def test_real_frozen_weights_execution_gradient_and_fd(actor_factory):
                                       torch.zeros(1, dtype=torch.bool))
     execution = execute_window(window, student["pred_x_start"], student["static_conf_logits"], actor, adapter, cfg["execution_loss"])
     backbone, future = torch.autograd.grad(execution["loss"],
-        (base.denoiser.add_cond_linear.weight, actor.future_encoder.output.weight))
+        (base.denoiser.add_cond_linear.weight, actor.future_encoder.output.weight), retain_graph=True)
     assert torch.isfinite(backbone).all() and backbone.norm() > 0
     assert torch.isfinite(future).all() and future.norm() > 0
+    # 新限位目标必须通过同一真实冻结SM/WM链到达GENMO，不能用BC或裁剪关节替代。
+    from tests.closedloop.joint_physics.test_preview_and_limits import constraint_options
+    constrained_cfg = {**cfg['execution_loss'], **constraint_options()}
+    h32 = replace(window, horizon=32)
+    unconstrained_h32 = execute_window(h32, student['pred_x_start'], student['static_conf_logits'],
+                                      actor, adapter, cfg['execution_loss'])
+    constrained = execute_window(h32, student['pred_x_start'], student['static_conf_logits'],
+                                 actor, adapter, constrained_cfg)
+    torch.testing.assert_close(constrained['states'], unconstrained_h32['states'], rtol=0, atol=0)
+    assert constrained['effective_horizon'] == 32
+    penalty_only = constrained['loss']-unconstrained_h32['loss']
+    assert penalty_only > 0
+    limit_x0, = torch.autograd.grad(penalty_only, student['pred_x_start'], retain_graph=True)
+    assert torch.isfinite(limit_x0).all() and limit_x0.norm() > 0
+    limit_backbone, limit_future = torch.autograd.grad(penalty_only,
+        (base.denoiser.add_cond_linear.weight, actor.future_encoder.output.weight))
+    assert torch.isfinite(limit_backbone).all() and limit_backbone.norm() > 0
+    assert torch.isfinite(limit_future).all() and limit_future.norm() > 0
     adapter.bundle.assert_unchanged(frozen)
 
 

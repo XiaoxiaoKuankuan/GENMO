@@ -2,7 +2,9 @@
 
 根位姿只比较一次；身体位置/姿态/速度转到各自根坐标，避免根yaw重复计权。FK、旋转
 全部调用SM权威实现，使用明确物理尺度的pseudo-Huber。实际执行关节限位独立于原监督
-中生成参考限位；Action Rate为零，没有Stability Reward或生成教师项。
+中生成参考限位；可显式启用机械上下限及安全余量的平方铰链惩罚，均值与最严重关节
+共同计权，不裁剪预测状态、不截断输入梯度。有限惩罚不能数学保证永不越界；真实Newton
+硬检查独立保留。Action Rate为零，没有Stability Reward或生成教师项。
 """
 
 import torch
@@ -10,6 +12,31 @@ import torch
 from supermimic.mdp import unflatten_state
 from supermimic.rotations import so3_log
 from gem.closedloop.mb_control.dance_losses import robust
+
+
+def joint_limit_constraint(q, kin, cfg):
+    """按权威SM关节顺序计算机械越界和安全余量，最坏关节不会被全关节均值稀释。"""
+    violation = torch.relu(kin.q_lo-q) + torch.relu(q-kin.q_hi)
+    options = cfg.get('joint_limit_constraint', {})
+    if options.get('enabled', False):
+        margin = options['margin_rad']
+        residual = torch.relu(kin.q_lo+margin-q) + torch.relu(q-(kin.q_hi-margin))
+        squared = (residual/options['scale_rad']).square()
+        penalty = squared.mean(-1)+squared.amax(-1)
+    else:
+        penalty = q.sum(-1)*0.
+    return penalty, violation
+
+
+def execution_limit_diagnostics(states, kin, cfg):
+    """只对已接受WM步骤统计；返回GPU聚合量供日志间隔全rank归约，不保存大状态链。"""
+    q = states.detach().float()[..., 13:34].reshape(-1, 21)
+    penalty, excess = joint_limit_constraint(q, kin, cfg)
+    violated = excess > 1e-4
+    # sums: 窗口数、状态步数、越界步数、越界窗口数、惩罚步总和、逐关节越界步数。
+    sums = torch.cat((q.new_tensor([1., len(q)]), violated.any(-1).sum().reshape(1).float(),
+                      violated.any().reshape(1).float(), penalty.sum().reshape(1), violated.sum(0).float()))
+    return sums, excess.amax(0)
 
 
 def execution_terms(state, reference, kin, cfg):
@@ -27,8 +54,10 @@ def execution_terms(state, reference, kin, cfg):
         "body_velocity": local(rt, bv-v[:, None])-local(tt, tv-t.root_v[:, None])}
     terms = {key: robust(error, cfg["scales"][key]).flatten(1).mean(-1) for key, error in errors.items()}
     total = sum(terms[key]*cfg["weights"][key] for key in terms)
-    violation = torch.relu(kin.q_lo-q) + torch.relu(q-kin.q_hi)
-    # 用户要求关闭新执行目标软限位：保留纯诊断值，绝不计入优化目标。
+    penalty, violation = joint_limit_constraint(q, kin, cfg)
+    constraint = cfg.get('joint_limit_constraint', {})
+    total = total+constraint.get('weight', 0.)*penalty
+    terms['joint_limit_constraint'] = penalty
     terms["joint_limit_violation_rad"] = violation.mean(-1)
     safety = state.new_zeros(state.shape[0])
     return total, safety, terms

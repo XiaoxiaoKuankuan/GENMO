@@ -56,21 +56,31 @@ from tools.eval.validate_closedloop_stage1 import (  # noqa: E402
 
 
 @torch.inference_mode()
-def generate(actor, runtime, music, total, seed, directory, *, window_frames=120, prefix_frames=12, initial_qpos=None):
-    """复用因果滚动；可显式指定60帧及单一初态，未知未来示范不进入生成条件。
+def generate(actor, runtime, music, total, seed, directory, *, window_frames=120, prefix_frames=12,
+             initial_qpos=None, startup_qpos=None):
+    """复用因果滚动；支持明确给定的连续启动前缀，未知未来示范不进入条件。
 
     total可含明确的歌曲末尾速度halo；音乐耗尽后的music_valid为假，不复制末端动作。
-    默认参数保留原120帧工具语义。initial_qpos只接受一个物理初态，不是示范动作前缀。
+    默认参数保留原120帧工具语义。initial_qpos只接受单一初态；startup_qpos只接受
+    prefix_frames帧明确已知动作，二者互斥。调用方不能把未知整曲作为启动输入。
     """
     if not 1 <= prefix_frames < window_frames or total <= prefix_frames:
         raise ValueError("需要合法窗口、前缀和正的生成后缀")
     codec = actor.endecoder.codec
     kin = codec.kinematics
     builder = CausalDemoProprio48Builder(kin)
-    initial = kin.make_standing_qpos().cpu() if initial_qpos is None else initial_qpos.detach().cpu()
-    if initial.shape != (28,):
-        raise ValueError("初态必须是单个qpos28")
-    generated = initial.repeat(min(prefix_frames, total), 1)
+    if startup_qpos is not None:
+        if initial_qpos is not None or startup_qpos.shape != (prefix_frames, 28):
+            raise ValueError("连续启动前缀必须恰好为[prefix_frames,28]，且不能同时提供单一初态")
+        generated = startup_qpos.detach().cpu().float().clone()
+    else:
+        initial = kin.make_standing_qpos().cpu() if initial_qpos is None else initial_qpos.detach().cpu()
+        if initial.shape != (28,):
+            raise ValueError("初态必须是单个qpos28")
+        generated = initial.repeat(min(prefix_frames, total), 1)
+    if (not torch.isfinite(generated).all() or
+            ((generated[:, 3:7].norm(dim=-1)-1).abs() > 1e-3).any()):
+        raise ValueError("启动前缀必须有限并使用单位四元数")
     contacts = torch.zeros(len(generated), 2)
     contact_valid = torch.zeros(len(generated), dtype=torch.bool)
     windows = []

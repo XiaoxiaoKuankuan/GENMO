@@ -15,18 +15,27 @@ import torch
 from gem.closedloop.mb_control.validation import ModelSupport, UnsupportedModelState
 from gem.closedloop.mb_control.contracts import ReferenceExhausted
 from .contracts import PhysicsRejected
-from .losses import execution_terms, normalized_window
+from .losses import execution_terms, normalized_window, execution_limit_diagnostics
 from .reference import candidate_reference
 
 
 class ValidatedSupport:
-    def __init__(self, report_path, assets, horizon, device, objective):
+    def __init__(self, report_path, assets, horizon, device, objective, *, diagnostic_only=False):
         report = json.loads(Path(report_path).read_text())
         if report["schema"] not in ("genmo.joint_physics.validation.v1", "genmo.joint_physics.validation.v2") or report["assets"] != assets:
             raise ValueError("必须使用本方法与同一资产的新Newton报告")
         if horizon not in report["supported_horizons"]:
             raise ValueError("本方法当前H尚未通过实际物理方向/精度验证")
-        if report.get("objective") != objective or not report.get("forecast_passed"):
+        self.objective_verified = report.get('objective') == objective
+        # 新增机械限位改变了目标，旧Newton报告只能作为同资产/同H的历史诊断来源。
+        # 仅允许这一明确差异；正式严格认证仍须完整目标相同，不删除其他目标合同检查。
+        previous = report.get('objective', {})
+        stripped = {**objective, 'loss': {k: v for k, v in objective['loss'].items()
+                                         if k != 'joint_limit_constraint'}}
+        diagnostic_addition = (diagnostic_only and
+            objective['loss'].get('joint_limit_constraint', {}).get('enabled', False) and
+            previous == stripped)
+        if (not self.objective_verified and not diagnostic_addition) or not report.get("forecast_passed"):
             raise ValueError("物理方向报告需绑定当前执行目标并通过真实请求前瞻验证")
         self.state_guard = ModelSupport(report["state_envelope"], device=device)
         self.lower = torch.tensor(report["action_min"], device=device)
@@ -277,10 +286,13 @@ def execute_window(window, predicted_x0, logits, actor, adapter, cfg, *, support
             error.details.update(first_reject_tick=z.tick,failure_phase='complete_motion_profile',
                                  prediction_origin=prediction_origin, action_origin='frozen_sm_from_'+prediction_origin)
             raise
+    stacked_states = torch.stack(states)
+    limit_sums, limit_maxima = execution_limit_diagnostics(stacked_states, adapter.runtime.kin, cfg)
     return {"loss": normalized_window(losses, cfg["discount"]).mean(),
         "safety": normalized_window(safety, cfg["discount"]).mean(),
         "terms": {k: normalized_window([t[k] for t in terms], cfg["discount"]).mean() for k in terms[0]},
-        "states": torch.stack(states), "actions": torch.stack(actions),
+        "states": stacked_states, "actions": torch.stack(actions),
+        "joint_limit_diagnostics": (limit_sums, limit_maxima),
         "failure_steps": failure_steps, "effective_horizon": len(losses), "truncation": truncated,
         "historical_diagnostics": dict(getattr(support, "counts", {})),
         "coverage": {"horizon": window.horizon, "effective_horizon": len(losses), "preview_only_steps": len(losses)-center,

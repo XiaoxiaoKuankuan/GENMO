@@ -113,7 +113,11 @@ def main():
     write_json(output/'summary.json', dict(step=manifest['step'], split=summary, sources=execution['sources'],
         frozen_unchanged=True, world_model_forward_calls=0, renderer_wall_seconds=time.perf_counter()-started))
     title = f"GENMO {manifest['step']:,}步：10首训练集＋5首测试集三栏对照"
-    explanation = ('左：原始参考；中：完整20步DDIM纯噪声生成；右：冻结SM在真实Newton中的执行。'
+    generated_manifest = args.inputs/'videos/manifest.json'
+    generated_metadata = json.loads(generated_manifest.read_text()) if generated_manifest.is_file() else {}
+    given_prefix = generated_metadata.get('startup', {}).get('source') == 'original_continuous_first_12_frames'
+    generation_label = ('给定连续原始12帧后完整20步DDIM生成' if given_prefix else '完整20步DDIM生成（启动条件见轨迹元数据）')
+    explanation = ('左：原始参考；中：'+generation_label+'；右：冻结SM在真实Newton中的执行。'
         '采用已固定的15首与生成轨迹，每首仅初始化一次。真实执行终止后右栏留空，原参考和生成栏继续完整播放。'
         '这是离线固定参考的真实跟踪，不是异步在线生成时延测试，也不是硬件实测。')
     body = f'<h1>{title}</h1><p>{explanation}</p><p>训练集完成{summary["train"]["completed"]}/10；测试集完成{summary["test"]["completed"]}/5。</p>'

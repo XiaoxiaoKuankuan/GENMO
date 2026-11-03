@@ -75,6 +75,8 @@ class JointTrainer:
         self.interval_terms = None
         self.interval_steps = 0
         self.interval_physics_count = 0
+        self.interval_limit_sums = torch.zeros(26, device=self.device)
+        self.interval_limit_maxima = torch.zeros(21, device=self.device)
         self.adapter = build_adapter(cfg, device) if cfg["physics"]["enabled"] or cfg["data"]["sidecar"] else None
         from .prepare_rollouts import asset_contract
         from .execution import ValidatedSupport
@@ -96,7 +98,8 @@ class JointTrainer:
                     self.store = SidecarStore(cfg['data']['sidecar'],'train',self.assets,
                         sample_contract=cfg['data']['sample_contract'],snapshot=payload[0],cache_bytes=self.sidecar_cache_bytes)
         report = cfg["physics"].get("validation_report") if cfg["physics"]["enabled"] else None
-        self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device, execution_contract(cfg)) if report else None
+        self.support = ValidatedSupport(report, self.assets, cfg["physics"]["horizon"], device,
+            execution_contract(cfg), diagnostic_only=cfg['physics'].get('historical_support_mode') == 'diagnostic') if report else None
         self.noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+1000+rank)
         self.window_rng = np.random.default_rng(cfg["training"]["seed"]+2000+rank)
         self.physics_noise_rng = torch.Generator().manual_seed(cfg["training"]["seed"]+5000+rank)
@@ -268,6 +271,9 @@ class JointTrainer:
                     result['x0_gradient_norm'] = float(derivative.norm())
                     record['action_origin'] = 'frozen_sm_from_student_denoised_x0'
                     accepted.append(result)
+                    limit_sums, limit_maxima = result['joint_limit_diagnostics']
+                    self.interval_limit_sums.add_(limit_sums)
+                    self.interval_limit_maxima.copy_(torch.maximum(self.interval_limit_maxima, limit_maxima))
                     coverage.append(result['coverage'])
                     record['reason'] = 'execution_gradient_completed'
                     record['effective_horizon'] = result['effective_horizon']
@@ -374,6 +380,24 @@ class JointTrainer:
         terms = self.interval_terms
         if self.world_size > 1:
             dist.all_reduce(terms)
+            dist.all_reduce(self.interval_limit_sums)
+            dist.all_reduce(self.interval_limit_maxima, op=dist.ReduceOp.MAX)
+        limit_values = self.interval_limit_sums.cpu().tolist()
+        limit_maxima = self.interval_limit_maxima.cpu().tolist()
+        limit_windows, limit_steps, limit_bad_steps, limit_bad_windows, constraint_sum = limit_values[:5]
+        joint_limits = {'scope': 'accepted_wm_steps_interval', 'tolerance_rad': 1e-4,
+            'windows': int(limit_windows), 'steps': int(limit_steps),
+            'violating_windows': int(limit_bad_windows), 'violating_steps': int(limit_bad_steps),
+            'window_violation_rate': limit_bad_windows/max(1, limit_windows),
+            'step_violation_rate': limit_bad_steps/max(1, limit_steps),
+            'joint_step_violation_rate': sum(limit_values[5:])/max(1, limit_steps*21),
+            'constraint_loss': constraint_sum/max(1, limit_steps),
+            'max_violation_deg': max(limit_maxima)*180/math.pi,
+            'per_joint': {name: {'violating_steps': int(n), 'max_violation_deg': v*180/math.pi}
+                          for name, n, v in zip(self.adapter.bundle.spec.joint_names, limit_values[5:], limit_maxima)}
+                          if self.adapter is not None else {}}
+        self.interval_limit_sums.zero_()
+        self.interval_limit_maxima.zero_()
         values = terms.cpu().tolist()
         interval_mass = self.world_size*self.interval_steps
         reduced = [values[0]/interval_mass, values[1]/max(1,self.interval_physics_count), values[2]/interval_mass]
@@ -399,6 +423,8 @@ class JointTrainer:
         return {'step':self.step, 'lr':self.optimizer.param_groups[0]['lr'], 'precision':self.cfg['training']['precision'],
             'future_supervised_loss':reduced[2],
             'gradient_balance':self.gradient_balance.metrics if self.gradient_balance else {},
+            'execution_joint_limits':joint_limits,
+            'execution_objective_newton_certified':getattr(self.support, 'objective_verified', False),
             'physics_gradient_norm':physics_norm,
             'physics_gradient_tensor':'student_pred_x_start',
             'effective_horizon_distribution':dict(horizons),**self.counters,'data_loss':reduced[0],

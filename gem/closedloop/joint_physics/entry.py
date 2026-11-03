@@ -22,7 +22,7 @@ def main(kind):
     parser.add_argument("--validation-report",help="需要补充实际WM动作输入验证的本方法方向报告")
     restore = parser.add_mutually_exclusive_group()
     restore.add_argument("--resume")
-    restore.add_argument('--continue-from', help='显式从完整固定权重断点切换到梯度占比课程；保留AdamW/RNG/步数，写新目录')
+    restore.add_argument('--continue-from', help='显式从完整断点增加梯度课程或执行机械限位；保留AdamW/RNG/步数，写新目录')
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--split", choices=("train", "val", "test"), default="train" if kind == "prepare" else "val")
     parser.add_argument("--max-sources", type=int)
