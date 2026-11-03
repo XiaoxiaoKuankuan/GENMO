@@ -49,6 +49,26 @@ def test_native_mujoco_keeps_latest_friction_and_self_contacts(assets):
     assert observed
 
 
+def test_hybrid622_leg_armature_zero_and_ankles_preserved(assets):
+    """检查实际编译模型和训练随机区间，避免XML正确但运行参数又覆盖回旧值。"""
+    from gem.closedloop.reference_adapter.mujoco_env import MujocoPhysicalEnv
+    bundle, _ = assets
+    env = MujocoPhysicalEnv(bundle.spec)
+    np.testing.assert_allclose(env.model.dof_armature[env.vadr], bundle.spec.armature)
+    for i, name in enumerate(bundle.spec.joint_names):
+        if any(part in name for part in ('leg_pitch', 'leg_roll', 'leg_yaw', 'knee_pitch')):
+            assert bundle.spec.armature[i] == 0
+            assert bundle.spec.armature_ranges[i] == (0., 0.)
+        elif 'ankle_pitch' in name:
+            assert bundle.spec.armature[i] == .054
+            assert bundle.spec.armature_ranges[i] == (.002, .02)
+        elif 'ankle_roll' in name:
+            assert bundle.spec.armature[i] == .0079
+            assert bundle.spec.armature_ranges[i] == (.001, .01)
+    assert np.all(env.model.body_mass[1:] > 0)
+    assert np.all(env.model.body_inertia[1:] > 0)
+
+
 def test_vector_initial_owns_reset_indices(system):
     from dataclasses import replace
     from gem.closedloop.reference_adapter.music_reward import AudioTrack

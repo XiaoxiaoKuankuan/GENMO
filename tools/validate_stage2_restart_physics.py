@@ -22,6 +22,8 @@ def main():
     parser.add_argument('--num-envs', type=int, default=64)
     parser.add_argument('--steps', type=int, default=128)
     parser.add_argument('--training-mode', action='store_true')
+    parser.add_argument('--save-train-starts', action='store_true',
+                        help='额外保存64首训练歌曲各两个真实零Adapter起点，供独立梯度标定')
     preliminary, _ = parser.parse_known_args()
     from omegaconf import OmegaConf
     cfg = OmegaConf.to_container(OmegaConf.load(preliminary.config), resolve=True)
@@ -122,6 +124,38 @@ def main():
                 songs=len(set(songs.cpu().tolist())),scan_steps=args.steps,num_envs=env.N,
                 checkpoint=cfg['supermimic']['checkpoint'],robot_asset_dir=cfg['supermimic']['robot_asset_dir'],
                 sampling='zero_adapter_new_nominal_physics_train_only',seed=42))
+        if report['passed'] and args.save_train_starts:
+            if args.training_mode or args.num_envs != len(bank.by_split['train']):
+                raise ValueError('标定起点要求名义物理，且每首训练歌曲对应一个环境')
+            # 只采训练歌曲；随机歌曲内位置后真实执行32步，取得真实历史/计划/音乐状态。
+            # episode中途失败的起点不混入幸存轨迹，重采次数及失败数明确保留。
+            songs = bank.by_split['train'].clone()
+            picked = {int(song): [] for song in songs.cpu().tolist()}
+            generator = torch.Generator(device='cuda').manual_seed(20261103)
+            rejected = 0
+            for attempt in range(8):
+                frames = (torch.rand(len(songs), device='cuda', generator=generator)
+                          * (bank.ends[songs]-128).clamp_min(1)).long()
+                collector.reset(songs=songs, frames=frames, perturb=False)
+                episodes = collector.state['episode'].clone()
+                for _ in range(32):
+                    collector.step(zero=True, split='train', perturb=False)
+                z = collector.state
+                valid = (z['episode'] == episodes) & (z['frame']+64 < bank.ends[z['song']])
+                rejected += int((~valid).sum())
+                for index, song in enumerate(songs.cpu().tolist()):
+                    if bool(valid[index]) and len(picked[song]) < 2:
+                        picked[song].append({k: v[index:index+1].detach().cpu().clone() for k,v in z.items()})
+                if all(len(rows) == 2 for rows in picked.values()):
+                    break
+            if any(len(rows) != 2 for rows in picked.values()):
+                raise RuntimeError('真实零Adapter起点未覆盖每首训练歌曲两次，不能伪造均衡标定')
+            rows = [row for group in picked.values() for row in group]
+            torch.save(dict(starts={k: torch.cat([row[k] for row in rows]) for k in rows[0]},
+                split='train', policy_version=0, source='real_nominal_zero_adapter',
+                checkpoint=cfg['supermimic']['checkpoint'], checkpoint_sha256=control.bundle.metadata['sha256'],
+                tasks=cfg['tasks'], seed=20261103, attempts=attempt+1, rejected_episode_starts=rejected),
+                output/'fixed_train_starts.pt')
         print(json.dumps(dict(passed=report['passed'],checks=checks),ensure_ascii=False),flush=True)
         if not report['passed']: raise RuntimeError('新物理桥接验证失败，见physics_report.json')
 
