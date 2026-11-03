@@ -248,6 +248,7 @@ def main():
             directory.mkdir()
             atomic_save(dict(robot_name='bumi', quaternion_convention='wxyz', qpos_order='mujoco_native',
                 joint_names=list(joint_names[slot]), fps=50, qpos=qpos, state55=trajectory, ticks=torch.arange(n+1)*12,
+                motor_joint_names=list(adapter.bundle.spec.joint_names),
                 actions=action, real_contacts=contact, contact_contract=env.contact_contract(), xi=initial['xi'][slot].cpu(),
                 policy_actions=torch.stack([x[slot] for x in policy_actions[:n]]).cpu() if n else torch.empty(0, 21),
                 requested_motor_targets=torch.stack([x[slot] for x in requested_targets[:n]]).cpu() if n else torch.empty(0, 21),

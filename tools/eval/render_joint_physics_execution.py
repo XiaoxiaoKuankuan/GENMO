@@ -73,6 +73,14 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     (output/'videos').mkdir(exist_ok=False)
+    if execution.get('newton_joint_limits'):
+        write_json(output/'actuator_contract.json', {
+            'motor_joint_names': list(execution['newton_joint_limits']),
+            'motor_fields': ['actions', 'policy_actions', 'requested_motor_targets', 'applied_motor_targets'],
+            'state55_joint_position_slice': [13, 34],
+            'qpos_joint_order': 'each_physics_pt_joint_names_genmo_order',
+            'mechanical_limits_rad': execution['newton_joint_limits'],
+            'joint_limit_mode': execution.get('joint_limit_mode', 'stop')})
     started = time.perf_counter()
     checks, cards = [], []
     labels = {'music_end': '完整音乐结束', 'measured_hard_joint_limit': '实际关节超出硬限位',
@@ -148,6 +156,8 @@ def main():
             if path.is_file(): archive.write(path, path.relative_to(output))
         for name in ('index.html','说明.txt','summary.json','delivery_checks.json'):
             archive.write(output/name,name)
+        if (output/'actuator_contract.json').is_file():
+            archive.write(output/'actuator_contract.json','actuator_contract.json')
     print(json.dumps(dict(delivered=len(checks), split=summary, wall_seconds=time.perf_counter()-started)),flush=True)
 
 
