@@ -1,11 +1,13 @@
-"""验证 BUMI v2 CSV 转换的关节映射、时间轴和旋转速度，不启动 Isaac Sim。
+"""验证 BUMI v2 CSV 到 SuperMimic UMR NPZ 的数据契约与 30→50 Hz 插值。
 
-使用具有解析解的平移/旋转轨迹检验 30→50 Hz 插值，覆盖四元数异号、乱序表头、
-单帧/两帧短动作和错误输入。真实 articulation 的连杆位置及质心速度另以实际
-CSV 转换后对照 URDF 运动学核验，避免只检查数组形状就声称运动学正确。
+用解析平移、旋转和关节轨迹检查四元数异号、关节重排、CSV 乱序表头和末帧保留，
+并覆盖单帧/过短动作拒绝、非有限输入、默认输出位置及覆盖保护。
+测试只依赖 NumPy、SciPy、pytest，不启动仿真；SuperMimic 原生 read_umr_npz、
+MotionLib 和最新 bumi_v2 XML 的兼容性另用实际太极 CSV 做完整加载验证。
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -43,43 +45,51 @@ def test_named_csv_reorders_all_columns_and_normalizes_quaternions(tmp_path):
     np.testing.assert_allclose(loaded, expected, atol=1e-12)
 
 
-def test_headerless_isaaclab_order(tmp_path):
+def test_headerless_supermimic_order(tmp_path):
     expected = trajectory(2)
     source = expected.copy()
     source[:, 7:] = expected[:, [7 + converter.RETARGET_JOINT_NAMES.index(n)
-                                 for n in converter.ISAACLAB_JOINT_NAMES]]
+                                 for n in converter.SUPERMIMIC_JOINT_NAMES]]
     path = tmp_path / "motion.csv"
     np.savetxt(path, source, delimiter=",")
-    np.testing.assert_allclose(converter.load_motion(path, csv_joint_order="isaaclab"), expected)
+    np.testing.assert_allclose(converter.load_motion(path, csv_joint_order="supermimic"), expected)
 
 
-def test_linear_motion_and_shortest_arc_world_angular_velocity():
-    sampled = converter.resample_motion(trajectory())
-    times = np.arange(50) / 50.0
-    assert sampled["joint_pos"].shape == (50, 21)
-    np.testing.assert_allclose(sampled["root_pos"], [0.2, -0.1, 0.5] + times[:, None] * [0.3, -0.2, 0.1], atol=1e-7)
-    np.testing.assert_allclose(sampled["joint_vel"], np.broadcast_to(np.linspace(-0.2, 0.2, 21), (50, 21)), atol=1e-6)
-    np.testing.assert_allclose(sampled["root_lin_vel"], np.broadcast_to([0.3, -0.2, 0.1], (50, 3)), atol=1e-6)
-    np.testing.assert_allclose(sampled["root_ang_vel"], np.broadcast_to([0.1, 0.2, 0.3], (50, 3)), atol=1e-6)
-    actual = Rotation.from_quat(sampled["root_quat"][:, [1, 2, 3, 0]])
+def test_linear_motion_shortest_arc_and_named_joint_order():
+    qpos = converter.resample_motion(trajectory())
+    times = np.arange(51) / 50.0
+    assert qpos.shape == (51, 28)
+    assert qpos.dtype == np.float32
+    np.testing.assert_allclose(qpos[:, :3], [0.2, -0.1, 0.5] + times[:, None] * [0.3, -0.2, 0.1], atol=1e-7)
+    expected_q = np.arange(21) / 100 + times[:, None] * np.linspace(-0.2, 0.2, 21)
+    order = [converter.RETARGET_JOINT_NAMES.index(n) for n in converter.SUPERMIMIC_JOINT_NAMES]
+    np.testing.assert_allclose(qpos[:, 7:], expected_q[:, order], atol=1e-7)
+    actual = Rotation.from_quat(qpos[:, [4, 5, 6, 3]])
     expected = Rotation.from_rotvec(times[:, None] * [0.1, 0.2, 0.3])
     assert np.max((actual * expected.inv()).magnitude()) < 1e-7
-    assert np.all(np.sum(sampled["root_quat"][1:] * sampled["root_quat"][:-1], axis=1) > 0)
+    assert np.all(np.sum(qpos[1:, 3:7] * qpos[:-1, 3:7], axis=1) > 0)
 
 
-@pytest.mark.parametrize("frames,expected_count", [(1, 1), (2, 2), (4, 5), (120, 199), (10000, 16665)])
-def test_short_sequences_and_half_open_timeline(frames, expected_count):
-    sampled = converter.resample_motion(trajectory(frames))
-    assert all(len(value) == expected_count and np.isfinite(value).all() for value in sampled.values())
-    if frames == 1:
-        for key in ("joint_vel", "root_lin_vel", "root_ang_vel"):
-            np.testing.assert_array_equal(sampled[key], 0.0)
-    else:
-        assert (expected_count - 1) / 50 < (frames - 1) / 30
-        assert expected_count / 50 >= (frames - 1) / 30
+@pytest.mark.parametrize("frames,expected_count", [(2, 2), (4, 6), (31, 51), (120, 199), (10000, 16666)])
+def test_supermimic_timeline_includes_aligned_endpoint(frames, expected_count):
+    qpos = converter.resample_motion(trajectory(frames))
+    assert qpos.shape == (expected_count, 28)
+    assert np.isfinite(qpos).all()
+    assert (expected_count - 1) / 50 <= (frames - 1) / 30
+    assert expected_count / 50 > (frames - 1) / 30
 
 
-def test_invalid_inputs_fail_before_simulator_launch(tmp_path):
+def test_equal_fps_keeps_all_frames():
+    motion = trajectory(51)
+    qpos = converter.resample_motion(motion, input_fps=50)
+    assert len(qpos) == len(motion)
+    np.testing.assert_allclose(qpos[:, :3], motion[:, :3], atol=1e-7)
+    expected = Rotation.from_quat(motion[:, 3:7])
+    actual = Rotation.from_quat(qpos[:, [4, 5, 6, 3]])
+    assert np.max((actual * expected.inv()).magnitude()) < 1e-7
+
+
+def test_invalid_inputs(tmp_path):
     path = tmp_path / "motion.csv"
     data = trajectory(3)
     np.savetxt(path, data, delimiter=",")
@@ -87,6 +97,10 @@ def test_invalid_inputs_fail_before_simulator_launch(tmp_path):
         converter.load_motion(path, (1, 4))
     with pytest.raises(ValueError, match="帧率"):
         converter.resample_motion(data, input_fps=0)
+    with pytest.raises(ValueError, match="至少需要两帧"):
+        converter.resample_motion(converter.load_motion(path, (2, 2)))
+    with pytest.raises(ValueError, match="不足"):
+        converter.resample_motion(data, input_fps=1000)
     data[0, 3:7] = 0
     np.savetxt(path, data, delimiter=",")
     with pytest.raises(ValueError, match="四元数"):
@@ -95,3 +109,33 @@ def test_invalid_inputs_fail_before_simulator_launch(tmp_path):
     np.savetxt(path, data, delimiter=",")
     with pytest.raises(ValueError, match="有限"):
         converter.load_motion(path)
+
+
+def test_cli_writes_supermimic_contract_and_protects_existing_file(tmp_path, monkeypatch):
+    source = tmp_path / "太极.csv"
+    np.savetxt(source, trajectory(), delimiter=",")
+    argv = [str(SCRIPT), "--input_file", str(source)]
+    monkeypatch.setattr(sys, "argv", argv)
+    converter.main()
+    output = tmp_path / "太极_50hz.npz"
+    with np.load(output, allow_pickle=False) as data:
+        assert data["qpos"].shape == (51, 28)
+        assert data["qpos"].dtype == np.float32
+        np.testing.assert_array_equal(data["qpos"][0, 3:7], [1, 0, 0, 0])
+        assert float(data["fps"][0]) == 50.0
+        assert data["robot_name"].item() == "bumi_v2"
+        assert tuple(data["robot_joint_names"]) == converter.SUPERMIMIC_JOINT_NAMES
+        assert data["robot_joint_names"].dtype.kind == "U"
+        assert data["source_frames"].tolist() == [31]
+        assert data["source_fps"].tolist() == [30]
+        assert data["quaternion_order"].item() == "wxyz"
+        assert all(not data[name].dtype.hasobject for name in data.files)
+    original = output.read_bytes()
+    with pytest.raises(SystemExit) as error:
+        converter.main()
+    assert error.value.code == 2
+    assert output.read_bytes() == original
+    monkeypatch.setattr(sys, "argv", argv + ["--overwrite", "--frame_range", "1", "4"])
+    converter.main()
+    with np.load(output, allow_pickle=False) as data:
+        assert data["qpos"].shape == (6, 28)
