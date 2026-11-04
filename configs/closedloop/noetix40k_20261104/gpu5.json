@@ -1,0 +1,29 @@
+{
+  "description": "冻结指定40k控制器；同seed的H32/H64和学习率两因素对照",
+  "gpu": 5,
+  "run_name": "gpu5",
+  "root": "/data0/user/liwei/GENMO_outputs/stage2_supermimic_adapter/noetix40k_20261104_141254",
+  "seed": 42,
+  "horizon": 64,
+  "adapter_lr": 5e-06,
+  "checkpoint": "/data0/user/liwei/GENMO_assets/noetix40k_20261104_141254/ckpt_0040000.pt",
+  "onnx": "/data0/user/liwei/GENMO_assets/noetix40k_20261104_141254/ckpt_0040000.onnx",
+  "onnx_sha256": "af5bf9026e0f1f828ce96367b09df29c04cec427915d264cea5725cb1365e713",
+  "checkpoint_sha256": "d0c590c31dba992c61ce97282193a0255213e6cb7c467af11abd9e1f6460a035",
+  "library": "/data0/user/liwei/GENMO_assets/noetix40k_20261104_141254/data/train.pt",
+  "num_envs": 2048,
+  "replay_steps": 512,
+  "actor_batch": 1024,
+  "microbatch": 256,
+  "wm_batch": 2048,
+  "wm_batches": 10,
+  "warmup_env_steps": 64,
+  "wm_warmup": 100,
+  "target_updates": 30000,
+  "compile": "default",
+  "lr_milestones": [
+    10000,
+    20000
+  ],
+  "checkpoint_every": 1000
+}
