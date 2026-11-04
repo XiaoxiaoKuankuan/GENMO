@@ -29,6 +29,21 @@ def test_zero_reference_preserves_native_goal():
     torch.testing.assert_close(out, goal, atol=0, rtol=0)
 
 
+def test_zero_reference_preserves_arbitrary_quaternions_and_rotation_gradients():
+    torch.manual_seed(24000)
+    poses, goal = inputs(batch=128)
+    quat = torch.randn(128, 12, 4)
+    # 包括任意旋转、四元数正负号及实际数据的微小非单位长度误差。
+    poses[..., 3:7] = quat / quat.norm(dim=-1, keepdim=True) * 1.000001
+    goal = torch.randn_like(goal)
+    residual = torch.zeros(128, 10, 27, requires_grad=True)
+    out = correct_goal(goal, poses, residual)
+    torch.testing.assert_close(out, goal, atol=0, rtol=0)
+    (out * torch.randn_like(out)).sum().backward()
+    assert torch.isfinite(residual.grad).all()
+    assert residual.grad[..., 3:6].abs().sum() > 0
+
+
 def test_independent_future_frames_and_derivative_support():
     poses, goal = inputs()
     d = torch.zeros(3, 10, 27)

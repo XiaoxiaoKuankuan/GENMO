@@ -26,6 +26,19 @@ MUSIC_SIZE = 16 * 35 + 16 + 16
 INPUT_SIZE = 750 + 606 + MUSIC_SIZE
 
 
+def apply_rotation_residual(quat, rotvec):
+    """直接按Hamilton定义乘旋转增量，使零增量精确保留输入四元数。
+
+    上游合并乘法公式含大数抵消，乘单位旋转也会引入舍入误差；这里保留
+    标量/向量乘积形式，不做零点分支或detach，确保零点梯度连通。
+    """
+    increment = quat_from_rotvec(rotvec)
+    w, xyz = quat[..., :1], quat[..., 1:]
+    dw, dxyz = increment[..., :1], increment[..., 1:]
+    return torch.cat((w * dw - (xyz * dxyz).sum(-1, keepdim=True),
+                      w * dxyz + dw * xyz + torch.cross(xyz, dxyz, dim=-1)), dim=-1)
+
+
 def correct_goal(goal, poses, residual):
     """将未来1..10帧残差转成原生0..9帧Goal；所有旋转和导数保持可微。"""
     base = goal[..., :600].reshape(-1, 10, 60)
@@ -33,7 +46,7 @@ def correct_goal(goal, poses, residual):
     heading = yaw_quat(quat[:, 1:2])
     d = torch.cat((residual.new_zeros(len(residual), 2, 27), residual), dim=1)
     dp = quat_apply(heading.expand(-1, 12, -1), d[..., :3])
-    new_quat = quat_mul(quat, quat_from_rotvec(d[..., 3:6]))
+    new_quat = apply_rotation_residual(quat, d[..., 3:6])
     cur, new = quat[:, 1:11], new_quat[:, 1:11]
     dq = d[:, 1:11, 6:]
     dqd = (d[:, 2:, 6:] - d[:, :-2, 6:]) / .04
