@@ -215,6 +215,18 @@ def run(settings, source):
     with torch.no_grad():
         native = trainer.policy.actor(trainer._obs['policy'], trainer._obs['goal'])
         zero = trainer.act(trainer._obs)
+        packed = torch.cat((trainer.adapter_lib.goal_window(trainer.command.frame, 10),
+                            trainer._obs['goal'][:, -6:]), -1)
+        corrected, residual = trainer.policy.references(trainer._obs['policy'], packed)
+        nominal = torch.cat((packed[:, :600], packed[:, -6:]), -1)
+        delta = (corrected - trainer._obs['goal']).abs()
+        worst = int(delta.flatten().argmax())
+        row, col = divmod(worst, delta.shape[1])
+        atomic_json_save(dict(nominal_goal_max_error=float((nominal-trainer._obs['goal']).abs().max()),
+            corrected_goal_max_error=float(delta.max()), residual_max=float(residual.abs().max()),
+            worst_goal_index=[row, col], nominal_value=float(nominal[row, col]),
+            corrected_value=float(corrected[row, col]), native_value=float(trainer._obs['goal'][row, col]),
+            action_max_error=float((zero-native).abs().max())), output/'zero_reference_diagnostic.json')
         torch.testing.assert_close(zero, native, atol=2e-5, rtol=2e-5)
         verification['zero_adapter_real_batch_max_error'] = float((zero-native).abs().max())
         atomic_json_save(verification, output/'actor_onnx_parity.json')
