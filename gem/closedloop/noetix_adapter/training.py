@@ -1,13 +1,14 @@
-"""在用户指定noetix实现上训练冻结40k Actor之前的音乐参考Adapter。
+"""在用户指定noetix实现上训练冻结底层Actor之前的音乐参考Adapter。
 
 先校验ONNX内嵌源PT哈希、机器人控制契约及66组CPU数值等价，再严格加载同一
 PT的Actor和WM。真实环境、关节顺序、执行器延迟/滤波/PD、奖励、终止与WM监督
 直接使用该源码。Actor和输入归一化永久冻结，Adapter通过Actor输入与WM反传。
 
 每组保留原64首GENMO训练参考，2048环境、约百万转移Replay、H8×10次WM更新、
-100轮WM预热；仅H32/H64与Adapter初始学习率不同。Critic关闭，真实与想象奖励
+预热轮数和Critic由实验配置控制；Critic可载入同源网络并独立真实TD预热。
+真实与想象奖励
 都针对未修正名义动作，避免Adapter改目标给自己打分。旧Goal570的标定权重不迁移。
-保存完整WM/Adapter/优化器/Replay/RNG/采样器；物理求解器恢复时新开episode。
+保存完整WM/Adapter/Critic/三优化器/Replay/RNG/采样器；恢复时新开物理episode。
 状态、实际Adam次数、源模型身份及训练指标持续落盘；有限更新不代表物理质量改善。
 """
 
@@ -17,6 +18,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -73,6 +76,12 @@ def make_config(saved, settings):
     # 指定40k保存时尚有此采样器等待字段；当前源码已删除，且本实验关闭动作退休。
     saved.get('env', {}).get('sampler', {}).pop('patience_iterations', None)
     cfg = fill_config(TrainConfig(), saved)
+    # 当前源码新增的推搡/质量/PD扰动不在指定24k的配置里，不能因默认值而悄悄启用。
+    if hasattr(cfg.env, 'perturbations') and 'perturbations' not in saved.get('env', {}):
+        cfg.env.perturbations.torso_mass_range = (1., 1.)
+        cfg.env.perturbations.kp_range = cfg.env.perturbations.kd_range = (1., 1.)
+        cfg.env.perturbations.push_enabled = False
+        cfg.env.perturbations.joint_velocity_noise = 0.
     cfg.run_name = settings['run_name']
     cfg.log_root = Path(settings['root'])
     cfg.seed = settings['seed']
@@ -99,7 +108,10 @@ def make_config(saved, settings):
     cfg.policy_trainer.batch_size = settings.get('actor_batch', 1024)
     cfg.policy_trainer.microbatch_size = settings.get('microbatch', 256)
     cfg.policy_trainer.lr = settings['adapter_lr']
-    cfg.policy_trainer.use_critic = False
+    cfg.policy_trainer.use_critic = settings.get('use_critic', False)
+    cfg.policy_trainer.critic_lr = settings.get('critic_lr', 3e-5)
+    cfg.policy_trainer.critic_epochs = settings.get('critic_epochs', 2)
+    cfg.policy_trainer.critic_minibatches = settings.get('critic_minibatches', 4)
     cfg.policy_trainer.obs_noise = False
     cfg.policy_trainer.start_margin = settings['horizon'] + 10
     cfg.policy_trainer.compile = settings.get('compile', 'default')
@@ -114,11 +126,11 @@ def make_config(saved, settings):
 def run(settings, source):
     from supermimic.training.loop import Trainer
     from supermimic.training.checkpoints import atomic_json_save, atomic_torch_save, capture_rng_state, restore_rng_state
-    from supermimic.imagination.policy_trainer import PolicyTrainer
+    from .critic import AdapterPolicyTrainer
     from supermimic.robots import get_robot_spec
 
     if torch.cuda.device_count() != 1 or int(os.environ.get('WORLD_SIZE', 1)) != 1:
-        raise ValueError('四组为独立单卡实验，每组必须只可见一张GPU')
+        raise ValueError('各组为独立单卡实验，每组必须只可见一张GPU')
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -136,12 +148,13 @@ def run(settings, source):
     output = trainer.log_dir
     trainer.policy.load_state_dict(ck['policy'], strict=True)
     trainer.wm.load_state_dict(ck['wm'], strict=True)
-    # 两个优化器不承接底层控制器训练计数；仅WM网络以同源40k初始化。
+    trainer.critic.load_state_dict(ck['critic'], strict=True)
+    # 所有优化器从零开始；Actor、WM及Critic网络使用同一个指定底座。
     torch.manual_seed(cfg.seed)
     trainer.policy = ReferencePolicy(trainer.policy, get_robot_spec('bumi4340').joint_names).to(cfg.device)
     packed_library = torch.load(cfg.data.library, map_location='cpu', weights_only=False)
     trainer.adapter_lib = ReferenceLibrary(trainer.lib, packed_library['music'])
-    trainer.policy_trainer = PolicyTrainer(trainer.wm, trainer.policy, trainer.critic,
+    trainer.policy_trainer = AdapterPolicyTrainer(trainer.wm, trainer.policy, trainer.critic,
                                           trainer.adapter_lib, cfg.policy_trainer)
     trainer.policy_trainer.opt = torch.optim.Adam(trainer.policy.net.parameters(),
                                                  lr=settings['adapter_lr'], betas=cfg.policy_trainer.betas, fused=True)
@@ -151,7 +164,7 @@ def run(settings, source):
     atomic_json_save(settings | dict(source=source, pid=os.getpid(),
         cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'),
         input_dimension=1948, residual_shape=[10, 27], actor_input=[750, 606],
-        algorithm='noetix_music_reference_adapter_WM_BPTT', critic=False,
+        algorithm='noetix_music_reference_adapter_WM_BPTT', critic=cfg.policy_trainer.use_critic,
         architecture='stateless_future_pose_residual_current_nominal_anchor',
         source_checkpoint_iteration=ck['iteration'], train_songs=len(packed_library['names'])), output/'adapter_manifest.json')
     (output/'pid').write_text(str(os.getpid())+'\n')
@@ -165,6 +178,8 @@ def run(settings, source):
         atomic_json_save(dict(phase=phase, pid=os.getpid(), gpu=os.environ.get('CUDA_VISIBLE_DEVICES'),
             adapter_updates=trainer.num_updates, wm_iterations=trainer.iteration,
             wm_optimizer_updates=trainer.iteration*cfg.wm_trainer.batches_per_update,
+            critic_optimizer_updates=trainer.policy_trainer.critic_steps,
+            real_critic_optimizer_updates=trainer.policy_trainer.real_critic_steps,
             env_steps=trainer.env_steps, real_transitions=trainer.env_steps*cfg.env.num_envs,
             updated_unix=time.time(), target_updates=settings['target_updates'], **fields), output/'status.json')
 
@@ -180,12 +195,15 @@ def run(settings, source):
             adapter=trainer.policy.net.state_dict(), bounds=trainer.policy.bounds,
             adapter_updates=trainer.num_updates, wm_iterations=trainer.iteration,
             env_steps=trainer.env_steps, step_acc=trainer._step_acc,
+            critic_steps=trainer.policy_trainer.critic_steps,
+            real_critic_steps=trainer.policy_trainer.real_critic_steps,
             physics_restored=False)
         path = output/f'adapter_{trainer.num_updates:06d}.pt'
         atomic_torch_save(payload, path)
         if full:
             payload.update(wm=trainer.wm.state_dict(), critic=trainer.critic.state_dict(),
                 adapter_optimizer=trainer.policy_trainer.opt.state_dict(), wm_optimizer=trainer.wm_trainer.opt.state_dict(),
+                critic_optimizer=trainer.policy_trainer.critic_opt.state_dict(),
                 replay=trainer.buffer.state_dict(), rng=capture_rng_state(), sampler=trainer.command.sampler.state_dict())
             path = output/'checkpoint_latest.pt'
             atomic_torch_save(payload, path)
@@ -206,10 +224,17 @@ def run(settings, source):
         for key in ('onnx_sha256', 'checkpoint_sha256', 'library', 'horizon', 'adapter_lr', 'seed'):
             if saved['settings'][key] != settings[key]:
                 raise ValueError(f'恢复配置不匹配：{key}')
+        if saved['settings'].get('use_critic', False) != cfg.policy_trainer.use_critic:
+            raise ValueError('恢复时Critic开关必须与原运行一致')
         trainer.policy.net.load_state_dict(saved['adapter'])
         trainer.wm.load_state_dict(saved['wm'])
         trainer.policy_trainer.opt.load_state_dict(saved['adapter_optimizer'])
         trainer.wm_trainer.opt.load_state_dict(saved['wm_optimizer'])
+        trainer.critic.load_state_dict(saved['critic'])
+        if cfg.policy_trainer.use_critic:
+            trainer.policy_trainer.critic_opt.load_state_dict(saved['critic_optimizer'])
+        trainer.policy_trainer.critic_steps = saved.get('critic_steps', 0)
+        trainer.policy_trainer.real_critic_steps = saved.get('real_critic_steps', 0)
         trainer.command.sampler.load_state_dict(saved['sampler'])
         trainer.buffer.load_state_dict(saved['replay'])
         trainer.buffer.break_episodes()
@@ -232,6 +257,11 @@ def run(settings, source):
             status('WM_H8_updates')
             wm = trainer.wm_trainer.update(trainer.buffer)
             metrics = dict(wm=wm)
+            critic_start = max(0, cfg.schedule.wm_warmup_iterations - settings.get('critic_warmup', 200))
+            if cfg.policy_trainer.use_critic and trainer.iteration >= critic_start:
+                status('Critic_real_TD')
+                metrics['critic'] = trainer.policy_trainer.update_real_critic(trainer.buffer,
+                    settings.get('critic_real_batch', 2048), settings.get('critic_real_batches', 2))
             if trainer.iteration >= cfg.schedule.wm_warmup_iterations:
                 status('Adapter_BPTT')
                 decays = sum(trainer.num_updates >= value for value in settings['lr_milestones'])
@@ -240,18 +270,20 @@ def run(settings, source):
                 metrics['adapter'] = trainer.policy_trainer.update(trainer.buffer)
                 trainer.num_updates += 1
                 metrics['adapter_lr'] = lr
+                metrics['critic_lr'] = trainer.policy_trainer.critic_opt.param_groups[0]['lr']
             trainer.iteration += 1
-            if any(not np.isfinite(v) for group in (wm, metrics.get('adapter', {})) for v in group.values()):
+            if any(not np.isfinite(v) for group in (wm, metrics.get('adapter', {}), metrics.get('critic', {})) for v in group.values()):
                 raise FloatingPointError('训练指标出现非有限值')
             metrics.update(iteration=trainer.iteration, adapter_updates=trainer.num_updates,
                 env_steps=trainer.env_steps, seconds=time.time()-tick, elapsed=time.time()-start_time)
             if trainer._finished_returns:
+                metrics['real_episode_count'] = sum(value.numel() for value in trainer._finished_returns)
                 metrics['real_episode_return'] = float(torch.cat(trainer._finished_returns).mean())
                 metrics['real_episode_length'] = float(torch.cat(trainer._finished_lens).mean())
                 trainer._finished_returns, trainer._finished_lens = [], []
             with (output/'training.jsonl').open('a') as stream:
                 stream.write(json.dumps(metrics, allow_nan=False)+'\n')
-            for group in ('wm', 'adapter'):
+            for group in ('wm', 'adapter', 'critic'):
                 for key, value in metrics.get(group, {}).items():
                     trainer.writer.add_scalar(f'{group}/{key}', value, trainer.iteration)
             if trainer.iteration % 10 == 0 or trainer.num_updates == 1:
@@ -268,6 +300,30 @@ def run(settings, source):
                 save(full=True)
             elif trainer.num_updates and trainer.num_updates % 100 == 0:
                 save()
+            if settings.get('evaluation_every') and trainer.num_updates and trainer.num_updates % settings['evaluation_every'] == 0:
+                status('fixed_validation')
+                eval_dir = output/'evaluations'
+                eval_dir.mkdir(exist_ok=True)
+                report = eval_dir/f'paired_{trainer.num_updates:06d}.json'
+                with (eval_dir/f'paired_{trainer.num_updates:06d}.log').open('w') as log:
+                    result = subprocess.run([sys.executable, '-B', '-u',
+                        str(Path(__file__).resolve().parents[3]/'tools/train_noetix_reference_adapter.py'),
+                        '--source', str(source), '--evaluate-checkpoint',
+                        str(output/f'adapter_{trainer.num_updates:06d}.pt'),
+                        '--evaluation-library', settings['evaluation_library'],
+                        '--evaluation-output', str(report)], stdout=log, stderr=subprocess.STDOUT)
+                atomic_json_save(dict(adapter_updates=trainer.num_updates, exit_code=result.returncode,
+                                      report=str(report)), output/'evaluation_latest.json')
+                if result.returncode == 0:
+                    score = json.loads(report.read_text())['results']['adapter']
+                    best_path = output/'validation_best.json'
+                    previous = json.loads(best_path.read_text()) if best_path.exists() else None
+                    if previous is None or (score['completed'], score['mean_full_return']) > (previous['completed'], previous['mean_full_return']):
+                        atomic_json_save(dict(adapter_updates=trainer.num_updates, report=str(report),
+                            checkpoint=str(output/f'adapter_{trainer.num_updates:06d}.pt'),
+                            completed=score['completed'], mean_full_return=score['mean_full_return']), best_path)
+                else:
+                    print(f'固定验证失败，exit={result.returncode}，详见{eval_dir}', flush=True)
             if (output/'stop_requested.json').is_file():
                 save(full=True)
                 status('stopped_by_user')

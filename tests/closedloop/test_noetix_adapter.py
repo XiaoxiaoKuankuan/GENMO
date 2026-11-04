@@ -87,3 +87,46 @@ def test_current_source_loads_40k_configuration_without_retired_sampler_field():
     assert cfg.policy_trainer.horizon == 64
     assert cfg.policy_trainer.lr == 5e-6
     assert saved['env']['sampler']['patience_iterations'] == 5000
+
+
+def test_critic_sees_nominal_goal_and_state_anchor_gradient():
+    from gem.closedloop.noetix_adapter.critic import nominal_goal
+    packed = torch.randn(3, 2, 1534, requires_grad=True)
+    goal = nominal_goal(packed)
+    assert goal.shape == (3, 2, 606)
+    goal.sum().backward()
+    assert torch.equal(packed.grad[..., :600], torch.ones_like(packed.grad[..., :600]))
+    assert torch.equal(packed.grad[..., -6:], torch.ones_like(packed.grad[..., -6:]))
+    assert torch.count_nonzero(packed.grad[..., 600:-6]) == 0
+
+
+def test_real_td_terminal_never_bootstraps():
+    from gem.closedloop.noetix_adapter.critic import td_target
+    reward = torch.tensor([.1, -.2])
+    target = td_target(reward, torch.tensor([0., 1.]), torch.tensor([4., 100.]), .99)
+    torch.testing.assert_close(target, torch.tensor([4.06, -.2]))
+
+
+def test_adapter_decay_keeps_critic_optimizer_lr_independent():
+    from types import SimpleNamespace
+    from gem.closedloop.noetix_adapter.critic import AdapterPolicyTrainer
+    actor = torch.nn.Parameter(torch.ones(()))
+    critic = torch.nn.Parameter(torch.ones(()))
+    trainer = SimpleNamespace(opt=torch.optim.Adam([actor], lr=1e-5),
+                              critic_opt=torch.optim.Adam([critic], lr=3e-5))
+    AdapterPolicyTrainer.set_lr(trainer, 2.5e-6)
+    assert trainer.opt.param_groups[0]['lr'] == 2.5e-6
+    assert trainer.critic_opt.param_groups[0]['lr'] == 3e-5
+
+
+def test_critic_configuration_and_fifty_thousand_adapter_budget():
+    from gem.closedloop.noetix_adapter.training import make_config
+    cfg = make_config({'robot': 'bumi4340'}, dict(run_name='test', root='/tmp', seed=42,
+        library='/tmp/train.pt', horizon=64, adapter_lr=1e-5, use_critic=True,
+        critic_lr=3e-5, critic_epochs=2, critic_minibatches=4, wm_warmup=500, target_updates=50000))
+    assert cfg.policy_trainer.use_critic is True
+    assert cfg.policy_trainer.critic_lr == 3e-5
+    assert cfg.policy_trainer.critic_epochs * cfg.policy_trainer.critic_minibatches == 8
+    assert cfg.schedule.total_iterations == 50500
+    assert cfg.env.perturbations.push_enabled is False
+    assert cfg.env.perturbations.kp_range == (1., 1.)

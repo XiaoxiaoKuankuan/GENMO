@@ -1,4 +1,4 @@
-"""使用指定noetix源码和冻结40k底层Actor启动独立单卡GENMO参考Adapter训练。
+"""使用指定noetix源码和冻结底层Actor启动独立单卡GENMO参考Adapter训练。
 
 先显式加入源码包src和当前GENMO目录，避免误导入旧supermimic.bridge；可单独准备
 GENMO参考数据，或按JSON实验配置运行。每组独立模拟器、WM、Adapter和Replay。
@@ -17,10 +17,18 @@ def main():
     parser.add_argument('--config')
     parser.add_argument('--prepare-tasks')
     parser.add_argument('--destination')
+    parser.add_argument('--evaluate-checkpoint')
+    parser.add_argument('--evaluation-library')
+    parser.add_argument('--evaluation-output')
+    parser.add_argument('--max-evaluation-steps', type=int)
     args = parser.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     sys.path.insert(0, str(Path(args.source) / 'src'))
-    if args.prepare_tasks:
+    if args.evaluate_checkpoint:
+        from gem.closedloop.noetix_adapter.evaluation import evaluate
+        evaluate(args.evaluate_checkpoint, args.evaluation_library,
+                 args.evaluation_output, args.max_evaluation_steps)
+    elif args.prepare_tasks:
         from gem.closedloop.noetix_adapter.data import prepare
         print(json.dumps(prepare(args.prepare_tasks, args.destination), ensure_ascii=False, indent=2))
     else:
