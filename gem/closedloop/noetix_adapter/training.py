@@ -12,6 +12,7 @@ PT的Actor和WM。真实环境、关节顺序、执行器延迟/滤波/PD、奖�
 """
 
 from dataclasses import asdict, is_dataclass
+import copy
 import importlib.util
 import json
 import os
@@ -68,6 +69,9 @@ def verify_actor(settings, source):
 
 def make_config(saved, settings):
     from supermimic.config import TrainConfig
+    saved = copy.deepcopy(saved)
+    # 指定40k保存时尚有此采样器等待字段；当前源码已删除，且本实验关闭动作退休。
+    saved.get('env', {}).get('sampler', {}).pop('patience_iterations', None)
     cfg = fill_config(TrainConfig(), saved)
     cfg.run_name = settings['run_name']
     cfg.log_root = Path(settings['root'])

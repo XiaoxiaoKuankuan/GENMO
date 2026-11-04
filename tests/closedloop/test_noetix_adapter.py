@@ -74,3 +74,16 @@ def test_optimizer_only_changes_adapter():
     for key, value in actor.state_dict().items():
         torch.testing.assert_close(value, before[key], atol=0, rtol=0)
     assert INPUT_SIZE == 1948
+
+
+def test_current_source_loads_40k_configuration_without_retired_sampler_field():
+    from gem.closedloop.noetix_adapter.training import make_config
+    settings = dict(run_name='test', root='/tmp', seed=42, library='/tmp/train.pt',
+                    horizon=64, adapter_lr=5e-6, target_updates=30000)
+    saved = {'env': {'sampler': {'patience_iterations': 5000}}, 'robot': 'bumi4340'}
+    cfg = make_config(saved, settings)
+    assert cfg.env.sampler.retire_enabled is False
+    assert cfg.policy_trainer.use_critic is False
+    assert cfg.policy_trainer.horizon == 64
+    assert cfg.policy_trainer.lr == 5e-6
+    assert saved['env']['sampler']['patience_iterations'] == 5000
