@@ -53,6 +53,7 @@ def evaluate(checkpoint, library_path, output, max_steps=None):
         env = make_env(args, device='cuda:0')
         try:
             command = env.command_manager.get_term('motion')
+            max_step_reward = float(command.max_step_reward)
             lib = ReferenceLibrary(command.library, packed['music'])
             command.forced_frame[:] = command.library.clip_start
             obs, _ = env.reset()
@@ -86,7 +87,7 @@ def evaluate(checkpoint, library_path, output, max_steps=None):
                     global_music_group_id=task.get('global_music_group_id'),
                     completed=count >= length and not bool(failed[i] | truncated[i]),
                     physical_failure=bool(failed[i]), truncated=bool(truncated[i] | active[i]),
-                    normalized_full_return=float(reward_sum[i]) / (.1 * length),
+                    normalized_full_return=float(reward_sum[i]) / (max_step_reward * length),
                     terms={key: float(term_sum[i, j]) / max(count, 1) for j, key in enumerate(terms)}))
             results[mode] = dict(clips=rows, completed=sum(r['completed'] for r in rows),
                 failed=sum(r['physical_failure'] for r in rows),
@@ -98,6 +99,7 @@ def evaluate(checkpoint, library_path, output, max_steps=None):
     report = dict(adapter_updates=saved['adapter_updates'], checkpoint=str(checkpoint),
         checkpoint_sha256=settings['checkpoint_sha256'], library=str(library_path),
         library_sha256=digest(library_path), requested_songs=protocol.get('expected_songs', n),
+        max_step_reward=max_step_reward,
         evaluable_songs=n, reference_failures=protocol.get('reference_failures', []),
         selection_seed=protocol.get('selection_seed'),
         songs=n, max_steps=max_steps, scope='fixed_development_music_physical_pair_not_unseen_test', results=results)
