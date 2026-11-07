@@ -1,0 +1,22 @@
+{
+  "description": "用户2026-11-07指定的BUMI4340默认SuperMimic基座；Actor、WM和Critic均取同一72000轮PT。ONNX仅为Actor部署图，Adapter反传使用经数值对照的同源PyTorch Actor。后续新实验应引用此基座，不修改历史运行。",
+  "robot": "bumi4340",
+  "iteration": 72000,
+  "training_run": "bumi4340_pass4305_gpu01_plane_fast100k_20261106_145451",
+  "checkpoint": "/data0/user/liwei/GENMO_assets/pass4305_72k_50k_20261107/ckpt_0072000.pt",
+  "checkpoint_sha256": "b582c014bbcadf855bd34bc3ab9397b02dfb72431bbd8b2808a34e17524be22d",
+  "onnx": "/data0/user/liwei/GENMO_assets/pass4305_72k_50k_20261107/bumi4340_supermimic_1107_0072000.onnx",
+  "onnx_sha256": "1a61f874525b55c3791b84e7e0f0010d872278dba0a7ff13599a4817412c1063",
+  "source": "/data0/user/liwei/GENMO_assets/pass4305_72k_50k_20261107/source_noetix",
+  "original_source": "/data0/user/liwei/noetix_supermimic/releases/bumi4340_pass4305_fast_20261106_145451",
+  "local_onnx": "/home/weili/noetix_mimic-lite/exports/bumi4340_supermimic_gpu01_best_20261107/bumi4340_supermimic_1107_0072000.onnx",
+  "actor_input": [
+    750,
+    606
+  ],
+  "action_dim": 21,
+  "actor_frozen": true,
+  "wm_initialization_iteration": 72000,
+  "critic_initialization_iteration": 72000,
+  "checkpoint_resume_scope": "网络基座；Adapter、Replay及优化器重新初始化，light PT不是原SuperMimic完整续训快照"
+}

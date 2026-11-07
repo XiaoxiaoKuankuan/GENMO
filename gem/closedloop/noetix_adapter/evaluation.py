@@ -16,6 +16,7 @@ from pathlib import Path
 import torch
 
 from .model import ReferenceLibrary, ReferencePolicy
+from .data import digest
 
 
 @torch.no_grad()
@@ -47,7 +48,8 @@ def evaluate(checkpoint, library_path, output, max_steps=None):
             seed=42, anchor_obs=ec['anchor_obs'], goal_features=ec['goal_features'],
             goal_root_height=ec['goal_root_height'], self_collision=ec['self_collision'],
             self_collision_weight=ec['self_collision_weight'], self_collision_scale=ec['self_collision_scale'],
-            joint_limit_weight=ec['joint_limit_weight'], action_rate_weight=ec['action_rate_weight'])
+            joint_limit_weight=ec['joint_limit_weight'], action_rate_weight=ec['action_rate_weight'],
+            survival_weight=ec.get('survival_weight'), joint_velocity_weight=ec.get('joint_velocity_weight'))
         env = make_env(args, device='cuda:0')
         try:
             command = env.command_manager.get_term('motion')
@@ -77,7 +79,11 @@ def evaluate(checkpoint, library_path, output, max_steps=None):
             rows = []
             for i, name in enumerate(packed['names']):
                 count, length = int(steps[i]), int(planned[i])
+                task = packed['provenance'][i]['task']
                 rows.append(dict(name=name, steps=count, planned_steps=length,
+                    adapter_training_seen=task.get('adapter_training_seen'),
+                    source_split=task.get('dataset_split', task.get('split')),
+                    global_music_group_id=task.get('global_music_group_id'),
                     completed=count >= length and not bool(failed[i] | truncated[i]),
                     physical_failure=bool(failed[i]), truncated=bool(truncated[i] | active[i]),
                     normalized_full_return=float(reward_sum[i]) / (.1 * length),
@@ -87,9 +93,14 @@ def evaluate(checkpoint, library_path, output, max_steps=None):
                 mean_full_return=sum(r['normalized_full_return'] for r in rows) / n)
         finally:
             env.close()
+    protocol = (json.loads(Path(settings['evaluation_protocol']).read_text())
+                if settings.get('evaluation_protocol') else {})
     report = dict(adapter_updates=saved['adapter_updates'], checkpoint=str(checkpoint),
         checkpoint_sha256=settings['checkpoint_sha256'], library=str(library_path),
-        songs=n, max_steps=max_steps, scope='fixed_validation_music_physical_pair', results=results)
+        library_sha256=digest(library_path), requested_songs=protocol.get('expected_songs', n),
+        evaluable_songs=n, reference_failures=protocol.get('reference_failures', []),
+        selection_seed=protocol.get('selection_seed'),
+        songs=n, max_steps=max_steps, scope='fixed_development_music_physical_pair_not_unseen_test', results=results)
     atomic_json_save(report, Path(output))
     print(json.dumps({key: {k: v for k, v in value.items() if k != 'clips'}
                       for key, value in results.items()}), flush=True)

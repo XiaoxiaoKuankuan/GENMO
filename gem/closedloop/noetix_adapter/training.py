@@ -88,6 +88,10 @@ def make_config(saved, settings):
     cfg.device = 'cuda:0'
     cfg.resume = None
     cfg.amp = 'none'
+    # 本入口逐轮读取真实episode并自行原子保存完整包，不进入原生延迟统计/异步保存循环。
+    if hasattr(cfg, 'defer_metrics'):
+        cfg.defer_metrics = False
+        cfg.async_checkpoint = False
     cfg.data.library = Path(settings['library'])
     cfg.data.npz_dir = cfg.data.library.parent
     cfg.data.manifest = cfg.data.clips = cfg.data.limit = None
@@ -115,6 +119,11 @@ def make_config(saved, settings):
     cfg.policy_trainer.obs_noise = False
     cfg.policy_trainer.start_margin = settings['horizon'] + 10
     cfg.policy_trainer.compile = settings.get('compile', 'default')
+    # 加速版的compact参考预计算直接编码MotionLibrary，绕过ReferenceLibrary的
+    # 音乐和12个姿态支持点。Adapter必须逐步走扩展goal_window；其余加速保持。
+    if hasattr(cfg.policy_trainer, 'prepare_references'):
+        cfg.policy_trainer.prepare_references = False
+        cfg.policy_trainer.reference_compile = None
     cfg.schedule.warmup_env_steps = settings.get('warmup_env_steps', 64)
     cfg.schedule.wm_warmup_iterations = settings.get('wm_warmup', 100)
     cfg.schedule.updates_per_env_step = .4

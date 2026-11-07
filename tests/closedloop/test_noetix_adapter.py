@@ -145,3 +145,26 @@ def test_critic_configuration_and_fifty_thousand_adapter_budget():
     assert cfg.schedule.total_iterations == 50500
     assert cfg.env.perturbations.push_enabled is False
     assert cfg.env.perturbations.kp_range == (1., 1.)
+
+
+def test_accelerated_base_keeps_saved_physics_and_extended_adapter_reference():
+    """新基座的物理扰动/奖励必须保留，紧凑参考预计算不能丢掉音乐和姿态输入。"""
+    from gem.closedloop.noetix_adapter.training import make_config
+    from supermimic.config import TrainConfig
+    if not hasattr(TrainConfig().policy_trainer, 'prepare_references'):
+        import pytest
+        pytest.skip('本测试针对含参考预计算的加速版源码')
+    saved = dict(robot='bumi4340', env=dict(self_collision_weight=-7., joint_limit_weight=-2.,
+        action_rate_weight=-.2, survival_weight=4., joint_velocity_weight=-.0005,
+        mass_pd_context=True, perturbations=dict(torso_mass_range=[.8, 1.2],
+            kp_range=[.7, 1.2], kd_range=[.7, 1.2], push_enabled=True)),
+        policy_trainer=dict(prepare_references=True, reference_compile='default', skip_frozen_prepass=True))
+    cfg = make_config(saved, dict(run_name='test', root='/tmp', seed=42, library='/tmp/train.pt',
+        horizon=64, adapter_lr=5e-6, use_critic=True, critic_lr=1e-5, wm_warmup=500, target_updates=50000))
+    assert cfg.env.perturbations.push_enabled and cfg.env.perturbations.kd_range == [.7, 1.2]
+    assert (cfg.env.self_collision_weight, cfg.env.joint_limit_weight, cfg.env.action_rate_weight) == (-7., -2., -.2)
+    assert cfg.env.survival_weight == 4. and cfg.env.mass_pd_context
+    assert not cfg.policy_trainer.prepare_references and cfg.policy_trainer.reference_compile is None
+    assert cfg.policy_trainer.skip_frozen_prepass and cfg.policy_trainer.use_critic
+    assert not cfg.defer_metrics and not cfg.async_checkpoint
+    assert saved['policy_trainer']['prepare_references']
